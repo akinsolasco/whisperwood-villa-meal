@@ -1,5 +1,6 @@
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+
 from config import ASSETS_DIR
 from core.updater import UpdaterService
 
@@ -49,6 +50,7 @@ class SplashScreen(QtWidgets.QWidget):
             "Preparing login interface",
         ]
         self.updater = UpdaterService()
+        self.update_installer_path = None
 
         self.setFixedSize(760, 460)
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
