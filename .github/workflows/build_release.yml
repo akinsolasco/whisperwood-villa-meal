@@ -1,0 +1,33 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pillow
+
+      - name: Build exe
+        run: |
+          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVilla main.py
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhisperwoodVilla-build
+          path: dist/WhisperwoodVilla
