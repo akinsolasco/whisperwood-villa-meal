@@ -91,21 +91,6 @@ class DashboardWindow(QWidget):
     def label_style(self):
         return "font-size: 13px; font-weight: 600; color: #d7d7d7; background: transparent;"
 
-    def prompt_install_update(self, installer_path: str):
-        import subprocess
-        from PyQt6.QtWidgets import QMessageBox
-
-        reply = QMessageBox.question(
-            self,
-            "Update Ready",
-            "A new version has been downloaded. Install it now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
-            subprocess.Popen([installer_path], shell=True)
-            self.close()
-
     def build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)

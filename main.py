@@ -10,7 +10,6 @@ class AppController:
         self.splash = SplashScreen()
         self.login = LoginWindow()
         self.dashboard = None
-        self.update_installer_path = None
 
         self.splash.finished.connect(self.show_login)
         self.login.login_success.connect(self.show_dashboard)
@@ -19,16 +18,12 @@ class AppController:
         self.splash.show()
 
     def show_login(self):
-        self.update_installer_path = getattr(self.splash, "update_installer_path", None)
         self.login.show()
 
     def show_dashboard(self, user: dict):
         self.dashboard = DashboardWindow(current_user=user)
         self.dashboard.show()
         self.login.close()
-
-        if self.update_installer_path and hasattr(self.dashboard, "prompt_install_update"):
-            self.dashboard.prompt_install_update(self.update_installer_path)
 
 
 def main():

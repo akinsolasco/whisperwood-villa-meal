@@ -1,5 +1,5 @@
+import subprocess
 from PyQt6 import QtCore, QtGui, QtWidgets
-
 
 from config import ASSETS_DIR
 from core.updater import UpdaterService
@@ -40,17 +40,19 @@ class SplashScreen(QtWidgets.QWidget):
 
     def __init__(self):
         super().__init__()
+
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
         self.progress_value = 0
         self.message_index = 0
+        self.update_checked = False
+        self.updater = UpdaterService()
+
         self.messages = [
             "Initializing secure environment",
             "Loading resident management tools",
             "Checking application updates",
-            "Preparing login interface",
+            "Preparing login interface"
         ]
-        self.updater = UpdaterService()
-        self.update_installer_path = None
 
         self.setFixedSize(760, 460)
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
@@ -151,6 +153,7 @@ class SplashScreen(QtWidgets.QWidget):
 
     def start_animations(self):
         self.dot_count = 0
+
         self.dot_timer = QtCore.QTimer(self)
         self.dot_timer.timeout.connect(self.animate_loading_text)
         self.dot_timer.start(350)
@@ -166,13 +169,13 @@ class SplashScreen(QtWidgets.QWidget):
     def update_progress(self):
         self.progress_value += 1
 
-        if self.progress_value == 40:
-            result = self.updater.check_for_updates()
-            self.boot_log.setText(result["message"])
-
         if self.message_index < len(self.messages) and self.progress_value in (10, 30, 50, 70):
             self.subtitle.setText(self.messages[self.message_index])
             self.message_index += 1
+
+        if self.progress_value == 45 and not self.update_checked:
+            self.update_checked = True
+            self.handle_update_check()
 
         self.progress.setValue(self.progress_value)
         self.percent.setText(f"{self.progress_value}%")
@@ -181,8 +184,45 @@ class SplashScreen(QtWidgets.QWidget):
             self.dot_timer.stop()
             self.progress_timer.stop()
             self.loading_label.setText("Ready")
-            self.boot_log.setText("Startup complete")
-            QtCore.QTimer.singleShot(400, self.finish)
+            QtCore.QTimer.singleShot(300, self.finish)
+
+    def handle_update_check(self):
+        self.boot_log.setText("Checking for updates...")
+        QtWidgets.QApplication.processEvents()
+
+        result = self.updater.check_for_updates()
+
+        if not result.get("enabled", True):
+            self.boot_log.setText("Updater not enabled")
+            return
+
+        if not result["has_update"]:
+            self.boot_log.setText(result["message"])
+            return
+
+        self.boot_log.setText(f"Update found: v{result['latest_version']}")
+        QtWidgets.QApplication.processEvents()
+
+        download = self.updater.download_update()
+
+        if not download["success"]:
+            self.boot_log.setText(download["message"])
+            return
+
+        self.boot_log.setText("Update downloaded successfully")
+        QtWidgets.QApplication.processEvents()
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Update Available",
+            f"A new version (v{result['latest_version']}) has been downloaded.\n\n"
+            "Install it now before continuing to login?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            subprocess.Popen([download["path"]], shell=True)
+            QtWidgets.QApplication.quit()
 
     def finish(self):
         self.finished.emit()
