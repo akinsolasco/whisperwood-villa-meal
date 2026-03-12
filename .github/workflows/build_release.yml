@@ -1,8 +1,11 @@
-name: Build Windows Release
+name: Build and Release Windows App
 
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -12,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -30,7 +33,7 @@ jobs:
             Write-Error "Missing assets/app_icon.ico"
           }
 
-      - name: Build exe
+      - name: Build app with PyInstaller
         run: |
           pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVilla --icon assets/app_icon.ico main.py
 
@@ -44,14 +47,16 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 
-      - name: Upload app build
-        uses: actions/upload-artifact@v4
-        with:
-          name: WhisperwoodVilla-build
-          path: dist/WhisperwoodVilla
-
-      - name: Upload installer
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: WhisperwoodVilla-installer
           path: dist_installer/WhisperwoodVillaSetup.exe
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist_installer/WhisperwoodVillaSetup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
