@@ -21,7 +21,9 @@ class UpdaterService:
         v = v.lower().replace("v", "").strip()
         return tuple(int(x) for x in v.split("."))
 
-    def check_for_updates(self):
+    def check_for_updates(self, latest_version=None):
+        print("Installed APP_VERSION:", APP_VERSION)
+        print("Latest GitHub version:", latest_version)
         try:
             r = self.session.get(self.api_url, timeout=6)
             r.raise_for_status()
