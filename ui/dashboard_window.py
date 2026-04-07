@@ -1,13 +1,16 @@
 import os
 import re
+import json
 from typing import Optional, List, Dict, Any
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QCursor, QPixmap, QGuiApplication
+from PyQt6.QtGui import QCursor, QPixmap, QGuiApplication, QTextDocument, QPageSize
+from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
-    QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView
+    QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QDialog, QHBoxLayout
 )
 
 from config import DEFAULT_PI_BASE_URL, ASSETS_DIR
@@ -27,6 +30,7 @@ class DashboardWindow(QWidget):
         self.drag_pos = None
         self.selected_resident_id: Optional[int] = None
         self.selected_image_path: Optional[str] = None
+        self.selected_source_document: Optional[str] = None
         self.rules: List[HighlightRule] = []
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
 
@@ -46,6 +50,7 @@ class DashboardWindow(QWidget):
         self.refresh_devices()
         self.load_residents()
         self.load_recent_logs()
+        self.refresh_dashboard_summary()
 
     # ---------------------------- styles ----------------------------
 
@@ -349,6 +354,24 @@ class DashboardWindow(QWidget):
 
         self.pages.setCurrentWidget(self.page_dashboard)
         self.set_active_menu(self.btn_menu_dashboard)
+        self.min_btn.setText("-")
+        self.max_btn.setText("[]")
+        self.close_btn.setText("X")
+        self.position_window_controls()
+
+    def toggle_max_restore(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self.max_btn.setText("[]")
+
+    def position_window_controls(self):
+        right = self.container.width() - 48
+        self.close_btn.move(right, 24)
+        self.max_btn.move(right - 45, 24)
+        self.min_btn.move(right - 90, 24)
+        self.base_url_edit.setGeometry(max(820, right - 430), 24, 320, 42)
 
     # ---------------------------- dashboard page ----------------------------
 
@@ -488,27 +511,58 @@ class DashboardWindow(QWidget):
         self.lbl_note.setStyleSheet(self.label_style())
 
         self.txt_note = QTextEdit(self.form_panel)
-        self.txt_note.setGeometry(22, 452, 376, 80)
+        self.txt_note.setGeometry(22, 452, 376, 58)
         self.txt_note.setStyleSheet(self.input_style())
 
         self.lbl_drinks = QLabel("Drinks", self.form_panel)
-        self.lbl_drinks.setGeometry(22, 543, 60, 18)
+        self.lbl_drinks.setGeometry(22, 520, 60, 18)
         self.lbl_drinks.setStyleSheet(self.label_style())
 
         self.txt_drinks = QLineEdit(self.form_panel)
-        self.txt_drinks.setGeometry(22, 565, 376, 42)
+        self.txt_drinks.setGeometry(22, 542, 180, 42)
         self.txt_drinks.setStyleSheet(self.input_style())
 
+        self.lbl_schedule = QLabel("Schedule", self.form_panel)
+        self.lbl_schedule.setGeometry(218, 520, 80, 18)
+        self.lbl_schedule.setStyleSheet(self.label_style())
+
+        self.txt_schedule = QLineEdit(self.form_panel)
+        self.txt_schedule.setGeometry(218, 542, 180, 42)
+        self.txt_schedule.setPlaceholderText("Meals, care, reminders")
+        self.txt_schedule.setStyleSheet(self.input_style())
+
+        self.lbl_source = QLabel("Source document", self.form_panel)
+        self.lbl_source.setGeometry(22, 594, 120, 18)
+        self.lbl_source.setStyleSheet(self.label_style())
+
+        self.btn_attach_source = QPushButton("Attach Document", self.form_panel)
+        self.btn_attach_source.setGeometry(22, 616, 150, 38)
+        self.btn_attach_source.setStyleSheet(self.secondary_btn_style())
+
+        self.source_doc_label = QLabel("No source document attached", self.form_panel)
+        self.source_doc_label.setGeometry(182, 616, 216, 38)
+        self.source_doc_label.setWordWrap(True)
+        self.source_doc_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
+
+        self.chk_safety_review = QCheckBox("Needs safety review", self.form_panel)
+        self.chk_safety_review.setGeometry(22, 666, 160, 24)
+        self.chk_safety_review.setStyleSheet(self.chk_active.styleSheet())
+
+        self.txt_safety_review = QLineEdit(self.form_panel)
+        self.txt_safety_review.setGeometry(190, 658, 208, 42)
+        self.txt_safety_review.setPlaceholderText("What to check later")
+        self.txt_safety_review.setStyleSheet(self.input_style())
+
         self.btn_new_resident = QPushButton("New Resident", self.form_panel)
-        self.btn_new_resident.setGeometry(22, 630, 120, 44)
+        self.btn_new_resident.setGeometry(22, 724, 120, 44)
         self.btn_new_resident.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_resident = QPushButton("Save Resident", self.form_panel)
-        self.btn_save_resident.setGeometry(152, 630, 120, 44)
+        self.btn_save_resident.setGeometry(152, 724, 120, 44)
         self.btn_save_resident.setStyleSheet(self.primary_btn_style())
 
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
-        self.btn_clear_fields.setGeometry(282, 630, 116, 44)
+        self.btn_clear_fields.setGeometry(282, 724, 116, 44)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
 
         self.preview_panel = QFrame(page)
@@ -612,6 +666,39 @@ class DashboardWindow(QWidget):
         self.lcd_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lcd_note.setWordWrap(True)
         self.lcd_note.setStyleSheet("color: #eef2f7; font-size: 13px;")
+
+        self.overview_panel = QFrame(self.preview_panel)
+        self.overview_panel.setGeometry(22, 500, 394, 260)
+        self.overview_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1a1a1a;
+                border-radius: 16px;
+                border: 1px solid #262626;
+            }
+        """)
+
+        overview_title = QLabel("Overall Dashboard", self.overview_panel)
+        overview_title.setGeometry(16, 14, 180, 22)
+        overview_title.setStyleSheet("font-size: 16px; font-weight: 700; color: white;")
+
+        self.summary_labels = {}
+        summary_items = [
+            ("active_residents", "Active residents", 52),
+            ("online_devices", "Online devices", 90),
+            ("paired_devices", "Paired devices", 128),
+            ("safety_reviews", "Safety reviews", 166),
+            ("failed_updates", "Failed updates", 204),
+        ]
+        for key, title_text, y in summary_items:
+            label = QLabel(f"{title_text}: 0", self.overview_panel)
+            label.setGeometry(18, y, 250, 24)
+            label.setStyleSheet("font-size: 13px; color: #dedede;")
+            self.summary_labels[key] = label
+
+        self.summary_labels["database_mode"] = QLabel("Data store: checking", self.overview_panel)
+        self.summary_labels["database_mode"].setGeometry(210, 14, 160, 22)
+        self.summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #e2ab09;")
 
         return page
 
@@ -947,7 +1034,7 @@ class DashboardWindow(QWidget):
         lbl.setStyleSheet("font-size: 18px; font-weight: 700;")
 
         self.logs_table = QTableWidget(self.logs_panel)
-        self.logs_table.setGeometry(18, 58, 1180, 728)
+        self.logs_table.setGeometry(18, 100, 1180, 686)
         self.logs_table.setColumnCount(7)
         self.logs_table.setHorizontalHeaderLabels(["Date/Time", "Action", "Resident UID", "Device", "Pushed By", "Success", "Message"])
         self.logs_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -970,6 +1057,19 @@ class DashboardWindow(QWidget):
         """)
         self.logs_table.verticalHeader().setVisible(False)
         self.logs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.logs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+
+        self.btn_view_log = QPushButton("View Full Log", self.logs_panel)
+        self.btn_view_log.setGeometry(930, 18, 130, 42)
+        self.btn_view_log.setStyleSheet(self.secondary_btn_style())
+
+        self.btn_export_logs_pdf = QPushButton("Export Logs PDF", self.logs_panel)
+        self.btn_export_logs_pdf.setGeometry(1070, 18, 128, 42)
+        self.btn_export_logs_pdf.setStyleSheet(self.primary_btn_style())
+
+        hint = QLabel("Double-click a row to view the full log.", self.logs_panel)
+        hint.setGeometry(22, 62, 360, 24)
+        hint.setStyleSheet("font-size: 12px; color: #a7a7a7;")
 
         return page
 
@@ -991,6 +1091,7 @@ class DashboardWindow(QWidget):
         self.btn_new_resident.clicked.connect(self.new_resident)
         self.btn_save_resident.clicked.connect(self.save_resident)
         self.btn_clear_fields.clicked.connect(self.clear_form)
+        self.btn_attach_source.clicked.connect(self.attach_source_document)
 
         self.search_resident.textChanged.connect(self.filter_residents)
         self.resident_list.itemClicked.connect(self.on_resident_selected)
@@ -1012,8 +1113,11 @@ class DashboardWindow(QWidget):
         self.btn_choose_image.clicked.connect(self.choose_image)
         self.btn_send_image.clicked.connect(self.send_image)
         self.btn_clear_image.clicked.connect(self.clear_lcd_image)
+        self.logs_table.cellDoubleClicked.connect(lambda row, _col: self.show_log_detail(row))
+        self.btn_view_log.clicked.connect(self.show_selected_log_detail)
+        self.btn_export_logs_pdf.clicked.connect(self.export_logs_pdf)
 
-        for w in [self.txt_name, self.txt_room, self.txt_diet, self.txt_allergies, self.txt_drinks]:
+        for w in [self.txt_name, self.txt_room, self.txt_diet, self.txt_allergies, self.txt_drinks, self.txt_schedule]:
             w.textChanged.connect(self.refresh_token_list)
 
         self.txt_note.textChanged.connect(self.refresh_token_list)
@@ -1084,6 +1188,10 @@ class DashboardWindow(QWidget):
             "allergies": self.txt_allergies.text().strip(),
             "note": self.txt_note.toPlainText().strip(),
             "drinks": self.txt_drinks.text().strip(),
+            "schedule": self.txt_schedule.text().strip(),
+            "source_document": self.selected_source_document,
+            "safety_review_note": self.txt_safety_review.text().strip(),
+            "needs_safety_review": self.chk_safety_review.isChecked(),
             "active": self.chk_active.isChecked(),
         }
 
@@ -1092,6 +1200,18 @@ class DashboardWindow(QWidget):
 
     def show_info(self, title, text):
         QMessageBox.information(self, title, text)
+
+    def attach_source_document(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Attach source document",
+            "",
+            "Documents (*.pdf *.doc *.docx *.txt *.png *.jpg *.jpeg);;All Files (*)"
+        )
+        if not path:
+            return
+        self.selected_source_document = path
+        self.source_doc_label.setText(os.path.basename(path))
 
     # ---------------------------- resident management ----------------------------
 
@@ -1110,12 +1230,17 @@ class DashboardWindow(QWidget):
         self.txt_allergies.clear()
         self.txt_note.clear()
         self.txt_drinks.clear()
+        self.txt_schedule.clear()
+        self.txt_safety_review.clear()
 
         self.chk_active.setChecked(True)
+        self.chk_safety_review.setChecked(False)
         self.cmb_alert.setCurrentIndex(0)
 
         self.selected_image_path = None
         self.image_path_label.setText("No image selected")
+        self.selected_source_document = None
+        self.source_doc_label.setText("No source document attached")
 
         self.rules.clear()
         self.rules_list.clear()
@@ -1144,6 +1269,21 @@ class DashboardWindow(QWidget):
             item = self.resident_list.item(i)
             item.setHidden(query not in item.text().lower())
 
+    def refresh_dashboard_summary(self):
+        summary = self.db.get_dashboard_summary()
+        titles = {
+            "active_residents": "Active residents",
+            "online_devices": "Online devices",
+            "paired_devices": "Paired devices",
+            "safety_reviews": "Safety reviews",
+            "failed_updates": "Failed updates",
+        }
+        for key, title in titles.items():
+            if key in self.summary_labels:
+                self.summary_labels[key].setText(f"{title}: {summary.get(key, 0)}")
+        mode = "local fallback" if summary.get("database_mode") == "sqlite" else "gateway database"
+        self.summary_labels["database_mode"].setText(f"Data store: {mode}")
+
     def on_resident_selected(self, item):
         resident_id = item.data(Qt.ItemDataRole.UserRole)
         row = self.db.get_resident(resident_id)
@@ -1158,6 +1298,11 @@ class DashboardWindow(QWidget):
         self.txt_allergies.setText(row.get("allergies") or "")
         self.txt_note.setPlainText(row.get("note") or "")
         self.txt_drinks.setText(row.get("drinks") or "")
+        self.txt_schedule.setText(row.get("schedule") or "")
+        self.txt_safety_review.setText(row.get("safety_review_note") or "")
+        self.selected_source_document = row.get("source_document") or None
+        self.source_doc_label.setText(os.path.basename(self.selected_source_document) if self.selected_source_document else "No source document attached")
+        self.chk_safety_review.setChecked(bool(row.get("needs_safety_review", False)))
         self.chk_active.setChecked(bool(row.get("active", True)))
 
         self.update_preview()
@@ -1206,10 +1351,43 @@ class DashboardWindow(QWidget):
             self.load_residents()
             self.load_recent_logs()
             self.load_pairing_views()
+            self.refresh_dashboard_summary()
+            self.send_saved_resident_if_paired()
             self.show_info("Saved", message)
 
         except Exception as e:
             self.show_error("Save failed", str(e))
+
+    def send_saved_resident_if_paired(self):
+        row = self.db.get_resident(self.selected_resident_id)
+        device_id = row.get("paired_device_id") if row else None
+        if not device_id:
+            return
+
+        payload = self.build_gateway_payload(device_id)
+        try:
+            result = self.gateway.send_text(self.base_url(), payload)
+            success = result["status_code"] == 200
+            message = "Saved resident sent to paired device" if success else f"Auto-send failed ({result['status_code']})"
+            response = result["body"]
+        except Exception as e:
+            success = False
+            message = f"Auto-send queued for later review: {e}"
+            response = {"error": str(e)}
+
+        self.db.log_update(
+            "auto_send_after_save",
+            self.selected_resident_id,
+            self.current_resident_uid(),
+            device_id,
+            self.current_user.get("id"),
+            self.current_user.get("username"),
+            payload,
+            response,
+            success,
+            message
+        )
+        self.load_recent_logs()
 
     # ---------------------------- devices / pairing ----------------------------
 
@@ -1251,12 +1429,14 @@ class DashboardWindow(QWidget):
                 f"Failed to refresh devices: {e}"
             )
             self.load_recent_logs()
+            self.refresh_dashboard_summary()
             return
 
         self.load_update_targets()
         self.load_pairing_views()
         self.load_residents()
         self.load_recent_logs()
+        self.refresh_dashboard_summary()
 
     def load_update_targets(self):
         self.upd_target.clear()
@@ -1551,6 +1731,7 @@ class DashboardWindow(QWidget):
         room = self.txt_room.text().strip()
         note = self.txt_note.toPlainText().strip()
         drinks = self.txt_drinks.text().strip()
+        schedule = self.txt_schedule.text().strip()
 
         if name:
             payload["name"] = name
@@ -1560,6 +1741,8 @@ class DashboardWindow(QWidget):
             payload["note"] = note
         if drinks:
             payload["drinks"] = drinks
+        if schedule:
+            payload["schedule"] = schedule
 
         diet = self.txt_diet.text().strip()
         allergies = self.txt_allergies.text().strip()
@@ -1713,7 +1896,7 @@ class DashboardWindow(QWidget):
         self.logs_table.setRowCount(len(rows))
 
         for r, row in enumerate(rows):
-            created = row["created_at"].strftime("%Y-%m-%d %H:%M:%S") if row["created_at"] else ""
+            created = self.db.format_timestamp(row.get("created_at"))
             values = [
                 created,
                 row.get("action_type") or "",
@@ -1724,7 +1907,112 @@ class DashboardWindow(QWidget):
                 row.get("message") or "",
             ]
             for c, value in enumerate(values):
-                self.logs_table.setItem(r, c, QTableWidgetItem(str(value)))
+                item = QTableWidgetItem(str(value))
+                item.setData(Qt.ItemDataRole.UserRole, row.get("id"))
+                self.logs_table.setItem(r, c, item)
+
+    def selected_log_id(self):
+        row = self.logs_table.currentRow()
+        if row < 0:
+            return None
+        item = self.logs_table.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def show_selected_log_detail(self):
+        row = self.logs_table.currentRow()
+        if row < 0:
+            self.show_error("No log selected", "Select a log row first.")
+            return
+        self.show_log_detail(row)
+
+    def show_log_detail(self, row):
+        item = self.logs_table.item(row, 0)
+        log_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not log_id:
+            return
+        log = self.db.get_log(log_id)
+        if not log:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Full Activity Log")
+        dialog.resize(780, 620)
+        layout = QVBoxLayout(dialog)
+
+        body = QTextEdit(dialog)
+        body.setReadOnly(True)
+        body.setStyleSheet(self.input_style())
+        body.setPlainText(self.format_log_detail(log))
+        layout.addWidget(body)
+
+        buttons = QHBoxLayout()
+        export_btn = QPushButton("Export This Log PDF", dialog)
+        export_btn.setStyleSheet(self.primary_btn_style())
+        close_btn = QPushButton("Close", dialog)
+        close_btn.setStyleSheet(self.secondary_btn_style())
+        buttons.addWidget(export_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        export_btn.clicked.connect(lambda: self.export_log_pdf(log))
+        close_btn.clicked.connect(dialog.accept)
+        dialog.exec()
+
+    def format_log_detail(self, log):
+        return "\n".join([
+            f"Date/Time: {self.db.format_timestamp(log.get('created_at'))}",
+            f"Action: {log.get('action_type') or ''}",
+            f"Resident UID: {log.get('resident_uid') or ''}",
+            f"Device: {log.get('device_id') or ''}",
+            f"Pushed By: {log.get('pushed_by_username') or ''}",
+            f"Success: {'Yes' if log.get('success') else 'No'}",
+            f"Message: {log.get('message') or ''}",
+            "",
+            "Payload:",
+            self.pretty_json(log.get("payload_json")),
+            "",
+            "Response:",
+            self.pretty_json(log.get("response_json")),
+        ])
+
+    def pretty_json(self, value):
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            return json.dumps(value, indent=2, default=str)
+        try:
+            return json.dumps(json.loads(value), indent=2)
+        except Exception:
+            return value
+
+    def export_log_pdf(self, log):
+        path, _ = QFileDialog.getSaveFileName(self, "Export log PDF", "activity-log.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        self.write_pdf(path, self.format_log_detail(log))
+        self.show_info("Exported", f"Log PDF saved to {path}")
+
+    def export_logs_pdf(self):
+        rows = self.db.get_recent_logs(limit=200)
+        path, _ = QFileDialog.getSaveFileName(self, "Export logs PDF", "activity-logs.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        text = "\n\n".join(self.format_log_detail(row) for row in rows)
+        self.write_pdf(path, text or "No logs available.")
+        self.show_info("Exported", f"Logs PDF saved to {path}")
+
+    def write_pdf(self, path, text):
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.Letter))
+        printer.setOutputFileName(path)
+        doc = QTextDocument()
+        doc.setPlainText(text)
+        doc.print(printer)
 
     # ---------------------------- timers / window events ----------------------------
 
@@ -1747,6 +2035,11 @@ class DashboardWindow(QWidget):
     def mouseReleaseEvent(self, event):
         self.drag_pos = None
         event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "close_btn"):
+            self.position_window_controls()
 
     def closeEvent(self, event):
         try:
