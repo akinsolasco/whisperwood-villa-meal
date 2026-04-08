@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea
 )
 
 from config import DEFAULT_PI_BASE_URL, ASSETS_DIR
@@ -395,6 +395,49 @@ class DashboardWindow(QWidget):
             }
         """
 
+    def wrap_scroll_page(self, content: QWidget, min_height: int):
+        content.setMinimumSize(1218, min_height)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: #121212;
+                width: 10px;
+                border-radius: 5px;
+                margin: 6px 2px 6px 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #2d2d2d;
+                border-radius: 5px;
+                min-height: 28px;
+            }
+            QScrollBar:horizontal {
+                background: #121212;
+                height: 10px;
+                border-radius: 5px;
+                margin: 2px 6px 2px 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #2d2d2d;
+                border-radius: 5px;
+                min-width: 28px;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0px;
+                height: 0px;
+            }
+        """)
+        scroll.setWidget(content)
+        return scroll
+
     # ---------------------------- dashboard page ----------------------------
 
     def build_overview_page(self):
@@ -481,7 +524,7 @@ class DashboardWindow(QWidget):
         self.overview_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.overview_device_table.setStyleSheet(self.table_style())
 
-        return page
+        return self.wrap_scroll_page(page, 820)
 
     def build_dashboard_page(self):
         page = QWidget()
@@ -772,7 +815,7 @@ class DashboardWindow(QWidget):
         self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
         self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #e2ab09;")
 
-        return page
+        return self.wrap_scroll_page(page, 860)
 
     # ---------------------------- pairing page ----------------------------
 
@@ -861,7 +904,7 @@ class DashboardWindow(QWidget):
         self.pair_table.verticalHeader().setVisible(False)
         self.pair_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
-        return page
+        return self.wrap_scroll_page(page, 860)
 
     # ---------------------------- updates page ----------------------------
 
@@ -1115,7 +1158,7 @@ class DashboardWindow(QWidget):
         self.schedule_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.schedule_table.setStyleSheet(self.table_style())
 
-        return page
+        return self.wrap_scroll_page(page, 820)
 
     # ---------------------------- logs page ----------------------------
 
@@ -1169,7 +1212,7 @@ class DashboardWindow(QWidget):
         hint.setGeometry(22, 62, 360, 24)
         hint.setStyleSheet("font-size: 12px; color: #a7a7a7;")
 
-        return page
+        return self.wrap_scroll_page(page, 860)
 
     # ---------------------------- events ----------------------------
 
