@@ -28,6 +28,8 @@ class DashboardWindow(QWidget):
         self.gateway = GatewayClient()
 
         self.drag_pos = None
+        self.normal_geometry = None
+        self.is_custom_maximized = False
         self.selected_resident_id: Optional[int] = None
         self.selected_image_path: Optional[str] = None
         self.selected_source_document: Optional[str] = None
@@ -35,8 +37,9 @@ class DashboardWindow(QWidget):
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
 
         self.setWindowTitle("Whisperwood Villa Dashboard")
-        self.setMinimumSize(1280, 800)
+        self.setMinimumSize(1120, 700)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setStyleSheet("QLabel { border: none; background: transparent; }")
 
         self.build_ui()
         self.bind_events()
@@ -109,11 +112,12 @@ class DashboardWindow(QWidget):
 
     def fit_to_screen(self):
         screen = QGuiApplication.primaryScreen().availableGeometry()
-        width = min(1520, int(screen.width() * 0.96))
-        height = min(920, int(screen.height() * 0.94))
+        width = min(1520, int(screen.width() * 0.97))
+        height = min(920, int(screen.height() * 0.96))
         x = screen.x() + (screen.width() - width) // 2
         y = screen.y() + (screen.height() - height) // 2
         self.setGeometry(x, y, width, height)
+        self.is_custom_maximized = False
 
     # ---------------------------- build ui ----------------------------
 
@@ -123,31 +127,16 @@ class DashboardWindow(QWidget):
 
         self.container = QFrame()
         self.container.setStyleSheet("""
-            QFrame {
-                background-color: #0a0a0a;
-                border-radius: 28px;
-                color: white;
-            }
-            QWidget QLabel {
-                border: none;
-                background: transparent;
-            }
-            QLabel {
-                border: none;
-                background: transparent;
-            }
+            background-color: #0a0a0a;
+            border-radius: 28px;
+            color: white;
         """)
         root.addWidget(self.container)
 
         # Sidebar
         self.sidebar = QFrame(self.container)
         self.sidebar.setGeometry(12, 12, 245, 896)
-        self.sidebar.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-            }
-        """)
+        self.sidebar.setStyleSheet("background-color: #121212; border-radius: 22px;")
 
         self.logo = QLabel(self.sidebar)
         self.logo.setGeometry(22, 20, 200, 82)
@@ -166,12 +155,7 @@ class DashboardWindow(QWidget):
 
         self.user_card = QFrame(self.sidebar)
         self.user_card.setGeometry(18, 115, 208, 88)
-        self.user_card.setStyleSheet("""
-            QFrame {
-                background-color: #1a1a1a;
-                border-radius: 16px;
-            }
-        """)
+        self.user_card.setStyleSheet("background-color: #1a1a1a; border-radius: 16px;")
 
         self.user_avatar = QLabel(self.user_card)
         self.user_avatar.setGeometry(12, 20, 48, 48)
@@ -369,19 +353,25 @@ class DashboardWindow(QWidget):
         self.position_window_controls()
 
     def toggle_max_restore(self):
-        if self.isMaximized():
-            self.showNormal()
+        if self.is_custom_maximized:
+            if self.normal_geometry is not None:
+                self.setGeometry(self.normal_geometry)
+            self.is_custom_maximized = False
         else:
-            self.showMaximized()
+            self.normal_geometry = self.geometry()
+            available = QGuiApplication.primaryScreen().availableGeometry()
+            self.setGeometry(available)
+            self.is_custom_maximized = True
         self.max_btn.setText("[]")
 
     def position_window_controls(self):
-        right = max(1220, self.container.width() - 48)
+        self.sidebar.setGeometry(12, 12, 245, max(640, self.container.height() - 24))
+        right = self.container.width() - 48
         self.close_btn.move(right, 24)
         self.max_btn.move(right - 45, 24)
         self.min_btn.move(right - 90, 24)
-        self.base_url_edit.setGeometry(min(860, right - 470), 24, 330, 42)
-        self.pages.setGeometry(280, 95, max(980, self.container.width() - 302), max(690, self.container.height() - 115))
+        self.base_url_edit.setGeometry(max(650, right - 470), 24, 330, 42)
+        self.pages.setGeometry(280, 95, self.container.width() - 302, self.container.height() - 115)
 
     def card_style(self):
         return "background-color: #121212; border-radius: 18px; border: 1px solid #242424;"
@@ -413,13 +403,7 @@ class DashboardWindow(QWidget):
 
         hero = QFrame(page)
         hero.setGeometry(0, 0, 1218, 145)
-        hero.setStyleSheet("""
-            QFrame {
-                background-color: #101010;
-                border-radius: 22px;
-                border: 1px solid #273447;
-            }
-        """)
+        hero.setStyleSheet("background-color: #101010; border-radius: 22px; border: 1px solid #273447;")
 
         title = QLabel("Care operations dashboard", hero)
         title.setGeometry(24, 22, 420, 32)
@@ -505,13 +489,7 @@ class DashboardWindow(QWidget):
 
         self.residents_panel = QFrame(page)
         self.residents_panel.setGeometry(0, 0, 330, 805)
-        self.residents_panel.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.residents_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Residents", self.residents_panel)
         title.setGeometry(20, 18, 120, 24)
@@ -546,13 +524,7 @@ class DashboardWindow(QWidget):
 
         self.form_panel = QFrame(page)
         self.form_panel.setGeometry(345, 0, 420, 805)
-        self.form_panel.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.form_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.form_heading = QLabel("Resident Information", self.form_panel)
         self.form_heading.setGeometry(22, 18, 180, 24)
@@ -686,13 +658,7 @@ class DashboardWindow(QWidget):
 
         self.preview_panel = QFrame(page)
         self.preview_panel.setGeometry(780, 0, 438, 805)
-        self.preview_panel.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.preview_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.preview_heading = QLabel("Live Preview", self.preview_panel)
         self.preview_heading.setGeometry(22, 18, 120, 24)
@@ -704,12 +670,7 @@ class DashboardWindow(QWidget):
 
         self.epaper_card = QFrame(self.preview_panel)
         self.epaper_card.setGeometry(22, 60, 394, 185)
-        self.epaper_card.setStyleSheet("""
-            QFrame {
-                background-color: #efefef;
-                border-radius: 18px;
-            }
-        """)
+        self.epaper_card.setStyleSheet("background-color: #efefef; border-radius: 18px;")
 
         ep_title = QLabel("E-Paper Preview", self.epaper_card)
         ep_title.setGeometry(16, 12, 120, 18)
@@ -738,13 +699,7 @@ class DashboardWindow(QWidget):
 
         self.lcd_card = QFrame(self.preview_panel)
         self.lcd_card.setGeometry(22, 268, 394, 210)
-        self.lcd_card.setStyleSheet("""
-            QFrame {
-                background-color: #0a1831;
-                border-radius: 18px;
-                border: 2px solid #20457b;
-            }
-        """)
+        self.lcd_card.setStyleSheet("background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
 
         lcd_title = QLabel("LCD Preview", self.lcd_card)
         lcd_title.setGeometry(16, 12, 100, 18)
@@ -792,13 +747,7 @@ class DashboardWindow(QWidget):
 
         self.overview_panel = QFrame(self.preview_panel)
         self.overview_panel.setGeometry(22, 500, 394, 260)
-        self.overview_panel.setStyleSheet("""
-            QFrame {
-                background-color: #1a1a1a;
-                border-radius: 16px;
-                border: 1px solid #262626;
-            }
-        """)
+        self.overview_panel.setStyleSheet("background-color: #1a1a1a; border-radius: 16px; border: 1px solid #262626;")
 
         overview_title = QLabel("Overall Dashboard", self.overview_panel)
         overview_title.setGeometry(16, 14, 180, 22)
@@ -833,13 +782,7 @@ class DashboardWindow(QWidget):
 
         self.pair_left = QFrame(page)
         self.pair_left.setGeometry(0, 0, 590, 805)
-        self.pair_left.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.pair_left.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Resident Pairing / Unpairing", self.pair_left)
         title.setGeometry(22, 18, 240, 24)
@@ -891,13 +834,7 @@ class DashboardWindow(QWidget):
 
         self.pair_right = QFrame(page)
         self.pair_right.setGeometry(610, 0, 608, 805)
-        self.pair_right.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.pair_right.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.pair_table = QTableWidget(self.pair_right)
         self.pair_table.setGeometry(18, 18, 572, 768)
@@ -934,13 +871,7 @@ class DashboardWindow(QWidget):
 
         self.upd_left = QFrame(page)
         self.upd_left.setGeometry(0, 0, 540, 805)
-        self.upd_left.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.upd_left.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("LCD Schedule", self.upd_left)
         title.setGeometry(22, 18, 180, 24)
@@ -1054,22 +985,11 @@ class DashboardWindow(QWidget):
 
         self.upd_right = QFrame(page)
         self.upd_right.setGeometry(560, 0, 658, 805)
-        self.upd_right.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.upd_right.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.upd_epaper_card = QFrame(self.upd_right)
         self.upd_epaper_card.setGeometry(22, 22, 614, 220)
-        self.upd_epaper_card.setStyleSheet("""
-            QFrame {
-                background-color: #efefef;
-                border-radius: 18px;
-            }
-        """)
+        self.upd_epaper_card.setStyleSheet("background-color: #efefef; border-radius: 18px;")
 
         ep_title = QLabel("E-Paper Preview", self.upd_epaper_card)
         ep_title.setGeometry(18, 14, 120, 18)
@@ -1098,13 +1018,7 @@ class DashboardWindow(QWidget):
 
         self.upd_lcd_card = QFrame(self.upd_right)
         self.upd_lcd_card.setGeometry(22, 252, 614, 210)
-        self.upd_lcd_card.setStyleSheet("""
-            QFrame {
-                background-color: #0a1831;
-                border-radius: 18px;
-                border: 2px solid #20457b;
-            }
-        """)
+        self.upd_lcd_card.setStyleSheet("background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
 
         lcd_title = QLabel("LCD Preview", self.upd_lcd_card)
         lcd_title.setGeometry(18, 14, 120, 18)
@@ -1211,13 +1125,7 @@ class DashboardWindow(QWidget):
 
         self.logs_panel = QFrame(page)
         self.logs_panel.setGeometry(0, 0, 1218, 805)
-        self.logs_panel.setStyleSheet("""
-            QFrame {
-                background-color: #121212;
-                border-radius: 22px;
-                border: 1px solid #1f1f1f;
-            }
-        """)
+        self.logs_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         lbl = QLabel("Activity Logs", self.logs_panel)
         lbl.setGeometry(22, 18, 160, 24)
@@ -2471,7 +2379,7 @@ class DashboardWindow(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_pos is not None and not self.isMaximized():
+        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_pos is not None and not self.is_custom_maximized:
             self.move(event.globalPosition().toPoint() - self.drag_pos)
             event.accept()
 
