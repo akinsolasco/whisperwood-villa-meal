@@ -25,6 +25,7 @@ class GatewayClient:
                 pending_seq=d.get("pending_seq"),
                 pending_img_seq=d.get("pending_img_seq"),
                 last_seen_s=int(d.get("last_seen_s", 9999)),
+                battery_level=d.get("battery_level"),
             ))
         return devices
 
@@ -48,6 +49,23 @@ class GatewayClient:
                 files=files,
                 timeout=30,
             )
+        try:
+            body = r.json()
+        except Exception:
+            body = {"raw": r.text}
+        return {"status_code": r.status_code, "body": body}
+
+    def send_lcd_command(self, base_url: str, device_id: str, command: str) -> Dict[str, Any]:
+        payload = {"id": device_id, "command": command}
+        r = self.session.post(f"{base_url.rstrip('/')}/lcd", json=payload, timeout=8)
+        try:
+            body = r.json()
+        except Exception:
+            body = {"raw": r.text}
+        return {"status_code": r.status_code, "body": body}
+
+    def save_schedule(self, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        r = self.session.post(f"{base_url.rstrip('/')}/schedule", json=payload, timeout=8)
         try:
             body = r.json()
         except Exception:

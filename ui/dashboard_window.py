@@ -3,14 +3,14 @@ import re
 import json
 from typing import Optional, List, Dict, Any
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QTime
 from PyQt6.QtGui import QCursor, QPixmap, QGuiApplication, QTextDocument, QPageSize
 from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout
+    QDialog, QHBoxLayout, QTimeEdit
 )
 
 from config import DEFAULT_PI_BASE_URL, ASSETS_DIR
@@ -89,7 +89,7 @@ class DashboardWindow(QWidget):
 
     def input_style(self):
         return """
-            QLineEdit, QTextEdit, QComboBox {
+            QLineEdit, QTextEdit, QComboBox, QTimeEdit {
                 background-color: #1a1a1a;
                 color: white;
                 border: 1px solid #262626;
@@ -97,7 +97,7 @@ class DashboardWindow(QWidget):
                 padding: 10px 12px;
                 font-size: 14px;
             }
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QTimeEdit:focus {
                 border: 1px solid #e2ab09;
             }
         """
@@ -114,14 +114,6 @@ class DashboardWindow(QWidget):
         x = screen.x() + (screen.width() - width) // 2
         y = screen.y() + (screen.height() - height) // 2
         self.setGeometry(x, y, width, height)
-
-    def toggle_max_restore(self):
-        if self.isMaximized():
-            self.showNormal()
-            self.max_btn.setText("□")
-        else:
-            self.showMaximized()
-            self.max_btn.setText("❐")
 
     # ---------------------------- build ui ----------------------------
 
@@ -198,25 +190,29 @@ class DashboardWindow(QWidget):
         self.user_role.setStyleSheet("font-size: 12px; color: #bdbdbd;")
 
         nav_buttons = [
-            ("Dashboard", 255),
-            ("Resident Pairing", 305),
-            ("Display Updates", 355),
-            ("Activity Logs", 405),
+            ("Overview", 235),
+            ("Resident Records", 285),
+            ("Device Pairing", 335),
+            ("LCD Schedule", 385),
+            ("Logs Admin", 435),
         ]
 
-        self.btn_menu_dashboard = QPushButton(nav_buttons[0][0], self.sidebar)
-        self.btn_menu_dashboard.setGeometry(18, nav_buttons[0][1], 208, 42)
+        self.btn_menu_overview = QPushButton(nav_buttons[0][0], self.sidebar)
+        self.btn_menu_overview.setGeometry(18, nav_buttons[0][1], 208, 42)
 
-        self.btn_menu_pairing = QPushButton(nav_buttons[1][0], self.sidebar)
-        self.btn_menu_pairing.setGeometry(18, nav_buttons[1][1], 208, 42)
+        self.btn_menu_dashboard = QPushButton(nav_buttons[1][0], self.sidebar)
+        self.btn_menu_dashboard.setGeometry(18, nav_buttons[1][1], 208, 42)
 
-        self.btn_menu_updates = QPushButton(nav_buttons[2][0], self.sidebar)
-        self.btn_menu_updates.setGeometry(18, nav_buttons[2][1], 208, 42)
+        self.btn_menu_pairing = QPushButton(nav_buttons[2][0], self.sidebar)
+        self.btn_menu_pairing.setGeometry(18, nav_buttons[2][1], 208, 42)
 
-        self.btn_menu_logs = QPushButton(nav_buttons[3][0], self.sidebar)
-        self.btn_menu_logs.setGeometry(18, nav_buttons[3][1], 208, 42)
+        self.btn_menu_updates = QPushButton(nav_buttons[3][0], self.sidebar)
+        self.btn_menu_updates.setGeometry(18, nav_buttons[3][1], 208, 42)
 
-        for b in [self.btn_menu_dashboard, self.btn_menu_pairing, self.btn_menu_updates, self.btn_menu_logs]:
+        self.btn_menu_logs = QPushButton(nav_buttons[4][0], self.sidebar)
+        self.btn_menu_logs.setGeometry(18, nav_buttons[4][1], 208, 42)
+
+        for b in [self.btn_menu_overview, self.btn_menu_dashboard, self.btn_menu_pairing, self.btn_menu_updates, self.btn_menu_logs]:
             b.setStyleSheet("""
                 QPushButton {
                     text-align: left;
@@ -234,11 +230,11 @@ class DashboardWindow(QWidget):
             """)
 
         self.btn_refresh_devices = QPushButton("Refresh Devices", self.sidebar)
-        self.btn_refresh_devices.setGeometry(18, 500, 208, 42)
+        self.btn_refresh_devices.setGeometry(18, 520, 208, 42)
         self.btn_refresh_devices.setStyleSheet(self.secondary_btn_style())
 
         self.auto_refresh = QCheckBox("Auto-refresh every 3s", self.sidebar)
-        self.auto_refresh.setGeometry(24, 555, 180, 24)
+        self.auto_refresh.setGeometry(24, 575, 180, 24)
         self.auto_refresh.setStyleSheet("""
             QCheckBox {
                 color: #d2d2d2;
@@ -259,7 +255,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.connection_badge = QLabel("Gateway: Unknown", self.sidebar)
-        self.connection_badge.setGeometry(18, 610, 208, 28)
+        self.connection_badge.setGeometry(18, 630, 208, 28)
         self.connection_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.connection_badge.setStyleSheet("""
             QLabel {
@@ -271,12 +267,16 @@ class DashboardWindow(QWidget):
             }
         """)
 
+        self.btn_profile_settings = QPushButton("Profile & Settings", self.sidebar)
+        self.btn_profile_settings.setGeometry(18, 705, 208, 42)
+        self.btn_profile_settings.setStyleSheet(self.secondary_btn_style())
+
         # Title area
         self.title = QLabel("Whisperwood Villa Control Center", self.container)
         self.title.setGeometry(280, 22, 520, 32)
         self.title.setStyleSheet("font-size: 28px; font-weight: 700; color: white;")
 
-        self.subtitle = QLabel("Resident records, device pairing, display updates, and logs", self.container)
+        self.subtitle = QLabel("Overview, resident records, pairing, LCD schedule, and logs admin", self.container)
         self.subtitle.setGeometry(280, 56, 520, 18)
         self.subtitle.setStyleSheet("font-size: 13px; color: #aaaaaa;")
 
@@ -285,7 +285,7 @@ class DashboardWindow(QWidget):
         self.base_url_edit.setText(DEFAULT_PI_BASE_URL)
         self.base_url_edit.setStyleSheet(self.input_style())
 
-        self.min_btn = QPushButton("—", self.container)
+        self.min_btn = QPushButton("-", self.container)
         self.min_btn.setGeometry(1370, 24, 38, 38)
         self.min_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.min_btn.setStyleSheet("""
@@ -303,7 +303,7 @@ class DashboardWindow(QWidget):
             }
         """)
 
-        self.max_btn = QPushButton("□", self.container)
+        self.max_btn = QPushButton("[]", self.container)
         self.max_btn.setGeometry(1415, 24, 38, 38)
         self.max_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.max_btn.setStyleSheet("""
@@ -321,7 +321,7 @@ class DashboardWindow(QWidget):
             }
         """)
 
-        self.close_btn = QPushButton("✕", self.container)
+        self.close_btn = QPushButton("X", self.container)
         self.close_btn.setGeometry(1460, 24, 38, 38)
         self.close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.close_btn.setStyleSheet("""
@@ -344,16 +344,17 @@ class DashboardWindow(QWidget):
         self.pages.setGeometry(280, 95, 1218, 805)
         self.pages.setStyleSheet("background: transparent;")
 
+        self.page_overview = self.build_overview_page()
         self.page_dashboard = self.build_dashboard_page()
         self.page_pairing = self.build_pairing_page()
         self.page_updates = self.build_updates_page()
         self.page_logs = self.build_logs_page()
 
-        for p in [self.page_dashboard, self.page_pairing, self.page_updates, self.page_logs]:
+        for p in [self.page_overview, self.page_dashboard, self.page_pairing, self.page_updates, self.page_logs]:
             self.pages.addWidget(p)
 
-        self.pages.setCurrentWidget(self.page_dashboard)
-        self.set_active_menu(self.btn_menu_dashboard)
+        self.pages.setCurrentWidget(self.page_overview)
+        self.set_active_menu(self.btn_menu_overview)
         self.min_btn.setText("-")
         self.max_btn.setText("[]")
         self.close_btn.setText("X")
@@ -367,13 +368,134 @@ class DashboardWindow(QWidget):
         self.max_btn.setText("[]")
 
     def position_window_controls(self):
-        right = self.container.width() - 48
+        right = max(1220, self.container.width() - 48)
         self.close_btn.move(right, 24)
         self.max_btn.move(right - 45, 24)
         self.min_btn.move(right - 90, 24)
-        self.base_url_edit.setGeometry(max(820, right - 430), 24, 320, 42)
+        self.base_url_edit.setGeometry(min(860, right - 470), 24, 330, 42)
+        self.pages.setGeometry(280, 95, max(980, self.container.width() - 302), max(690, self.container.height() - 115))
+
+    def card_style(self):
+        return """
+            QFrame {
+                background-color: #121212;
+                border-radius: 18px;
+                border: 1px solid #242424;
+            }
+        """
+
+    def table_style(self):
+        return """
+            QTableWidget {
+                background-color: #111111;
+                color: white;
+                border: 1px solid #242424;
+                border-radius: 14px;
+                gridline-color: #2a2a2a;
+                font-size: 12px;
+            }
+            QHeaderView::section {
+                background-color: #1b1b1b;
+                color: #d7d7d7;
+                padding: 8px;
+                border: none;
+                font-weight: 700;
+            }
+        """
 
     # ---------------------------- dashboard page ----------------------------
+
+    def build_overview_page(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+
+        hero = QFrame(page)
+        hero.setGeometry(0, 0, 1218, 145)
+        hero.setStyleSheet("""
+            QFrame {
+                background-color: #101010;
+                border-radius: 22px;
+                border: 1px solid #273447;
+            }
+        """)
+
+        title = QLabel("Care operations dashboard", hero)
+        title.setGeometry(24, 22, 420, 32)
+        title.setStyleSheet("font-size: 26px; font-weight: 800; color: white;")
+
+        subtitle = QLabel("Follow the resident-first flow: save record, pair device, confirm LCD schedule, then review logs.", hero)
+        subtitle.setGeometry(24, 58, 780, 24)
+        subtitle.setStyleSheet("font-size: 13px; color: #b8c1cc;")
+
+        self.btn_overview_new_resident = QPushButton("Open Resident Records", hero)
+        self.btn_overview_new_resident.setGeometry(24, 92, 190, 42)
+        self.btn_overview_new_resident.setStyleSheet(self.primary_btn_style())
+
+        self.btn_overview_pairing = QPushButton("Go to Pairing", hero)
+        self.btn_overview_pairing.setGeometry(228, 92, 150, 42)
+        self.btn_overview_pairing.setStyleSheet(self.secondary_btn_style())
+
+        self.overview_status = QLabel("Gateway and local database status will appear here.", hero)
+        self.overview_status.setGeometry(820, 28, 360, 82)
+        self.overview_status.setWordWrap(True)
+        self.overview_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.overview_status.setStyleSheet("font-size: 13px; color: #d8d8d8;")
+
+        self.record_summary_labels = {}
+        cards = [
+            ("active_residents", "Saved residents", 0, 165),
+            ("known_devices", "Known devices", 248, 165),
+            ("paired_devices", "Paired devices", 496, 165),
+            ("recent_activity", "Recent activity", 744, 165),
+            ("online_devices", "Connected now", 992, 165),
+        ]
+        for key, label, x, y in cards:
+            card = QFrame(page)
+            card.setGeometry(x, y, 226, 116)
+            card.setStyleSheet(self.card_style())
+            small = QLabel(label, card)
+            small.setGeometry(18, 18, 170, 22)
+            small.setStyleSheet("font-size: 12px; color: #aeb7c2; font-weight: 700;")
+            value = QLabel("0", card)
+            value.setGeometry(18, 48, 170, 44)
+            value.setStyleSheet("font-size: 34px; color: white; font-weight: 800;")
+            self.summary_labels[key] = value
+
+        workflow = QFrame(page)
+        workflow.setGeometry(0, 305, 402, 470)
+        workflow.setStyleSheet(self.card_style())
+        workflow_title = QLabel("Workflow Guide", workflow)
+        workflow_title.setGeometry(22, 20, 180, 24)
+        workflow_title.setStyleSheet("font-size: 18px; color: white; font-weight: 800;")
+        steps = [
+            "1. Create or update the resident record.",
+            "2. Attach proof or mark safety review.",
+            "3. Pair the resident to a known device.",
+            "4. Save LCD image and schedule.",
+            "5. Check Logs Admin for delivery status.",
+        ]
+        for i, step in enumerate(steps):
+            lbl = QLabel(step, workflow)
+            lbl.setGeometry(24, 68 + i * 54, 340, 34)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet("font-size: 13px; color: #dedede;")
+
+        device_panel = QFrame(page)
+        device_panel.setGeometry(425, 305, 793, 470)
+        device_panel.setStyleSheet(self.card_style())
+        device_title = QLabel("Device Status Snapshot", device_panel)
+        device_title.setGeometry(22, 18, 260, 24)
+        device_title.setStyleSheet("font-size: 18px; color: white; font-weight: 800;")
+        self.overview_device_table = QTableWidget(device_panel)
+        self.overview_device_table.setGeometry(18, 58, 756, 390)
+        self.overview_device_table.setColumnCount(5)
+        self.overview_device_table.setHorizontalHeaderLabels(["Device ID", "Status", "Battery", "Assigned Resident", "Last Seen"])
+        self.overview_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.overview_device_table.verticalHeader().setVisible(False)
+        self.overview_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.overview_device_table.setStyleSheet(self.table_style())
+
+        return page
 
     def build_dashboard_page(self):
         page = QWidget()
@@ -579,6 +701,10 @@ class DashboardWindow(QWidget):
         self.preview_heading.setGeometry(22, 18, 120, 24)
         self.preview_heading.setStyleSheet("font-size: 18px; font-weight: 700;")
 
+        self.btn_go_pairing_after_save = QPushButton("Go to Pairing", self.preview_panel)
+        self.btn_go_pairing_after_save.setGeometry(285, 16, 130, 34)
+        self.btn_go_pairing_after_save.setStyleSheet(self.secondary_btn_style())
+
         self.epaper_card = QFrame(self.preview_panel)
         self.epaper_card.setGeometry(22, 60, 394, 185)
         self.epaper_card.setStyleSheet("""
@@ -693,12 +819,12 @@ class DashboardWindow(QWidget):
             label = QLabel(f"{title_text}: 0", self.overview_panel)
             label.setGeometry(18, y, 250, 24)
             label.setStyleSheet("font-size: 13px; color: #dedede;")
-            self.summary_labels[key] = label
+            self.record_summary_labels[key] = label
 
-        self.summary_labels["database_mode"] = QLabel("Data store: checking", self.overview_panel)
-        self.summary_labels["database_mode"].setGeometry(210, 14, 160, 22)
-        self.summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #e2ab09;")
+        self.record_summary_labels["database_mode"] = QLabel("Data store: checking", self.overview_panel)
+        self.record_summary_labels["database_mode"].setGeometry(210, 14, 160, 22)
+        self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #e2ab09;")
 
         return page
 
@@ -779,7 +905,7 @@ class DashboardWindow(QWidget):
         self.pair_table = QTableWidget(self.pair_right)
         self.pair_table.setGeometry(18, 18, 572, 768)
         self.pair_table.setColumnCount(5)
-        self.pair_table.setHorizontalHeaderLabels(["Device ID", "Resident", "Resident UID", "Online", "Last Seen(s)"])
+        self.pair_table.setHorizontalHeaderLabels(["Device ID", "Resident", "Resident UID", "Online", "Battery"])
         self.pair_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.pair_table.setStyleSheet("""
             QTableWidget {
@@ -819,8 +945,8 @@ class DashboardWindow(QWidget):
             }
         """)
 
-        title = QLabel("Display Updates", self.upd_left)
-        title.setGeometry(22, 18, 160, 24)
+        title = QLabel("LCD Schedule", self.upd_left)
+        title.setGeometry(22, 18, 180, 24)
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
 
         self.upd_target = QComboBox(self.upd_left)
@@ -912,6 +1038,22 @@ class DashboardWindow(QWidget):
         self.image_path_label.setGeometry(22, 540, 490, 44)
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
+
+        manual_title = QLabel("Manual LCD Control", self.upd_left)
+        manual_title.setGeometry(22, 602, 180, 22)
+        manual_title.setStyleSheet("font-size: 15px; font-weight: 800; color: white;")
+
+        self.btn_lcd_on = QPushButton("Turn LCD ON", self.upd_left)
+        self.btn_lcd_on.setGeometry(22, 636, 150, 42)
+        self.btn_lcd_on.setStyleSheet(self.primary_btn_style())
+
+        self.btn_lcd_off = QPushButton("Turn LCD OFF", self.upd_left)
+        self.btn_lcd_off.setGeometry(184, 636, 150, 42)
+        self.btn_lcd_off.setStyleSheet(self.secondary_btn_style())
+
+        self.chk_sleep_no_image = QCheckBox("Keep LCD asleep if no image exists", self.upd_left)
+        self.chk_sleep_no_image.setGeometry(22, 698, 260, 24)
+        self.chk_sleep_no_image.setStyleSheet(self.chk_active.styleSheet())
 
         self.upd_right = QFrame(page)
         self.upd_right.setGeometry(560, 0, 658, 805)
@@ -1011,6 +1153,47 @@ class DashboardWindow(QWidget):
         self.upd_lcd_note.setWordWrap(True)
         self.upd_lcd_note.setStyleSheet("color: #eef2f7; font-size: 14px;")
 
+        self.schedule_panel = QFrame(self.upd_right)
+        self.schedule_panel.setGeometry(22, 602, 614, 180)
+        self.schedule_panel.setStyleSheet(self.card_style())
+
+        schedule_title = QLabel("Schedule Management", self.schedule_panel)
+        schedule_title.setGeometry(18, 14, 220, 22)
+        schedule_title.setStyleSheet("font-size: 16px; color: white; font-weight: 800;")
+
+        self.schedule_resident = QComboBox(self.schedule_panel)
+        self.schedule_resident.setGeometry(18, 48, 250, 40)
+        self.schedule_resident.setStyleSheet(self.input_style())
+
+        self.chk_schedule_enabled = QCheckBox("Enabled", self.schedule_panel)
+        self.chk_schedule_enabled.setGeometry(286, 56, 90, 24)
+        self.chk_schedule_enabled.setStyleSheet(self.chk_active.styleSheet())
+
+        self.schedule_on = QTimeEdit(self.schedule_panel)
+        self.schedule_on.setGeometry(380, 48, 90, 40)
+        self.schedule_on.setDisplayFormat("HH:mm")
+        self.schedule_on.setTime(QTime(7, 0))
+        self.schedule_on.setStyleSheet(self.input_style())
+
+        self.schedule_off = QTimeEdit(self.schedule_panel)
+        self.schedule_off.setGeometry(486, 48, 90, 40)
+        self.schedule_off.setDisplayFormat("HH:mm")
+        self.schedule_off.setTime(QTime(20, 0))
+        self.schedule_off.setStyleSheet(self.input_style())
+
+        self.btn_save_schedule = QPushButton("Save Schedule to Pi", self.schedule_panel)
+        self.btn_save_schedule.setGeometry(18, 108, 190, 42)
+        self.btn_save_schedule.setStyleSheet(self.primary_btn_style())
+
+        self.schedule_table = QTableWidget(self.schedule_panel)
+        self.schedule_table.setGeometry(225, 102, 370, 62)
+        self.schedule_table.setColumnCount(4)
+        self.schedule_table.setHorizontalHeaderLabels(["Resident", "Device", "Image", "Times"])
+        self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.schedule_table.verticalHeader().setVisible(False)
+        self.schedule_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.schedule_table.setStyleSheet(self.table_style())
+
         return page
 
     # ---------------------------- logs page ----------------------------
@@ -1083,14 +1266,19 @@ class DashboardWindow(QWidget):
         self.btn_refresh_devices.clicked.connect(self.refresh_devices)
         self.auto_refresh.stateChanged.connect(self.toggle_auto_refresh)
 
+        self.btn_menu_overview.clicked.connect(lambda: self.switch_page(self.page_overview, self.btn_menu_overview))
         self.btn_menu_dashboard.clicked.connect(lambda: self.switch_page(self.page_dashboard, self.btn_menu_dashboard))
         self.btn_menu_pairing.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_menu_updates.clicked.connect(lambda: self.switch_page(self.page_updates, self.btn_menu_updates))
         self.btn_menu_logs.clicked.connect(lambda: self.switch_page(self.page_logs, self.btn_menu_logs))
+        self.btn_profile_settings.clicked.connect(self.show_profile_settings)
+        self.btn_overview_new_resident.clicked.connect(lambda: self.switch_page(self.page_dashboard, self.btn_menu_dashboard))
+        self.btn_overview_pairing.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
 
         self.btn_new_resident.clicked.connect(self.new_resident)
         self.btn_save_resident.clicked.connect(self.save_resident)
         self.btn_clear_fields.clicked.connect(self.clear_form)
+        self.btn_go_pairing_after_save.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_attach_source.clicked.connect(self.attach_source_document)
 
         self.search_resident.textChanged.connect(self.filter_residents)
@@ -1113,6 +1301,9 @@ class DashboardWindow(QWidget):
         self.btn_choose_image.clicked.connect(self.choose_image)
         self.btn_send_image.clicked.connect(self.send_image)
         self.btn_clear_image.clicked.connect(self.clear_lcd_image)
+        self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
+        self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
+        self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
         self.logs_table.cellDoubleClicked.connect(lambda row, _col: self.show_log_detail(row))
         self.btn_view_log.clicked.connect(self.show_selected_log_detail)
         self.btn_export_logs_pdf.clicked.connect(self.export_logs_pdf)
@@ -1125,7 +1316,7 @@ class DashboardWindow(QWidget):
     # ---------------------------- page switching ----------------------------
 
     def set_active_menu(self, active_btn):
-        buttons = [self.btn_menu_dashboard, self.btn_menu_pairing, self.btn_menu_updates, self.btn_menu_logs]
+        buttons = [self.btn_menu_overview, self.btn_menu_dashboard, self.btn_menu_pairing, self.btn_menu_updates, self.btn_menu_logs]
         for btn in buttons:
             if btn == active_btn:
                 btn.setStyleSheet("""
@@ -1160,10 +1351,13 @@ class DashboardWindow(QWidget):
     def switch_page(self, page, btn):
         self.pages.setCurrentWidget(page)
         self.set_active_menu(btn)
-        if page == self.page_pairing:
+        if page == self.page_overview:
+            self.refresh_dashboard_summary()
+        elif page == self.page_pairing:
             self.load_pairing_views()
         elif page == self.page_updates:
             self.load_update_targets()
+            self.load_schedule_view()
             self.update_preview()
         elif page == self.page_logs:
             self.load_recent_logs()
@@ -1175,6 +1369,12 @@ class DashboardWindow(QWidget):
 
     def selected_device_id(self):
         return self.upd_target.currentData()
+
+    def schedule_on_time(self):
+        return self.schedule_on.time().toString("HH:mm")
+
+    def schedule_off_time(self):
+        return self.schedule_off.time().toString("HH:mm")
 
     def current_resident_uid(self):
         return self.txt_uid.text().strip() or None
@@ -1192,6 +1392,11 @@ class DashboardWindow(QWidget):
             "source_document": self.selected_source_document,
             "safety_review_note": self.txt_safety_review.text().strip(),
             "needs_safety_review": self.chk_safety_review.isChecked(),
+            "lcd_image_path": self.selected_image_path,
+            "lcd_schedule_enabled": getattr(self, "chk_schedule_enabled", self.chk_active).isChecked() if hasattr(self, "chk_schedule_enabled") else False,
+            "lcd_on_time": self.schedule_on_time() if hasattr(self, "schedule_on") else None,
+            "lcd_off_time": self.schedule_off_time() if hasattr(self, "schedule_off") else None,
+            "sleep_if_no_image": self.chk_sleep_no_image.isChecked() if hasattr(self, "chk_sleep_no_image") else False,
             "active": self.chk_active.isChecked(),
         }
 
@@ -1253,10 +1458,15 @@ class DashboardWindow(QWidget):
         self.pair_resident_list.clear()
 
         for r in self.db.get_residents():
-            label = f"{r['full_name']}  •  {r.get('room') or 'No room'}  •  {r['resident_uid']}"
+            label = f"{r['full_name']} | {r.get('room') or 'No room'} | {r['resident_uid']}"
             if r.get("paired_device_id"):
-                icon = "🟢" if r.get("paired_device_online") else "🔴"
-                label += f"  •  {icon} {r['paired_device_id']}"
+                status = "online" if r.get("paired_device_online") else "offline"
+                label += f" | {status}: {r['paired_device_id']}"
+
+            label = f"{r['full_name']} | {r.get('room') or 'No room'} | {r['resident_uid']}"
+            if r.get("paired_device_id"):
+                status = "online" if r.get("paired_device_online") else "offline"
+                label += f" | {status}: {r['paired_device_id']}"
 
             for lw in [self.resident_list, self.pair_resident_list]:
                 item = QListWidgetItem(label)
@@ -1279,10 +1489,108 @@ class DashboardWindow(QWidget):
             "failed_updates": "Failed updates",
         }
         for key, title in titles.items():
-            if key in self.summary_labels:
-                self.summary_labels[key].setText(f"{title}: {summary.get(key, 0)}")
-        mode = "local fallback" if summary.get("database_mode") == "sqlite" else "gateway database"
-        self.summary_labels["database_mode"].setText(f"Data store: {mode}")
+            if hasattr(self, "record_summary_labels") and key in self.record_summary_labels:
+                self.record_summary_labels[key].setText(f"{title}: {summary.get(key, 0)}")
+        if hasattr(self, "record_summary_labels") and "database_mode" in self.record_summary_labels:
+            mode = "local fallback" if summary.get("database_mode") == "sqlite" else "gateway database"
+            self.record_summary_labels["database_mode"].setText(f"Data store: {mode}")
+
+        overview_values = {
+            "active_residents": summary.get("active_residents", 0),
+            "known_devices": summary.get("known_devices", summary.get("online_devices", 0)),
+            "paired_devices": summary.get("paired_devices", 0),
+            "recent_activity": summary.get("recent_activity", 0),
+            "online_devices": summary.get("online_devices", 0),
+        }
+        for key, value in overview_values.items():
+            if hasattr(self, "summary_labels") and key in self.summary_labels:
+                self.summary_labels[key].setText(str(value))
+        if hasattr(self, "overview_status"):
+            mode = "local fallback" if summary.get("database_mode") == "sqlite" else "gateway database"
+            self.overview_status.setText(f"Data store: {mode}\nGateway: {self.connection_badge.text()}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
+        if hasattr(self, "overview_device_table"):
+            self.load_overview_devices()
+
+    def load_overview_devices(self):
+        devices = self.db.get_devices()
+        self.overview_device_table.setRowCount(len(devices))
+        for r, d in enumerate(devices):
+            values = [
+                d.get("device_id") or "",
+                "Online" if d.get("is_online") else "Offline",
+                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A",
+                d.get("resident_name") or "Unassigned",
+                str(d.get("last_seen_s") or ""),
+            ]
+            for c, value in enumerate(values):
+                self.overview_device_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def load_schedule_view(self):
+        if not hasattr(self, "schedule_resident"):
+            return
+        current_id = self.schedule_resident.currentData()
+        self.schedule_resident.blockSignals(True)
+        self.schedule_resident.clear()
+        rows = self.db.get_schedule_rows()
+        for row in rows:
+            self.schedule_resident.addItem(f"{row['full_name']} ({row['resident_uid']})", row["id"])
+        if current_id is not None:
+            idx = self.schedule_resident.findData(current_id)
+            if idx >= 0:
+                self.schedule_resident.setCurrentIndex(idx)
+        self.schedule_resident.blockSignals(False)
+
+        self.schedule_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            times = f"{row.get('lcd_on_time') or '--:--'} - {row.get('lcd_off_time') or '--:--'}"
+            image = "Ready" if row.get("lcd_image_path") else "No image"
+            enabled = "Enabled" if row.get("lcd_schedule_enabled") else "Off"
+            values = [
+                row.get("full_name") or "",
+                row.get("device_id") or "Unpaired",
+                image,
+                f"{enabled}: {times}",
+            ]
+            for c, value in enumerate(values):
+                self.schedule_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+        selected = self.schedule_resident.currentData()
+        if selected:
+            row = self.db.get_resident(selected)
+            if row:
+                self.chk_schedule_enabled.setChecked(bool(row.get("lcd_schedule_enabled")))
+                self.chk_sleep_no_image.setChecked(bool(row.get("sleep_if_no_image")))
+                if row.get("lcd_on_time"):
+                    self.schedule_on.setTime(QTime.fromString(row.get("lcd_on_time"), "HH:mm"))
+                if row.get("lcd_off_time"):
+                    self.schedule_off.setTime(QTime.fromString(row.get("lcd_off_time"), "HH:mm"))
+                self.selected_resident_id = selected
+
+    def show_profile_settings(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Profile & Settings")
+        dialog.resize(520, 420)
+        layout = QVBoxLayout(dialog)
+        body = QTextEdit(dialog)
+        body.setReadOnly(True)
+        body.setStyleSheet(self.input_style())
+        body.setPlainText(
+            f"User: {self.current_user.get('username', 'admin')}\n"
+            f"Role: {self.current_user.get('role', 'ADMIN')}\n"
+            f"Gateway URL: {self.base_url()}\n\n"
+            "Configuration areas ready for later integration:\n"
+            "- theme choice\n"
+            "- add user\n"
+            "- change password\n"
+            "- gateway defaults\n"
+            "- admin permissions"
+        )
+        layout.addWidget(body)
+        close_btn = QPushButton("Close", dialog)
+        close_btn.setStyleSheet(self.primary_btn_style())
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        dialog.exec()
 
     def on_resident_selected(self, item):
         resident_id = item.data(Qt.ItemDataRole.UserRole)
@@ -1303,6 +1611,9 @@ class DashboardWindow(QWidget):
         self.selected_source_document = row.get("source_document") or None
         self.source_doc_label.setText(os.path.basename(self.selected_source_document) if self.selected_source_document else "No source document attached")
         self.chk_safety_review.setChecked(bool(row.get("needs_safety_review", False)))
+        self.selected_image_path = row.get("lcd_image_path") or None
+        if self.selected_image_path and hasattr(self, "image_path_label"):
+            self.image_path_label.setText(self.selected_image_path)
         self.chk_active.setChecked(bool(row.get("active", True)))
 
         self.update_preview()
@@ -1430,6 +1741,7 @@ class DashboardWindow(QWidget):
             )
             self.load_recent_logs()
             self.refresh_dashboard_summary()
+            self.load_schedule_view()
             return
 
         self.load_update_targets()
@@ -1437,13 +1749,17 @@ class DashboardWindow(QWidget):
         self.load_residents()
         self.load_recent_logs()
         self.refresh_dashboard_summary()
+        self.load_schedule_view()
 
     def load_update_targets(self):
         self.upd_target.clear()
         for d in self.db.get_devices():
-            icon = "🟢" if d["is_online"] else "🔴"
-            paired = f" • {d['resident_name']}" if d.get("resident_name") else ""
+            icon = "online" if d["is_online"] else "offline"
+            paired = f" | {d['resident_name']}" if d.get("resident_name") else ""
             label = f"{icon} {d['device_id']} ({d.get('ip') or '-'}:{d.get('port') or '-'}){paired}"
+            status = "online" if d["is_online"] else "offline"
+            paired = f" | {d['resident_name']}" if d.get("resident_name") else ""
+            label = f"{status}: {d['device_id']} ({d.get('ip') or '-'}:{d.get('port') or '-'}){paired}"
             self.upd_target.addItem(label, d["device_id"])
 
     def load_pairing_views(self):
@@ -1457,14 +1773,14 @@ class DashboardWindow(QWidget):
                 d.get("resident_name") or "Unpaired",
                 d.get("resident_uid") or "-",
                 "Online" if d.get("is_online") else "Offline",
-                str(d.get("last_seen_s") or "")
+                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A"
             ]
             for c, val in enumerate(vals):
                 self.pair_table.setItem(r, c, QTableWidgetItem(val))
 
-            icon = "🟢" if d["is_online"] else "🔴"
+            icon = "online" if d["is_online"] else "offline"
             status = "paired" if d.get("resident_name") else "available"
-            item = QListWidgetItem(f"{icon} {d['device_id']} • {status}")
+            item = QListWidgetItem(f"{icon}: {d['device_id']} | {status}")
             item.setData(Qt.ItemDataRole.UserRole, d["device_id"])
             self.available_devices_list.addItem(item)
 
@@ -1502,10 +1818,47 @@ class DashboardWindow(QWidget):
                 True,
                 f"{row['full_name']} paired to {device_id}"
             )
+            self.push_resident_row_to_device(row, device_id, "auto_send_after_pair")
             self.refresh_devices()
             self.show_info("Paired", f"{row['full_name']} paired to {device_id}.")
         except Exception as e:
             self.show_error("Pair failed", str(e))
+
+    def push_resident_row_to_device(self, row, device_id, action_type):
+        payload = {
+            "id": device_id,
+            "name": row.get("full_name") or "",
+            "room": row.get("room") or "",
+            "note": row.get("note") or "",
+            "drinks": row.get("drinks") or "",
+        }
+        if row.get("diet"):
+            payload["diet"] = [x.strip() for x in row.get("diet").split(",") if x.strip()]
+        if row.get("allergies"):
+            payload["allergies"] = [x.strip() for x in row.get("allergies").split(",") if x.strip()]
+        if row.get("schedule"):
+            payload["schedule"] = row.get("schedule")
+        try:
+            result = self.gateway.send_text(self.base_url(), payload)
+            success = result["status_code"] == 200
+            message = "Latest resident text pushed after pairing" if success else f"Auto-push failed ({result['status_code']})"
+            response = result["body"]
+        except Exception as e:
+            success = False
+            message = f"Auto-push queued for review: {e}"
+            response = {"error": str(e)}
+        self.db.log_update(
+            action_type,
+            row.get("id"),
+            row.get("resident_uid"),
+            device_id,
+            self.current_user.get("id"),
+            self.current_user.get("username"),
+            payload,
+            response,
+            success,
+            message
+        )
 
     def unpair_selected_from_menu(self):
         device_item = self.available_devices_list.currentItem()
@@ -1811,6 +2164,99 @@ class DashboardWindow(QWidget):
             )
             self.load_recent_logs()
             self.show_error("Network Error", str(e))
+
+    def send_lcd_command(self, command, device_id=None):
+        device_id = device_id or self.selected_device_id()
+        if not device_id:
+            self.show_error("No device", "Please select a paired device first.")
+            return
+        payload = {"device_id": device_id, "command": command}
+        try:
+            result = self.gateway.send_lcd_command(self.base_url(), device_id, command)
+            success = result["status_code"] == 200
+            response = result["body"]
+            message = f"LCD {command.upper()} command sent" if success else f"LCD command failed ({result['status_code']})"
+        except Exception as e:
+            success = False
+            response = {"error": str(e)}
+            message = f"LCD command queued for review: {e}"
+        self.db.log_update(
+            "lcd_command",
+            self.selected_resident_id,
+            self.current_resident_uid(),
+            device_id,
+            self.current_user.get("id"),
+            self.current_user.get("username"),
+            payload,
+            response,
+            success,
+            message
+        )
+        self.load_recent_logs()
+        if success:
+            self.show_info("LCD Command", message)
+        else:
+            self.show_error("LCD Command", message)
+
+    def save_lcd_schedule(self):
+        resident_id = self.schedule_resident.currentData()
+        if not resident_id:
+            self.show_error("No resident", "Select a resident for the LCD schedule.")
+            return
+        row = self.db.get_resident(resident_id)
+        if not row:
+            self.show_error("Not found", "Resident record was not found.")
+            return
+        device_id = row.get("paired_device_id")
+        enabled = self.chk_schedule_enabled.isChecked()
+        on_time = self.schedule_on_time()
+        off_time = self.schedule_off_time()
+        sleep_if_no_image = self.chk_sleep_no_image.isChecked()
+        self.db.save_resident_schedule(resident_id, enabled, on_time, off_time, sleep_if_no_image)
+
+        payload = {
+            "resident_uid": row.get("resident_uid"),
+            "resident_id": resident_id,
+            "device_id": device_id,
+            "enabled": enabled,
+            "lcd_on_time": on_time,
+            "lcd_off_time": off_time,
+            "sleep_if_no_image": sleep_if_no_image,
+            "has_image": bool(row.get("lcd_image_path") or self.selected_image_path),
+        }
+        response = {"saved": True}
+        success = True
+        message = "LCD schedule saved"
+        if device_id:
+            try:
+                result = self.gateway.save_schedule(self.base_url(), payload)
+                success = result["status_code"] == 200
+                response = result["body"]
+                message = "LCD schedule saved to software and Pi" if success else f"Schedule saved locally; Pi returned {result['status_code']}"
+            except Exception as e:
+                success = False
+                response = {"error": str(e)}
+                message = f"Schedule saved locally; Pi update queued for review: {e}"
+
+            if sleep_if_no_image and not payload["has_image"]:
+                self.send_lcd_command("off", device_id)
+
+        self.db.log_update(
+            "save_schedule",
+            resident_id,
+            row.get("resident_uid"),
+            device_id,
+            self.current_user.get("id"),
+            self.current_user.get("username"),
+            payload,
+            response,
+            success,
+            message
+        )
+        self.load_schedule_view()
+        self.refresh_dashboard_summary()
+        self.load_recent_logs()
+        self.show_info("Schedule", message)
 
     def choose_image(self):
         path, _ = QFileDialog.getOpenFileName(

@@ -21,6 +21,7 @@ class Device:
     pending_seq: Optional[int]
     pending_img_seq: Optional[int]
     last_seen_s: int
+    battery_level: Optional[int] = None
 
     @property
     def is_online(self) -> bool:
