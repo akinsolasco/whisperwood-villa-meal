@@ -499,10 +499,20 @@ class DashboardWindow(QWidget):
         self.btn_overview_pairing.setStyleSheet(self.secondary_btn_style())
 
         self.overview_status = QLabel("Gateway and local database status will appear here.", hero)
+        self.overview_status.setObjectName("overview_status_text")
         self.overview_status.setGeometry(820, 28, 360, 82)
         self.overview_status.setWordWrap(True)
         self.overview_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.overview_status.setStyleSheet("font-size: 13px; color: #d8d8d8;")
+        self.overview_status.setFrameStyle(0)
+        self.overview_status.setStyleSheet("""
+            QLabel#overview_status_text {
+                font-size: 13px;
+                color: #d8d8d8;
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
+        """)
 
         self.summary_labels = {}
         cards = [
