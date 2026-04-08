@@ -4,13 +4,36 @@ from config import ASSETS_DIR
 from auth.auth_service import AuthService
 
 
+class LoginWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(dict)
+
+    def __init__(self, username: str, password: str):
+        super().__init__()
+        self.username = username
+        self.password = password
+
+    @QtCore.pyqtSlot()
+    def run(self):
+        try:
+            auth = AuthService()
+            result = auth.login(self.username, self.password)
+        except Exception as exc:
+            result = {"success": False, "message": str(exc), "user": None}
+        self.finished.emit(result)
+
+
 class LoginWindow(QtWidgets.QWidget):
     login_success = QtCore.pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
-        self.auth = AuthService()
         self.drag_pos = None
+        self.login_thread = None
+        self.login_worker = None
+        self.login_loading_step = 0
+        self.login_loading_timer = QtCore.QTimer(self)
+        self.login_loading_timer.setInterval(220)
+        self.login_loading_timer.timeout.connect(self._tick_login_loading)
 
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
         self.photo_path = ASSETS_DIR / "senior-woman-talking-with-her-doctor.jpg"
@@ -154,6 +177,10 @@ class LoginWindow(QtWidgets.QWidget):
             QPushButton:hover {
                 background-color: #f0b814;
             }
+            QPushButton:disabled {
+                background-color: #7d6316;
+                color: #1f1f1f;
+            }
         """)
         self.login_btn.clicked.connect(self.handle_login)
 
@@ -183,12 +210,47 @@ class LoginWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Login Error", "Please enter username and password.")
             return
 
+        if self.login_thread is not None and self.login_thread.isRunning():
+            return
+
+        self._start_login_loading()
+        self.login_thread = QtCore.QThread(self)
+        self.login_worker = LoginWorker(username, password)
+        self.login_worker.moveToThread(self.login_thread)
+        self.login_thread.started.connect(self.login_worker.run)
+        self.login_worker.finished.connect(self._on_login_result)
+        self.login_worker.finished.connect(self.login_thread.quit)
+        self.login_worker.finished.connect(self.login_worker.deleteLater)
+        self.login_thread.finished.connect(self.login_thread.deleteLater)
+        self.login_thread.finished.connect(self._clear_login_task)
+        self.login_thread.start()
+
+    def _tick_login_loading(self):
+        dots = "." * ((self.login_loading_step % 3) + 1)
+        self.login_btn.setText(f"Logging in{dots}")
+        self.login_loading_step += 1
+
+    def _start_login_loading(self):
+        self.login_loading_step = 0
         self.login_btn.setEnabled(False)
-        self.login_btn.setText("Logging in...")
-        result = self.auth.login(username, password)
+        self.username_input.setEnabled(False)
+        self.password_input.setEnabled(False)
+        self._tick_login_loading()
+        self.login_loading_timer.start()
+
+    def _stop_login_loading(self):
+        self.login_loading_timer.stop()
         self.login_btn.setEnabled(True)
+        self.username_input.setEnabled(True)
+        self.password_input.setEnabled(True)
         self.login_btn.setText("Login")
 
+    def _clear_login_task(self):
+        self.login_worker = None
+        self.login_thread = None
+
+    def _on_login_result(self, result: dict):
+        self._stop_login_loading()
         if result["success"]:
             self.login_success.emit(result["user"])
         else:

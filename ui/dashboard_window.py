@@ -106,7 +106,7 @@ class DashboardWindow(QWidget):
         """
 
     def label_style(self):
-        return "font-size: 13px; font-weight: 600; color: #d7d7d7; background: transparent;"
+        return "font-size: 13px; font-weight: 600; color: #d7d7d7; background: transparent; border: none;"
 
     # ---------------------------- window helpers ----------------------------
 
@@ -347,6 +347,7 @@ class DashboardWindow(QWidget):
 
         self.pages.setCurrentWidget(self.page_overview)
         self.set_active_menu(self.btn_menu_overview)
+        self.strip_text_only_label_frames()
         self.min_btn.setText("-")
         self.max_btn.setText("[]")
         self.close_btn.setText("X")
@@ -394,6 +395,39 @@ class DashboardWindow(QWidget):
                 font-weight: 700;
             }
         """
+
+    def strip_text_only_label_frames(self):
+        # Keep intentional badge/alert labels untouched.
+        protected_labels = {
+            getattr(self, "user_avatar", None),
+            getattr(self, "connection_badge", None),
+            getattr(self, "lcd_alert_banner", None),
+            getattr(self, "upd_lcd_alert", None),
+        }
+        for label in self.findChildren(QLabel):
+            if label in protected_labels:
+                continue
+            if label.pixmap() is not None:
+                continue
+
+            style = label.styleSheet() or ""
+            lower = style.lower()
+            has_custom_bg = "background-color" in lower and "background: transparent" not in lower
+            has_custom_border = "border:" in lower and "border: none" not in lower
+            if has_custom_bg or has_custom_border:
+                continue
+
+            label.setFrameStyle(0)
+            parts = style.strip().rstrip(";")
+            extras = []
+            if "background:" not in lower and "background-color" not in lower:
+                extras.append("background: transparent")
+            if "border:" not in lower:
+                extras.append("border: none")
+
+            if extras:
+                parts = f"{parts}; {'; '.join(extras)}" if parts else "; ".join(extras)
+                label.setStyleSheet(parts + ";")
 
     def wrap_scroll_page(self, content: QWidget, min_height: int):
         content.setMinimumSize(1218, min_height)
