@@ -397,12 +397,9 @@ class DashboardWindow(QWidget):
         """
 
     def strip_text_only_label_frames(self):
-        # Keep intentional badge/alert labels untouched.
+        # Render text labels as plain text (no visible container box).
         protected_labels = {
             getattr(self, "user_avatar", None),
-            getattr(self, "connection_badge", None),
-            getattr(self, "lcd_alert_banner", None),
-            getattr(self, "upd_lcd_alert", None),
         }
         for label in self.findChildren(QLabel):
             if label in protected_labels:
@@ -411,23 +408,14 @@ class DashboardWindow(QWidget):
                 continue
 
             style = label.styleSheet() or ""
-            lower = style.lower()
-            has_custom_bg = "background-color" in lower and "background: transparent" not in lower
-            has_custom_border = "border:" in lower and "border: none" not in lower
-            if has_custom_bg or has_custom_border:
-                continue
-
             label.setFrameStyle(0)
-            parts = style.strip().rstrip(";")
-            extras = []
-            if "background:" not in lower and "background-color" not in lower:
-                extras.append("background: transparent")
-            if "border:" not in lower:
-                extras.append("border: none")
-
-            if extras:
-                parts = f"{parts}; {'; '.join(extras)}" if parts else "; ".join(extras)
-                label.setStyleSheet(parts + ";")
+            clean = re.sub(r"(?i)\bbackground(?:-color)?\s*:\s*[^;]+;?", "", style)
+            clean = re.sub(r"(?i)\bborder\s*:\s*[^;]+;?", "", clean)
+            clean = clean.strip().rstrip(";")
+            if clean:
+                label.setStyleSheet(f"{clean}; background: transparent; border: none;")
+            else:
+                label.setStyleSheet("background: transparent; border: none;")
 
     def wrap_scroll_page(self, content: QWidget, min_height: int):
         content.setMinimumSize(1218, min_height)
