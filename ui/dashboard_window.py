@@ -441,7 +441,7 @@ class DashboardWindow(QWidget):
         self.overview_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.overview_status.setStyleSheet("font-size: 13px; color: #d8d8d8;")
 
-        self.record_summary_labels = {}
+        self.summary_labels = {}
         cards = [
             ("active_residents", "Saved residents", 0, 165),
             ("known_devices", "Known devices", 248, 165),
@@ -807,7 +807,7 @@ class DashboardWindow(QWidget):
         overview_title.setGeometry(16, 14, 180, 22)
         overview_title.setStyleSheet("font-size: 16px; font-weight: 700; color: white;")
 
-        self.summary_labels = {}
+        self.record_summary_labels = {}
         summary_items = [
             ("active_residents", "Active residents", 52),
             ("online_devices", "Online devices", 90),

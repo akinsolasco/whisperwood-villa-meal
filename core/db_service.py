@@ -37,6 +37,8 @@ class DatabaseService:
                 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
                 self.conn = sqlite3.connect(self.local_path)
                 self.conn.execute("CREATE TABLE IF NOT EXISTS __connection_check (id INTEGER)")
+                self.conn.execute("INSERT INTO __connection_check DEFAULT VALUES")
+                self.conn.execute("DELETE FROM __connection_check")
                 self.conn.commit()
             except sqlite3.OperationalError:
                 if self.conn is not None:
@@ -46,6 +48,8 @@ class DatabaseService:
                 self.local_path = fallback_dir / "whisperwood_local.sqlite3"
                 self.conn = sqlite3.connect(self.local_path)
                 self.conn.execute("CREATE TABLE IF NOT EXISTS __connection_check (id INTEGER)")
+                self.conn.execute("INSERT INTO __connection_check DEFAULT VALUES")
+                self.conn.execute("DELETE FROM __connection_check")
                 self.conn.commit()
             self.conn.row_factory = sqlite3.Row
             self.backend = "sqlite"
