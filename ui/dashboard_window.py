@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox
 )
 
 from config import DEFAULT_PI_BASE_URL, ASSETS_DIR
@@ -127,6 +127,14 @@ class DashboardWindow(QWidget):
                 background-color: #0a0a0a;
                 border-radius: 28px;
                 color: white;
+            }
+            QWidget QLabel {
+                border: none;
+                background: transparent;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
             }
         """)
         root.addWidget(self.container)
@@ -376,13 +384,7 @@ class DashboardWindow(QWidget):
         self.pages.setGeometry(280, 95, max(980, self.container.width() - 302), max(690, self.container.height() - 115))
 
     def card_style(self):
-        return """
-            QFrame {
-                background-color: #121212;
-                border-radius: 18px;
-                border: 1px solid #242424;
-            }
-        """
+        return "background-color: #121212; border-radius: 18px; border: 1px solid #242424;"
 
     def table_style(self):
         return """
@@ -423,7 +425,7 @@ class DashboardWindow(QWidget):
         title.setGeometry(24, 22, 420, 32)
         title.setStyleSheet("font-size: 26px; font-weight: 800; color: white;")
 
-        subtitle = QLabel("Follow the resident-first flow: save record, pair device, confirm LCD schedule, then review logs.", hero)
+        subtitle = QLabel("Follow the resident-first flow: save record, pair device, auto-send to display pipeline, confirm LCD schedule, then review logs.", hero)
         subtitle.setGeometry(24, 58, 780, 24)
         subtitle.setStyleSheet("font-size: 13px; color: #b8c1cc;")
 
@@ -469,10 +471,10 @@ class DashboardWindow(QWidget):
         workflow_title.setStyleSheet("font-size: 18px; color: white; font-weight: 800;")
         steps = [
             "1. Create or update the resident record.",
-            "2. Attach proof or mark safety review.",
-            "3. Pair the resident to a known device.",
-            "4. Save LCD image and schedule.",
-            "5. Check Logs Admin for delivery status.",
+            "2. Pair the resident to a known device.",
+            "3. On pairing, latest resident text auto-sends to the device.",
+            "4. If already paired, saving updates auto-sends the latest text.",
+            "5. Save LCD image and schedule, then confirm in Logs Admin.",
         ]
         for i, step in enumerate(steps):
             lbl = QLabel(step, workflow)
@@ -654,37 +656,32 @@ class DashboardWindow(QWidget):
         self.txt_schedule.setStyleSheet(self.input_style())
 
         self.lbl_source = QLabel("Source document", self.form_panel)
-        self.lbl_source.setGeometry(22, 594, 120, 18)
+        self.lbl_source.setGeometry(22, 586, 120, 18)
         self.lbl_source.setStyleSheet(self.label_style())
 
         self.btn_attach_source = QPushButton("Attach Document", self.form_panel)
-        self.btn_attach_source.setGeometry(22, 616, 150, 38)
+        self.btn_attach_source.setGeometry(22, 608, 150, 36)
         self.btn_attach_source.setStyleSheet(self.secondary_btn_style())
 
         self.source_doc_label = QLabel("No source document attached", self.form_panel)
-        self.source_doc_label.setGeometry(182, 616, 216, 38)
+        self.source_doc_label.setGeometry(182, 608, 216, 36)
         self.source_doc_label.setWordWrap(True)
         self.source_doc_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
 
         self.chk_safety_review = QCheckBox("Needs safety review", self.form_panel)
-        self.chk_safety_review.setGeometry(22, 666, 160, 24)
+        self.chk_safety_review.setGeometry(22, 650, 160, 24)
         self.chk_safety_review.setStyleSheet(self.chk_active.styleSheet())
 
-        self.txt_safety_review = QLineEdit(self.form_panel)
-        self.txt_safety_review.setGeometry(190, 658, 208, 42)
-        self.txt_safety_review.setPlaceholderText("What to check later")
-        self.txt_safety_review.setStyleSheet(self.input_style())
-
         self.btn_new_resident = QPushButton("New Resident", self.form_panel)
-        self.btn_new_resident.setGeometry(22, 724, 120, 44)
+        self.btn_new_resident.setGeometry(22, 686, 120, 42)
         self.btn_new_resident.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_resident = QPushButton("Save Resident", self.form_panel)
-        self.btn_save_resident.setGeometry(152, 724, 120, 44)
+        self.btn_save_resident.setGeometry(152, 686, 120, 42)
         self.btn_save_resident.setStyleSheet(self.primary_btn_style())
 
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
-        self.btn_clear_fields.setGeometry(282, 724, 116, 44)
+        self.btn_clear_fields.setGeometry(282, 686, 116, 42)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
 
         self.preview_panel = QFrame(page)
@@ -849,10 +846,10 @@ class DashboardWindow(QWidget):
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
 
         self.pair_resident_list = QListWidget(self.pair_left)
-        self.pair_resident_list.setGeometry(20, 60, 260, 720)
+        self.pair_resident_list.setGeometry(20, 60, 260, 500)
 
         self.available_devices_list = QListWidget(self.pair_left)
-        self.available_devices_list.setGeometry(310, 60, 260, 540)
+        self.available_devices_list.setGeometry(310, 60, 260, 500)
 
         for lw in [self.pair_resident_list, self.available_devices_list]:
             lw.setStyleSheet("""
@@ -878,17 +875,17 @@ class DashboardWindow(QWidget):
         lbl_avail.setGeometry(310, 30, 180, 20)
         lbl_avail.setStyleSheet("font-size: 13px; color: #cfcfcf;")
 
-        self.btn_pair_selected = QPushButton("Pair Selected Resident to Selected Device", self.pair_left)
-        self.btn_pair_selected.setGeometry(310, 620, 260, 46)
+        self.btn_pair_selected = QPushButton("Pair Resident to Device", self.pair_left)
+        self.btn_pair_selected.setGeometry(310, 572, 260, 44)
         self.btn_pair_selected.setStyleSheet(self.primary_btn_style())
 
         self.btn_unpair_selected = QPushButton("Unpair Selected Device", self.pair_left)
-        self.btn_unpair_selected.setGeometry(310, 678, 260, 46)
+        self.btn_unpair_selected.setGeometry(310, 624, 260, 44)
         self.btn_unpair_selected.setStyleSheet(self.secondary_btn_style())
 
         self.pair_info = QLabel("Select a resident and a device to pair.")
         self.pair_info.setParent(self.pair_left)
-        self.pair_info.setGeometry(310, 735, 260, 40)
+        self.pair_info.setGeometry(310, 676, 260, 64)
         self.pair_info.setWordWrap(True)
         self.pair_info.setStyleSheet("font-size: 12px; color: #a8a8a8;")
 
@@ -1040,19 +1037,19 @@ class DashboardWindow(QWidget):
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
 
         manual_title = QLabel("Manual LCD Control", self.upd_left)
-        manual_title.setGeometry(22, 602, 180, 22)
+        manual_title.setGeometry(22, 566, 180, 22)
         manual_title.setStyleSheet("font-size: 15px; font-weight: 800; color: white;")
 
         self.btn_lcd_on = QPushButton("Turn LCD ON", self.upd_left)
-        self.btn_lcd_on.setGeometry(22, 636, 150, 42)
+        self.btn_lcd_on.setGeometry(22, 596, 150, 40)
         self.btn_lcd_on.setStyleSheet(self.primary_btn_style())
 
         self.btn_lcd_off = QPushButton("Turn LCD OFF", self.upd_left)
-        self.btn_lcd_off.setGeometry(184, 636, 150, 42)
+        self.btn_lcd_off.setGeometry(184, 596, 150, 40)
         self.btn_lcd_off.setStyleSheet(self.secondary_btn_style())
 
         self.chk_sleep_no_image = QCheckBox("Keep LCD asleep if no image exists", self.upd_left)
-        self.chk_sleep_no_image.setGeometry(22, 698, 260, 24)
+        self.chk_sleep_no_image.setGeometry(22, 644, 300, 24)
         self.chk_sleep_no_image.setStyleSheet(self.chk_active.styleSheet())
 
         self.upd_right = QFrame(page)
@@ -1066,7 +1063,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.upd_epaper_card = QFrame(self.upd_right)
-        self.upd_epaper_card.setGeometry(22, 22, 614, 260)
+        self.upd_epaper_card.setGeometry(22, 22, 614, 220)
         self.upd_epaper_card.setStyleSheet("""
             QFrame {
                 background-color: #efefef;
@@ -1095,12 +1092,12 @@ class DashboardWindow(QWidget):
         self.upd_ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
         self.upd_ep_note = QLabel("Note: ---", self.upd_epaper_card)
-        self.upd_ep_note.setGeometry(18, 176, 560, 36)
+        self.upd_ep_note.setGeometry(18, 172, 560, 30)
         self.upd_ep_note.setWordWrap(True)
         self.upd_ep_note.setStyleSheet("color: #111111; font-size: 13px;")
 
         self.upd_lcd_card = QFrame(self.upd_right)
-        self.upd_lcd_card.setGeometry(22, 304, 614, 280)
+        self.upd_lcd_card.setGeometry(22, 252, 614, 210)
         self.upd_lcd_card.setStyleSheet("""
             QFrame {
                 background-color: #0a1831;
@@ -1114,7 +1111,7 @@ class DashboardWindow(QWidget):
         lcd_title.setStyleSheet("color: white; font-size: 13px; font-weight: 700;")
 
         self.upd_lcd_image = QLabel(self.upd_lcd_card)
-        self.upd_lcd_image.setGeometry(20, 44, 574, 190)
+        self.upd_lcd_image.setGeometry(20, 44, 574, 136)
         self.upd_lcd_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.upd_lcd_image.setStyleSheet("""
             QLabel {
@@ -1125,17 +1122,17 @@ class DashboardWindow(QWidget):
         self.upd_lcd_image.hide()
 
         self.upd_lcd_name = QLabel("Resident Name", self.upd_lcd_card)
-        self.upd_lcd_name.setGeometry(20, 54, 574, 32)
+        self.upd_lcd_name.setGeometry(20, 48, 574, 30)
         self.upd_lcd_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.upd_lcd_name.setStyleSheet("color: white; font-size: 28px; font-weight: 700;")
 
         self.upd_lcd_room = QLabel("Room ---", self.upd_lcd_card)
-        self.upd_lcd_room.setGeometry(20, 94, 574, 22)
+        self.upd_lcd_room.setGeometry(20, 78, 574, 22)
         self.upd_lcd_room.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.upd_lcd_room.setStyleSheet("color: #d7e3f1; font-size: 15px;")
 
         self.upd_lcd_alert = QLabel("STABLE", self.upd_lcd_card)
-        self.upd_lcd_alert.setGeometry(202, 134, 210, 40)
+        self.upd_lcd_alert.setGeometry(202, 104, 210, 34)
         self.upd_lcd_alert.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.upd_lcd_alert.setStyleSheet("""
             QLabel {
@@ -1148,45 +1145,55 @@ class DashboardWindow(QWidget):
         """)
 
         self.upd_lcd_note = QLabel("No note", self.upd_lcd_card)
-        self.upd_lcd_note.setGeometry(20, 196, 574, 42)
+        self.upd_lcd_note.setGeometry(20, 144, 574, 46)
         self.upd_lcd_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.upd_lcd_note.setWordWrap(True)
         self.upd_lcd_note.setStyleSheet("color: #eef2f7; font-size: 14px;")
 
         self.schedule_panel = QFrame(self.upd_right)
-        self.schedule_panel.setGeometry(22, 602, 614, 180)
+        self.schedule_panel.setGeometry(22, 472, 614, 196)
         self.schedule_panel.setStyleSheet(self.card_style())
 
         schedule_title = QLabel("Schedule Management", self.schedule_panel)
-        schedule_title.setGeometry(18, 14, 220, 22)
+        schedule_title.setGeometry(18, 12, 220, 24)
         schedule_title.setStyleSheet("font-size: 16px; color: white; font-weight: 800;")
 
         self.schedule_resident = QComboBox(self.schedule_panel)
-        self.schedule_resident.setGeometry(18, 48, 250, 40)
+        self.schedule_resident.setGeometry(18, 46, 290, 38)
         self.schedule_resident.setStyleSheet(self.input_style())
 
         self.chk_schedule_enabled = QCheckBox("Enabled", self.schedule_panel)
-        self.chk_schedule_enabled.setGeometry(286, 56, 90, 24)
+        self.chk_schedule_enabled.setGeometry(320, 53, 84, 24)
         self.chk_schedule_enabled.setStyleSheet(self.chk_active.styleSheet())
 
+        on_label = QLabel("ON", self.schedule_panel)
+        on_label.setGeometry(414, 24, 30, 18)
+        on_label.setStyleSheet(self.label_style())
+
         self.schedule_on = QTimeEdit(self.schedule_panel)
-        self.schedule_on.setGeometry(380, 48, 90, 40)
+        self.schedule_on.setGeometry(414, 46, 80, 38)
         self.schedule_on.setDisplayFormat("HH:mm")
         self.schedule_on.setTime(QTime(7, 0))
+        self.schedule_on.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.schedule_on.setStyleSheet(self.input_style())
 
+        off_label = QLabel("OFF", self.schedule_panel)
+        off_label.setGeometry(504, 24, 36, 18)
+        off_label.setStyleSheet(self.label_style())
+
         self.schedule_off = QTimeEdit(self.schedule_panel)
-        self.schedule_off.setGeometry(486, 48, 90, 40)
+        self.schedule_off.setGeometry(504, 46, 80, 38)
         self.schedule_off.setDisplayFormat("HH:mm")
         self.schedule_off.setTime(QTime(20, 0))
+        self.schedule_off.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.schedule_off.setStyleSheet(self.input_style())
 
         self.btn_save_schedule = QPushButton("Save Schedule to Pi", self.schedule_panel)
-        self.btn_save_schedule.setGeometry(18, 108, 190, 42)
+        self.btn_save_schedule.setGeometry(18, 102, 190, 40)
         self.btn_save_schedule.setStyleSheet(self.primary_btn_style())
 
         self.schedule_table = QTableWidget(self.schedule_panel)
-        self.schedule_table.setGeometry(225, 102, 370, 62)
+        self.schedule_table.setGeometry(225, 96, 370, 88)
         self.schedule_table.setColumnCount(4)
         self.schedule_table.setHorizontalHeaderLabels(["Resident", "Device", "Image", "Times"])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1390,7 +1397,7 @@ class DashboardWindow(QWidget):
             "drinks": self.txt_drinks.text().strip(),
             "schedule": self.txt_schedule.text().strip(),
             "source_document": self.selected_source_document,
-            "safety_review_note": self.txt_safety_review.text().strip(),
+            "safety_review_note": "Pending safety review" if self.chk_safety_review.isChecked() else "",
             "needs_safety_review": self.chk_safety_review.isChecked(),
             "lcd_image_path": self.selected_image_path,
             "lcd_schedule_enabled": getattr(self, "chk_schedule_enabled", self.chk_active).isChecked() if hasattr(self, "chk_schedule_enabled") else False,
@@ -1436,7 +1443,6 @@ class DashboardWindow(QWidget):
         self.txt_note.clear()
         self.txt_drinks.clear()
         self.txt_schedule.clear()
-        self.txt_safety_review.clear()
 
         self.chk_active.setChecked(True)
         self.chk_safety_review.setChecked(False)
@@ -1458,11 +1464,6 @@ class DashboardWindow(QWidget):
         self.pair_resident_list.clear()
 
         for r in self.db.get_residents():
-            label = f"{r['full_name']} | {r.get('room') or 'No room'} | {r['resident_uid']}"
-            if r.get("paired_device_id"):
-                status = "online" if r.get("paired_device_online") else "offline"
-                label += f" | {status}: {r['paired_device_id']}"
-
             label = f"{r['full_name']} | {r.get('room') or 'No room'} | {r['resident_uid']}"
             if r.get("paired_device_id"):
                 status = "online" if r.get("paired_device_online") else "offline"
@@ -1607,7 +1608,6 @@ class DashboardWindow(QWidget):
         self.txt_note.setPlainText(row.get("note") or "")
         self.txt_drinks.setText(row.get("drinks") or "")
         self.txt_schedule.setText(row.get("schedule") or "")
-        self.txt_safety_review.setText(row.get("safety_review_note") or "")
         self.selected_source_document = row.get("source_document") or None
         self.source_doc_label.setText(os.path.basename(self.selected_source_document) if self.selected_source_document else "No source document attached")
         self.chk_safety_review.setChecked(bool(row.get("needs_safety_review", False)))
@@ -1754,9 +1754,6 @@ class DashboardWindow(QWidget):
     def load_update_targets(self):
         self.upd_target.clear()
         for d in self.db.get_devices():
-            icon = "online" if d["is_online"] else "offline"
-            paired = f" | {d['resident_name']}" if d.get("resident_name") else ""
-            label = f"{icon} {d['device_id']} ({d.get('ip') or '-'}:{d.get('port') or '-'}){paired}"
             status = "online" if d["is_online"] else "offline"
             paired = f" | {d['resident_name']}" if d.get("resident_name") else ""
             label = f"{status}: {d['device_id']} ({d.get('ip') or '-'}:{d.get('port') or '-'}){paired}"
