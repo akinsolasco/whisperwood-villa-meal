@@ -136,7 +136,7 @@ class DashboardWindow(QWidget):
         # Sidebar
         self.sidebar = QFrame(self.container)
         self.sidebar.setGeometry(12, 12, 245, 896)
-        self.sidebar.setStyleSheet("background-color: #121212; border-radius: 22px;")
+        self.apply_frame_style(self.sidebar, "background-color: #121212; border-radius: 22px;")
 
         self.logo = QLabel(self.sidebar)
         self.logo.setGeometry(22, 20, 200, 82)
@@ -155,7 +155,7 @@ class DashboardWindow(QWidget):
 
         self.user_card = QFrame(self.sidebar)
         self.user_card.setGeometry(18, 115, 208, 88)
-        self.user_card.setStyleSheet("background-color: #1a1a1a; border-radius: 16px;")
+        self.apply_frame_style(self.user_card, "background-color: #1a1a1a; border-radius: 16px;")
 
         self.user_avatar = QLabel(self.user_card)
         self.user_avatar.setGeometry(12, 20, 48, 48)
@@ -396,6 +396,11 @@ class DashboardWindow(QWidget):
             }
         """
 
+    def apply_frame_style(self, frame: QFrame, css: str):
+        if not frame.objectName():
+            frame.setObjectName(f"frame_{id(frame)}")
+        frame.setStyleSheet(f"QFrame#{frame.objectName()} {{{css}}}")
+
     def strip_text_only_label_frames(self):
         # Render text labels as plain text (no visible container box).
         protected_labels = {
@@ -404,7 +409,8 @@ class DashboardWindow(QWidget):
         for label in self.findChildren(QLabel):
             if label in protected_labels:
                 continue
-            if label.pixmap() is not None:
+            pixmap = label.pixmap()
+            if pixmap is not None and not pixmap.isNull():
                 continue
 
             style = label.styleSheet() or ""
@@ -468,7 +474,7 @@ class DashboardWindow(QWidget):
 
         hero = QFrame(page)
         hero.setGeometry(0, 0, 1218, 145)
-        hero.setStyleSheet("background-color: #101010; border-radius: 22px; border: 1px solid #273447;")
+        self.apply_frame_style(hero, "background-color: #101010; border-radius: 22px; border: 1px solid #273447;")
 
         title = QLabel("Care operations dashboard", hero)
         title.setGeometry(24, 22, 420, 32)
@@ -507,13 +513,13 @@ class DashboardWindow(QWidget):
             ("active_residents", "Saved residents", 0, 165),
             ("known_devices", "Known devices", 248, 165),
             ("paired_devices", "Paired devices", 496, 165),
-            ("recent_activity", "Recent activity", 744, 165),
+            ("recent_activity", "Recent activity (today)", 744, 165),
             ("online_devices", "Connected now", 992, 165),
         ]
         for key, label, x, y in cards:
             card = QFrame(page)
             card.setGeometry(x, y, 226, 116)
-            card.setStyleSheet(self.card_style())
+            self.apply_frame_style(card, self.card_style())
             small = QLabel(label, card)
             small.setGeometry(18, 18, 170, 22)
             small.setStyleSheet("font-size: 12px; color: #aeb7c2; font-weight: 700;")
@@ -524,7 +530,7 @@ class DashboardWindow(QWidget):
 
         workflow = QFrame(page)
         workflow.setGeometry(0, 305, 402, 470)
-        workflow.setStyleSheet(self.card_style())
+        self.apply_frame_style(workflow, self.card_style())
         workflow_title = QLabel("Workflow Guide", workflow)
         workflow_title.setGeometry(22, 20, 180, 24)
         workflow_title.setStyleSheet("font-size: 18px; color: white; font-weight: 800;")
@@ -543,7 +549,7 @@ class DashboardWindow(QWidget):
 
         device_panel = QFrame(page)
         device_panel.setGeometry(425, 305, 793, 470)
-        device_panel.setStyleSheet(self.card_style())
+        self.apply_frame_style(device_panel, self.card_style())
         device_title = QLabel("Device Status Snapshot", device_panel)
         device_title.setGeometry(22, 18, 260, 24)
         device_title.setStyleSheet("font-size: 18px; color: white; font-weight: 800;")
@@ -564,7 +570,7 @@ class DashboardWindow(QWidget):
 
         self.residents_panel = QFrame(page)
         self.residents_panel.setGeometry(0, 0, 330, 805)
-        self.residents_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.residents_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Residents", self.residents_panel)
         title.setGeometry(20, 18, 120, 24)
@@ -599,7 +605,7 @@ class DashboardWindow(QWidget):
 
         self.form_panel = QFrame(page)
         self.form_panel.setGeometry(345, 0, 420, 805)
-        self.form_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.form_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.form_heading = QLabel("Resident Information", self.form_panel)
         self.form_heading.setGeometry(22, 18, 180, 24)
@@ -733,7 +739,7 @@ class DashboardWindow(QWidget):
 
         self.preview_panel = QFrame(page)
         self.preview_panel.setGeometry(780, 0, 438, 805)
-        self.preview_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.preview_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.preview_heading = QLabel("Live Preview", self.preview_panel)
         self.preview_heading.setGeometry(22, 18, 120, 24)
@@ -745,7 +751,7 @@ class DashboardWindow(QWidget):
 
         self.epaper_card = QFrame(self.preview_panel)
         self.epaper_card.setGeometry(22, 60, 394, 185)
-        self.epaper_card.setStyleSheet("background-color: #efefef; border-radius: 18px;")
+        self.apply_frame_style(self.epaper_card, "background-color: #efefef; border-radius: 18px;")
 
         ep_title = QLabel("E-Paper Preview", self.epaper_card)
         ep_title.setGeometry(16, 12, 120, 18)
@@ -774,7 +780,7 @@ class DashboardWindow(QWidget):
 
         self.lcd_card = QFrame(self.preview_panel)
         self.lcd_card.setGeometry(22, 268, 394, 210)
-        self.lcd_card.setStyleSheet("background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
+        self.apply_frame_style(self.lcd_card, "background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
 
         lcd_title = QLabel("LCD Preview", self.lcd_card)
         lcd_title.setGeometry(16, 12, 100, 18)
@@ -822,7 +828,7 @@ class DashboardWindow(QWidget):
 
         self.overview_panel = QFrame(self.preview_panel)
         self.overview_panel.setGeometry(22, 500, 394, 260)
-        self.overview_panel.setStyleSheet("background-color: #1a1a1a; border-radius: 16px; border: 1px solid #262626;")
+        self.apply_frame_style(self.overview_panel, "background-color: #1a1a1a; border-radius: 16px; border: 1px solid #262626;")
 
         overview_title = QLabel("Overall Dashboard", self.overview_panel)
         overview_title.setGeometry(16, 14, 180, 22)
@@ -857,7 +863,7 @@ class DashboardWindow(QWidget):
 
         self.pair_left = QFrame(page)
         self.pair_left.setGeometry(0, 0, 590, 805)
-        self.pair_left.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.pair_left, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Resident Pairing / Unpairing", self.pair_left)
         title.setGeometry(22, 18, 240, 24)
@@ -909,7 +915,7 @@ class DashboardWindow(QWidget):
 
         self.pair_right = QFrame(page)
         self.pair_right.setGeometry(610, 0, 608, 805)
-        self.pair_right.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.pair_right, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.pair_table = QTableWidget(self.pair_right)
         self.pair_table.setGeometry(18, 18, 572, 768)
@@ -946,7 +952,7 @@ class DashboardWindow(QWidget):
 
         self.upd_left = QFrame(page)
         self.upd_left.setGeometry(0, 0, 540, 805)
-        self.upd_left.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.upd_left, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("LCD Schedule", self.upd_left)
         title.setGeometry(22, 18, 180, 24)
@@ -1060,11 +1066,11 @@ class DashboardWindow(QWidget):
 
         self.upd_right = QFrame(page)
         self.upd_right.setGeometry(560, 0, 658, 805)
-        self.upd_right.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.upd_right, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.upd_epaper_card = QFrame(self.upd_right)
         self.upd_epaper_card.setGeometry(22, 22, 614, 220)
-        self.upd_epaper_card.setStyleSheet("background-color: #efefef; border-radius: 18px;")
+        self.apply_frame_style(self.upd_epaper_card, "background-color: #efefef; border-radius: 18px;")
 
         ep_title = QLabel("E-Paper Preview", self.upd_epaper_card)
         ep_title.setGeometry(18, 14, 120, 18)
@@ -1093,7 +1099,7 @@ class DashboardWindow(QWidget):
 
         self.upd_lcd_card = QFrame(self.upd_right)
         self.upd_lcd_card.setGeometry(22, 252, 614, 210)
-        self.upd_lcd_card.setStyleSheet("background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
+        self.apply_frame_style(self.upd_lcd_card, "background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
 
         lcd_title = QLabel("LCD Preview", self.upd_lcd_card)
         lcd_title.setGeometry(18, 14, 120, 18)
@@ -1141,7 +1147,7 @@ class DashboardWindow(QWidget):
 
         self.schedule_panel = QFrame(self.upd_right)
         self.schedule_panel.setGeometry(22, 472, 614, 196)
-        self.schedule_panel.setStyleSheet(self.card_style())
+        self.apply_frame_style(self.schedule_panel, self.card_style())
 
         schedule_title = QLabel("Schedule Management", self.schedule_panel)
         schedule_title.setGeometry(18, 12, 220, 24)
@@ -1200,7 +1206,7 @@ class DashboardWindow(QWidget):
 
         self.logs_panel = QFrame(page)
         self.logs_panel.setGeometry(0, 0, 1218, 805)
-        self.logs_panel.setStyleSheet("background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
+        self.apply_frame_style(self.logs_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         lbl = QLabel("Activity Logs", self.logs_panel)
         lbl.setGeometry(22, 18, 160, 24)
@@ -1483,7 +1489,7 @@ class DashboardWindow(QWidget):
             "active_residents": summary.get("active_residents", 0),
             "known_devices": summary.get("known_devices", summary.get("online_devices", 0)),
             "paired_devices": summary.get("paired_devices", 0),
-            "recent_activity": summary.get("recent_activity", 0),
+            "recent_activity": summary.get("recent_activity_today", summary.get("recent_activity", 0)),
             "online_devices": summary.get("online_devices", 0),
         }
         for key, value in overview_values.items():

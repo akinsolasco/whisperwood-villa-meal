@@ -502,11 +502,12 @@ class DatabaseService:
     def get_recent_logs(self, limit=50):
         cur = self._cursor(dict_rows=True)
         marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "created_at DESC, id DESC" if self.backend == "postgres" else "datetime(created_at) DESC, id DESC"
         cur.execute(f"""
             SELECT id, created_at, action_type, resident_uid, device_id,
                    pushed_by_username, success, message, payload_json, response_json
             FROM display_updates
-            ORDER BY created_at DESC
+            ORDER BY {order_clause}
             LIMIT {marker}
         """, (limit,))
         rows = self._rows(cur.fetchall())
@@ -569,6 +570,7 @@ class DatabaseService:
         online_filter = "is_online = TRUE" if self.backend == "postgres" else "is_online = 1"
         failed_filter = "success = FALSE" if self.backend == "postgres" else "success = 0"
         review_filter = "needs_safety_review = TRUE" if self.backend == "postgres" else "needs_safety_review = 1"
+        today_logs_filter = "DATE(created_at) = CURRENT_DATE" if self.backend == "postgres" else "DATE(created_at, 'localtime') = DATE('now', 'localtime')"
 
         cur.execute(f"SELECT COUNT(*) AS count FROM residents WHERE {active_filter}")
         active = self._row(cur.fetchone())["count"]
@@ -582,8 +584,10 @@ class DatabaseService:
         paired = self._row(cur.fetchone())["count"]
         cur.execute(f"SELECT COUNT(*) AS count FROM display_updates WHERE {failed_filter}")
         failed_updates = self._row(cur.fetchone())["count"]
+        cur.execute(f"SELECT COUNT(*) AS count FROM display_updates WHERE {today_logs_filter}")
+        recent_activity_today = self._row(cur.fetchone())["count"]
         cur.execute("SELECT COUNT(*) AS count FROM display_updates")
-        recent_activity = self._row(cur.fetchone())["count"]
+        recent_activity_total = self._row(cur.fetchone())["count"]
         cur.execute(f"SELECT COUNT(*) AS count FROM residents WHERE {review_filter}")
         safety_reviews = self._row(cur.fetchone())["count"]
         cur.close()
@@ -594,7 +598,9 @@ class DatabaseService:
             "known_devices": known_devices,
             "paired_devices": paired,
             "failed_updates": failed_updates,
-            "recent_activity": recent_activity,
+            "recent_activity": recent_activity_today,
+            "recent_activity_today": recent_activity_today,
+            "recent_activity_total": recent_activity_total,
             "safety_reviews": safety_reviews,
             "database_mode": self.backend or "unknown",
         }
