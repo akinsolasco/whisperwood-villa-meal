@@ -10,7 +10,7 @@ else:
 ASSETS_DIR = BASE_DIR / "assets"
 
 APP_NAME = "Whisperwood Villa"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 DEFAULT_PI_BASE_URL = "http://192.168.4.1:8080"
 
 GITHUB_OWNER = "akinsolasco"
