@@ -252,7 +252,10 @@ class LoginWindow(QtWidgets.QWidget):
     def _on_login_result(self, result: dict):
         self._stop_login_loading()
         if result["success"]:
-            self.login_success.emit(result["user"])
+            self.login_btn.setEnabled(False)
+            self.login_btn.setText("Opening dashboard...")
+            QtWidgets.QApplication.processEvents()
+            QtCore.QTimer.singleShot(0, lambda: self.login_success.emit(result["user"]))
         else:
             QtWidgets.QMessageBox.critical(self, "Login Failed", result["message"])
 

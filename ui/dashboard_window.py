@@ -58,10 +58,13 @@ class DashboardWindow(QWidget):
         self.timer.timeout.connect(self.refresh_devices)
 
         self.new_resident()
-        self.refresh_devices()
         self.load_residents()
+        self.load_update_targets()
+        self.load_pairing_views()
         self.load_recent_logs()
         self.refresh_dashboard_summary()
+        self.load_schedule_view()
+        QTimer.singleShot(50, self.refresh_devices)
 
     # ---------------------------- styles ----------------------------
 
