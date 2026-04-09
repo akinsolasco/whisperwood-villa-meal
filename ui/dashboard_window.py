@@ -31,13 +31,19 @@ class DashboardWindow(QWidget):
         self.normal_geometry = None
         self.is_custom_maximized = False
         self.selected_resident_id: Optional[int] = None
+        self.selected_pair_resident_id: Optional[int] = None
+        self.selected_pair_device_id: Optional[str] = None
         self.selected_image_path: Optional[str] = None
         self.selected_source_document: Optional[str] = None
         self.rules: List[HighlightRule] = []
+        self.global_schedule_enabled = False
+        self.global_schedule_on = "07:00"
+        self.global_schedule_off = "20:00"
+        self.global_schedule_sleep_if_no_image = False
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
 
         self.setWindowTitle("Whisperwood Villa Dashboard")
-        self.setMinimumSize(1120, 700)
+        self.setMinimumSize(1120, 760)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setStyleSheet("QLabel { border: none; background: transparent; }")
 
@@ -259,7 +265,7 @@ class DashboardWindow(QWidget):
             }
         """)
 
-        self.btn_profile_settings = QPushButton("Profile & Settings", self.sidebar)
+        self.btn_profile_settings = QPushButton("Settings", self.sidebar)
         self.btn_profile_settings.setGeometry(18, 705, 208, 42)
         self.btn_profile_settings.setStyleSheet(self.secondary_btn_style())
 
@@ -367,6 +373,13 @@ class DashboardWindow(QWidget):
 
     def position_window_controls(self):
         self.sidebar.setGeometry(12, 12, 245, max(640, self.container.height() - 24))
+        sidebar_h = self.sidebar.height()
+
+        settings_y = max(540, sidebar_h - 52)
+        badge_y = max(500, settings_y - 44)
+        self.btn_profile_settings.setGeometry(18, settings_y, 208, 42)
+        self.connection_badge.setGeometry(18, badge_y, 208, 28)
+
         right = self.container.width() - 48
         self.close_btn.move(right, 24)
         self.max_btn.move(right - 45, 24)
@@ -736,6 +749,22 @@ class DashboardWindow(QWidget):
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
         self.btn_clear_fields.setGeometry(282, 686, 116, 42)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
+
+        self.btn_delete_resident = QPushButton("Delete Resident", self.form_panel)
+        self.btn_delete_resident.setGeometry(22, 736, 376, 38)
+        self.btn_delete_resident.setStyleSheet("""
+            QPushButton {
+                background-color: #2a1616;
+                color: #ffb3b3;
+                border: 1px solid #5a2323;
+                border-radius: 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background-color: #3a1c1c;
+            }
+        """)
 
         self.preview_panel = QFrame(page)
         self.preview_panel.setGeometry(780, 0, 438, 805)
@@ -1149,13 +1178,15 @@ class DashboardWindow(QWidget):
         self.schedule_panel.setGeometry(22, 472, 614, 196)
         self.apply_frame_style(self.schedule_panel, self.card_style())
 
-        schedule_title = QLabel("Schedule Management", self.schedule_panel)
+        schedule_title = QLabel("Global LCD Schedule", self.schedule_panel)
         schedule_title.setGeometry(18, 12, 220, 24)
         schedule_title.setStyleSheet("font-size: 16px; color: white; font-weight: 800;")
 
         self.schedule_resident = QComboBox(self.schedule_panel)
         self.schedule_resident.setGeometry(18, 46, 290, 38)
         self.schedule_resident.setStyleSheet(self.input_style())
+        self.schedule_resident.addItem("All LCD devices", "all")
+        self.schedule_resident.setEnabled(False)
 
         self.chk_schedule_enabled = QCheckBox("Enabled", self.schedule_panel)
         self.chk_schedule_enabled.setGeometry(320, 53, 84, 24)
@@ -1183,14 +1214,14 @@ class DashboardWindow(QWidget):
         self.schedule_off.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.schedule_off.setStyleSheet(self.input_style())
 
-        self.btn_save_schedule = QPushButton("Save Schedule to Pi", self.schedule_panel)
+        self.btn_save_schedule = QPushButton("Save Schedule to All LCDs", self.schedule_panel)
         self.btn_save_schedule.setGeometry(18, 102, 190, 40)
         self.btn_save_schedule.setStyleSheet(self.primary_btn_style())
 
         self.schedule_table = QTableWidget(self.schedule_panel)
         self.schedule_table.setGeometry(225, 96, 370, 88)
         self.schedule_table.setColumnCount(4)
-        self.schedule_table.setHorizontalHeaderLabels(["Resident", "Device", "Image", "Times"])
+        self.schedule_table.setHorizontalHeaderLabels(["Device", "Status", "Rule", "Times"])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.schedule_table.verticalHeader().setVisible(False)
         self.schedule_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1274,6 +1305,7 @@ class DashboardWindow(QWidget):
         self.btn_new_resident.clicked.connect(self.new_resident)
         self.btn_save_resident.clicked.connect(self.save_resident)
         self.btn_clear_fields.clicked.connect(self.clear_form)
+        self.btn_delete_resident.clicked.connect(self.delete_selected_resident)
         self.btn_go_pairing_after_save.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_attach_source.clicked.connect(self.attach_source_document)
 
@@ -1281,6 +1313,7 @@ class DashboardWindow(QWidget):
         self.resident_list.itemClicked.connect(self.on_resident_selected)
 
         self.pair_resident_list.itemClicked.connect(self.on_pair_resident_selected)
+        self.available_devices_list.itemClicked.connect(self.on_pair_device_selected)
         self.btn_pair_selected.clicked.connect(self.pair_selected_from_menu)
         self.btn_unpair_selected.clicked.connect(self.unpair_selected_from_menu)
 
@@ -1389,10 +1422,10 @@ class DashboardWindow(QWidget):
             "safety_review_note": "Pending safety review" if self.chk_safety_review.isChecked() else "",
             "needs_safety_review": self.chk_safety_review.isChecked(),
             "lcd_image_path": self.selected_image_path,
-            "lcd_schedule_enabled": getattr(self, "chk_schedule_enabled", self.chk_active).isChecked() if hasattr(self, "chk_schedule_enabled") else False,
-            "lcd_on_time": self.schedule_on_time() if hasattr(self, "schedule_on") else None,
-            "lcd_off_time": self.schedule_off_time() if hasattr(self, "schedule_off") else None,
-            "sleep_if_no_image": self.chk_sleep_no_image.isChecked() if hasattr(self, "chk_sleep_no_image") else False,
+            "lcd_schedule_enabled": False,
+            "lcd_on_time": None,
+            "lcd_off_time": None,
+            "sleep_if_no_image": False,
             "active": self.chk_active.isChecked(),
         }
 
@@ -1449,6 +1482,8 @@ class DashboardWindow(QWidget):
         self.update_lcd_image_preview()
 
     def load_residents(self):
+        current_main_id = self.selected_resident_id
+        current_pair_id = self.selected_pair_resident_id
         self.resident_list.clear()
         self.pair_resident_list.clear()
 
@@ -1462,6 +1497,16 @@ class DashboardWindow(QWidget):
                 item = QListWidgetItem(label)
                 item.setData(Qt.ItemDataRole.UserRole, r["id"])
                 lw.addItem(item)
+
+            if current_main_id is not None and r["id"] == current_main_id:
+                self.resident_list.setCurrentRow(self.resident_list.count() - 1)
+            if current_pair_id is not None and r["id"] == current_pair_id:
+                self.pair_resident_list.setCurrentRow(self.pair_resident_list.count() - 1)
+
+        if current_pair_id is not None:
+            row = self.db.get_resident(current_pair_id)
+            if row:
+                self.pair_info.setText(f"Selected resident:\n{row['full_name']} ({row['resident_uid']})")
 
     def filter_residents(self):
         query = self.search_resident.text().strip().lower()
@@ -1518,53 +1563,42 @@ class DashboardWindow(QWidget):
     def load_schedule_view(self):
         if not hasattr(self, "schedule_resident"):
             return
-        current_id = self.schedule_resident.currentData()
         self.schedule_resident.blockSignals(True)
         self.schedule_resident.clear()
-        rows = self.db.get_schedule_rows()
-        for row in rows:
-            self.schedule_resident.addItem(f"{row['full_name']} ({row['resident_uid']})", row["id"])
-        if current_id is not None:
-            idx = self.schedule_resident.findData(current_id)
-            if idx >= 0:
-                self.schedule_resident.setCurrentIndex(idx)
+        devices = self.db.get_devices()
+        self.schedule_resident.addItem(f"All LCD devices ({len(devices)})", "all")
+        self.schedule_resident.setCurrentIndex(0)
         self.schedule_resident.blockSignals(False)
 
-        self.schedule_table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            times = f"{row.get('lcd_on_time') or '--:--'} - {row.get('lcd_off_time') or '--:--'}"
-            image = "Ready" if row.get("lcd_image_path") else "No image"
-            enabled = "Enabled" if row.get("lcd_schedule_enabled") else "Off"
+        self.chk_schedule_enabled.setChecked(bool(self.global_schedule_enabled))
+        self.chk_sleep_no_image.setChecked(bool(self.global_schedule_sleep_if_no_image))
+        self.schedule_on.setTime(QTime.fromString(self.global_schedule_on, "HH:mm"))
+        self.schedule_off.setTime(QTime.fromString(self.global_schedule_off, "HH:mm"))
+
+        self.schedule_table.setRowCount(len(devices))
+        enabled_text = "Enabled" if self.global_schedule_enabled else "Off"
+        rule_text = "Sleep if no image" if self.global_schedule_sleep_if_no_image else "No forced sleep"
+        time_text = f"{enabled_text}: {self.global_schedule_on} - {self.global_schedule_off}"
+        for r, row in enumerate(devices):
             values = [
-                row.get("full_name") or "",
-                row.get("device_id") or "Unpaired",
-                image,
-                f"{enabled}: {times}",
+                row.get("device_id") or "",
+                "Online" if row.get("is_online") else "Offline",
+                rule_text,
+                time_text,
             ]
             for c, value in enumerate(values):
                 self.schedule_table.setItem(r, c, QTableWidgetItem(str(value)))
 
-        selected = self.schedule_resident.currentData()
-        if selected:
-            row = self.db.get_resident(selected)
-            if row:
-                self.chk_schedule_enabled.setChecked(bool(row.get("lcd_schedule_enabled")))
-                self.chk_sleep_no_image.setChecked(bool(row.get("sleep_if_no_image")))
-                if row.get("lcd_on_time"):
-                    self.schedule_on.setTime(QTime.fromString(row.get("lcd_on_time"), "HH:mm"))
-                if row.get("lcd_off_time"):
-                    self.schedule_off.setTime(QTime.fromString(row.get("lcd_off_time"), "HH:mm"))
-                self.selected_resident_id = selected
-
     def show_profile_settings(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Profile & Settings")
+        dialog.setWindowTitle("Settings")
         dialog.resize(520, 420)
         layout = QVBoxLayout(dialog)
         body = QTextEdit(dialog)
         body.setReadOnly(True)
         body.setStyleSheet(self.input_style())
         body.setPlainText(
+            "Settings\n\n"
             f"User: {self.current_user.get('username', 'admin')}\n"
             f"Role: {self.current_user.get('role', 'ADMIN')}\n"
             f"Gateway URL: {self.base_url()}\n\n"
@@ -1607,12 +1641,20 @@ class DashboardWindow(QWidget):
 
         self.update_preview()
         self.load_update_targets()
+        if row.get("paired_device_id"):
+            idx = self.upd_target.findData(row.get("paired_device_id"))
+            if idx >= 0:
+                self.upd_target.setCurrentIndex(idx)
 
     def on_pair_resident_selected(self, item):
         resident_id = item.data(Qt.ItemDataRole.UserRole)
+        self.selected_pair_resident_id = resident_id
         row = self.db.get_resident(resident_id)
         if row:
             self.pair_info.setText(f"Selected resident:\n{row['full_name']} ({row['resident_uid']})")
+
+    def on_pair_device_selected(self, item):
+        self.selected_pair_device_id = item.data(Qt.ItemDataRole.UserRole)
 
     def save_resident(self):
         payload = self.collect_resident_payload()
@@ -1657,6 +1699,54 @@ class DashboardWindow(QWidget):
 
         except Exception as e:
             self.show_error("Save failed", str(e))
+
+    def delete_selected_resident(self):
+        if self.selected_resident_id is None:
+            self.show_error("No resident", "Select a resident to delete.")
+            return
+
+        row = self.db.get_resident(self.selected_resident_id)
+        if not row:
+            self.show_error("Not found", "Resident record was not found.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Delete resident",
+            f"Delete {row.get('full_name', 'this resident')} permanently?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        resident_id = self.selected_resident_id
+        resident_uid = row.get("resident_uid")
+        try:
+            self.db.delete_resident(resident_id)
+            self.db.log_update(
+                "resident_delete",
+                resident_id,
+                resident_uid,
+                row.get("paired_device_id"),
+                self.current_user.get("id"),
+                self.current_user.get("username"),
+                {"resident_id": resident_id, "resident_uid": resident_uid},
+                {"deleted": True},
+                True,
+                f"Resident {row.get('full_name', resident_uid)} deleted",
+            )
+            self.selected_resident_id = None
+            self.selected_pair_resident_id = None
+            self.new_resident()
+            self.load_residents()
+            self.load_pairing_views()
+            self.load_schedule_view()
+            self.load_recent_logs()
+            self.refresh_dashboard_summary()
+            self.show_info("Deleted", "Resident deleted successfully.")
+        except Exception as e:
+            self.show_error("Delete failed", str(e))
 
     def send_saved_resident_if_paired(self):
         row = self.db.get_resident(self.selected_resident_id)
@@ -1741,14 +1831,28 @@ class DashboardWindow(QWidget):
         self.load_schedule_view()
 
     def load_update_targets(self):
+        current_device = self.selected_device_id()
+        self.upd_target.blockSignals(True)
         self.upd_target.clear()
         for d in self.db.get_devices():
-            status = "online" if d["is_online"] else "offline"
-            paired = f" | {d['resident_name']}" if d.get("resident_name") else ""
-            label = f"{status}: {d['device_id']} ({d.get('ip') or '-'}:{d.get('port') or '-'}){paired}"
+            label = str(d["device_id"])
+            if d.get("resident_name"):
+                label += f" | {d['resident_name']}"
             self.upd_target.addItem(label, d["device_id"])
+        if current_device is not None:
+            idx = self.upd_target.findData(current_device)
+            if idx >= 0:
+                self.upd_target.setCurrentIndex(idx)
+        self.upd_target.blockSignals(False)
 
     def load_pairing_views(self):
+        resident_id = self.selected_pair_resident_id
+        device_id = self.selected_pair_device_id
+        if self.pair_resident_list.currentItem():
+            resident_id = self.pair_resident_list.currentItem().data(Qt.ItemDataRole.UserRole)
+        if self.available_devices_list.currentItem():
+            device_id = self.available_devices_list.currentItem().data(Qt.ItemDataRole.UserRole)
+
         self.available_devices_list.clear()
         devices = self.db.get_devices()
 
@@ -1766,24 +1870,29 @@ class DashboardWindow(QWidget):
 
             icon = "online" if d["is_online"] else "offline"
             status = "paired" if d.get("resident_name") else "available"
-            item = QListWidgetItem(f"{icon}: {d['device_id']} | {status}")
+            item = QListWidgetItem(f"{d['device_id']} | {icon} | {status}")
             item.setData(Qt.ItemDataRole.UserRole, d["device_id"])
             self.available_devices_list.addItem(item)
+            if device_id is not None and d["device_id"] == device_id:
+                self.available_devices_list.setCurrentRow(self.available_devices_list.count() - 1)
+
+        self.selected_pair_resident_id = resident_id
+        self.selected_pair_device_id = device_id
 
     def pair_selected_from_menu(self):
         resident_item = self.pair_resident_list.currentItem()
         device_item = self.available_devices_list.currentItem()
 
-        if not resident_item:
+        resident_id = resident_item.data(Qt.ItemDataRole.UserRole) if resident_item else self.selected_pair_resident_id
+        device_id = device_item.data(Qt.ItemDataRole.UserRole) if device_item else self.selected_pair_device_id
+
+        if resident_id is None:
             self.show_error("No resident", "Select a resident first.")
             return
 
-        if not device_item:
+        if not device_id:
             self.show_error("No device", "Select a device first.")
             return
-
-        resident_id = resident_item.data(Qt.ItemDataRole.UserRole)
-        device_id = device_item.data(Qt.ItemDataRole.UserRole)
 
         row = self.db.get_resident(resident_id)
         if not row:
@@ -1791,6 +1900,8 @@ class DashboardWindow(QWidget):
             return
 
         try:
+            self.selected_pair_resident_id = resident_id
+            self.selected_pair_device_id = device_id
             self.db.pair_resident_to_device(resident_id, device_id)
             self.db.log_update(
                 "pair_device",
@@ -1848,12 +1959,12 @@ class DashboardWindow(QWidget):
 
     def unpair_selected_from_menu(self):
         device_item = self.available_devices_list.currentItem()
-        if not device_item:
+        device_id = device_item.data(Qt.ItemDataRole.UserRole) if device_item else self.selected_pair_device_id
+        if not device_id:
             self.show_error("No device", "Select a device first.")
             return
-
-        device_id = device_item.data(Qt.ItemDataRole.UserRole)
         try:
+            self.selected_pair_device_id = device_id
             self.db.unpair_device(device_id)
             self.db.log_update(
                 "unpair_device",
@@ -2185,64 +2296,73 @@ class DashboardWindow(QWidget):
             self.show_error("LCD Command", message)
 
     def save_lcd_schedule(self):
-        resident_id = self.schedule_resident.currentData()
-        if not resident_id:
-            self.show_error("No resident", "Select a resident for the LCD schedule.")
+        devices = [d for d in self.db.get_devices() if d.get("device_id")]
+        if not devices:
+            self.show_error("No devices", "No LCD devices are available to apply the schedule.")
             return
-        row = self.db.get_resident(resident_id)
-        if not row:
-            self.show_error("Not found", "Resident record was not found.")
-            return
-        device_id = row.get("paired_device_id")
-        enabled = self.chk_schedule_enabled.isChecked()
-        on_time = self.schedule_on_time()
-        off_time = self.schedule_off_time()
-        sleep_if_no_image = self.chk_sleep_no_image.isChecked()
-        self.db.save_resident_schedule(resident_id, enabled, on_time, off_time, sleep_if_no_image)
 
-        payload = {
-            "resident_uid": row.get("resident_uid"),
-            "resident_id": resident_id,
-            "device_id": device_id,
-            "enabled": enabled,
-            "lcd_on_time": on_time,
-            "lcd_off_time": off_time,
-            "sleep_if_no_image": sleep_if_no_image,
-            "has_image": bool(row.get("lcd_image_path") or self.selected_image_path),
-        }
-        response = {"saved": True}
-        success = True
-        message = "LCD schedule saved"
-        if device_id:
+        self.global_schedule_enabled = self.chk_schedule_enabled.isChecked()
+        self.global_schedule_on = self.schedule_on_time()
+        self.global_schedule_off = self.schedule_off_time()
+        self.global_schedule_sleep_if_no_image = self.chk_sleep_no_image.isChecked()
+
+        responses = []
+        failed_devices = []
+        for d in devices:
+            device_id = d.get("device_id")
+            payload = {
+                "resident_uid": "GLOBAL",
+                "resident_id": None,
+                "device_id": device_id,
+                "enabled": self.global_schedule_enabled,
+                "lcd_on_time": self.global_schedule_on,
+                "lcd_off_time": self.global_schedule_off,
+                "sleep_if_no_image": self.global_schedule_sleep_if_no_image,
+                "has_image": False,
+            }
             try:
                 result = self.gateway.save_schedule(self.base_url(), payload)
-                success = result["status_code"] == 200
-                response = result["body"]
-                message = "LCD schedule saved to software and Pi" if success else f"Schedule saved locally; Pi returned {result['status_code']}"
+                ok = result["status_code"] == 200
+                responses.append({"device_id": device_id, "status_code": result["status_code"], "body": result["body"]})
+                if not ok:
+                    failed_devices.append(device_id)
             except Exception as e:
-                success = False
-                response = {"error": str(e)}
-                message = f"Schedule saved locally; Pi update queued for review: {e}"
+                failed_devices.append(device_id)
+                responses.append({"device_id": device_id, "error": str(e)})
 
-            if sleep_if_no_image and not payload["has_image"]:
-                self.send_lcd_command("off", device_id)
+        success_count = len(devices) - len(failed_devices)
+        success = len(failed_devices) == 0
+        if success:
+            message = f"Global LCD schedule saved for {success_count} device(s)."
+        else:
+            message = f"Schedule applied to {success_count}/{len(devices)} device(s). Failed: {', '.join(failed_devices)}"
 
         self.db.log_update(
             "save_schedule",
-            resident_id,
-            row.get("resident_uid"),
-            device_id,
+            None,
+            "GLOBAL",
+            "ALL",
             self.current_user.get("id"),
             self.current_user.get("username"),
-            payload,
-            response,
+            {
+                "scope": "all_lcd_devices",
+                "enabled": self.global_schedule_enabled,
+                "lcd_on_time": self.global_schedule_on,
+                "lcd_off_time": self.global_schedule_off,
+                "sleep_if_no_image": self.global_schedule_sleep_if_no_image,
+                "device_ids": [d.get("device_id") for d in devices],
+            },
+            responses,
             success,
-            message
+            message,
         )
         self.load_schedule_view()
         self.refresh_dashboard_summary()
         self.load_recent_logs()
-        self.show_info("Schedule", message)
+        if success:
+            self.show_info("Schedule", message)
+        else:
+            self.show_error("Schedule", message)
 
     def choose_image(self):
         path, _ = QFileDialog.getOpenFileName(

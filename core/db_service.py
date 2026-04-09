@@ -391,6 +391,12 @@ class DatabaseService:
 
     def upsert_devices(self, devices):
         cur = self._cursor()
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        if self.backend == "postgres":
+            cur.execute(f"UPDATE device_registry SET is_online = FALSE, last_seen_s = 9999, updated_at = {timestamp}")
+        else:
+            cur.execute(f"UPDATE device_registry SET is_online = 0, last_seen_s = 9999, updated_at = {timestamp}")
+
         for d in devices:
             if self.backend == "postgres":
                 cur.execute("""
@@ -408,7 +414,7 @@ class DatabaseService:
                         battery_level = EXCLUDED.battery_level,
                         last_sync_at = NOW(),
                         updated_at = NOW()
-                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, d.is_online, d.battery_level))
+                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, True, d.battery_level))
             else:
                 cur.execute("""
                     INSERT INTO device_registry (
@@ -425,7 +431,7 @@ class DatabaseService:
                         battery_level = excluded.battery_level,
                         last_sync_at = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
-                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, int(d.is_online), d.battery_level))
+                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, 1, d.battery_level))
         self.conn.commit()
         cur.close()
 
@@ -469,6 +475,19 @@ class DatabaseService:
             SET paired_resident_id = NULL, updated_at = {timestamp}
             WHERE device_id = {marker}
         """, (device_id,))
+        self.conn.commit()
+        cur.close()
+
+    def delete_resident(self, resident_id):
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        cur.execute(f"""
+            UPDATE device_registry
+            SET paired_resident_id = NULL, updated_at = {timestamp}
+            WHERE paired_resident_id = {marker}
+        """, (resident_id,))
+        cur.execute(f"DELETE FROM residents WHERE id = {marker}", (resident_id,))
         self.conn.commit()
         cur.close()
 
