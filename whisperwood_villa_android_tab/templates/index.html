@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Whisperwood Villa - Android Tab</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div id="loginView" class="login-wrap">
+    <div class="panel login-panel">
+      <h1>Whisperwood Villa</h1>
+      <p class="muted">Android Tablet Edition</p>
+      <label>Gateway Base URL</label>
+      <input id="baseUrlInput" type="text" placeholder="http://192.168.4.1:8080" />
+      <label>Username</label>
+      <input id="usernameInput" type="text" placeholder="Enter username" />
+      <label>Password</label>
+      <input id="passwordInput" type="password" placeholder="Enter password" />
+      <button id="loginBtn" class="primary">Log In</button>
+      <p id="loginError" class="error"></p>
+    </div>
+  </div>
+
+  <div id="appView" class="app-shell hidden">
+    <aside class="sidebar">
+      <h2>Whisperwood</h2>
+      <button data-tab="overview" class="nav active">Overview</button>
+      <button data-tab="residents" class="nav">Resident Records</button>
+      <button data-tab="pairing" class="nav">Device Pairing</button>
+      <button data-tab="schedule" class="nav">LCD Schedule</button>
+      <button data-tab="logs" class="nav">Logs</button>
+      <button id="refreshBtn" class="secondary">Refresh Devices</button>
+      <button id="logoutBtn" class="secondary">Log Out</button>
+    </aside>
+
+    <main class="content">
+      <section id="tab-overview" class="tab active">
+        <div class="cards" id="summaryCards"></div>
+        <div class="panel">
+          <h3>Workflow</h3>
+          <p class="muted">Save resident, pair resident to device, confirm global LCD schedule, then review logs.</p>
+        </div>
+      </section>
+
+      <section id="tab-residents" class="tab">
+        <div class="split">
+          <div class="panel">
+            <h3>Residents</h3>
+            <div id="residentList" class="list"></div>
+          </div>
+          <div class="panel">
+            <h3>Resident Form</h3>
+            <input type="hidden" id="residentId" />
+            <label>Resident UID</label>
+            <input id="residentUid" type="text" />
+            <label>Full Name</label>
+            <input id="residentName" type="text" />
+            <label>Room</label>
+            <input id="residentRoom" type="text" />
+            <label>Diet (comma list)</label>
+            <input id="residentDiet" type="text" />
+            <label>Allergies (comma list)</label>
+            <input id="residentAllergies" type="text" />
+            <label>Note</label>
+            <textarea id="residentNote"></textarea>
+            <label>Drinks</label>
+            <input id="residentDrinks" type="text" />
+            <label>Schedule text</label>
+            <input id="residentSchedule" type="text" />
+            <div class="row">
+              <button id="newResidentBtn" class="secondary">New</button>
+              <button id="saveResidentBtn" class="primary">Save</button>
+              <button id="deleteResidentBtn" class="danger">Delete</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-pairing" class="tab">
+        <div class="split">
+          <div class="panel">
+            <h3>Select Resident</h3>
+            <div id="pairResidentList" class="list"></div>
+          </div>
+          <div class="panel">
+            <h3>Select Device</h3>
+            <div id="deviceList" class="list"></div>
+            <div class="row">
+              <button id="pairBtn" class="primary">Pair</button>
+              <button id="unpairBtn" class="secondary">Unpair</button>
+              <button id="sendTextBtn" class="secondary">Send Text</button>
+            </div>
+            <p id="pairStatus" class="muted"></p>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-schedule" class="tab">
+        <div class="panel">
+          <h3>Global LCD Schedule (All Devices)</h3>
+          <div class="row">
+            <label class="inline">
+              <input id="schedEnabled" type="checkbox" />
+              Enabled
+            </label>
+            <label class="inline">On
+              <input id="schedOn" type="time" value="07:00" />
+            </label>
+            <label class="inline">Off
+              <input id="schedOff" type="time" value="20:00" />
+            </label>
+            <label class="inline">
+              <input id="schedSleepNoImg" type="checkbox" />
+              Sleep if no image
+            </label>
+            <button id="saveScheduleBtn" class="primary">Apply to All</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-logs" class="tab">
+        <div class="panel">
+          <h3>Recent Logs</h3>
+          <div id="logsList" class="list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+
