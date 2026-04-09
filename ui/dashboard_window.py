@@ -17,7 +17,6 @@ from config import DEFAULT_PI_BASE_URL, ASSETS_DIR
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
-from core.tablet_bridge import TabletBridge
 
 
 class DashboardWindow(QWidget):
@@ -27,7 +26,7 @@ class DashboardWindow(QWidget):
         self.db = DatabaseService()
         self.db.ensure_tables()
         self.gateway = GatewayClient()
-        self.tablet_bridge = TabletBridge()
+        self.tablet_bridge = None
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -1599,6 +1598,12 @@ class DashboardWindow(QWidget):
         dialog.setWindowTitle("Settings")
         dialog.resize(560, 500)
         layout = QVBoxLayout(dialog)
+        bridge = None
+        bridge_error = ""
+        try:
+            bridge = self.get_tablet_bridge()
+        except Exception as exc:
+            bridge_error = str(exc)
         body = QTextEdit(dialog)
         body.setReadOnly(True)
         body.setStyleSheet(self.input_style())
@@ -1623,11 +1628,13 @@ class DashboardWindow(QWidget):
         link_value = QLineEdit(dialog)
         link_value.setReadOnly(True)
         link_value.setStyleSheet(self.input_style())
-        link_value.setText(self.tablet_bridge.public_url() if self.tablet_bridge.is_running else "Not running")
+        link_value.setText(bridge.public_url() if bridge and bridge.is_running else "Not running")
         layout.addWidget(link_value)
 
         link_status = QLabel("", dialog)
         link_status.setStyleSheet("font-size: 12px; color: #a7a7a7;")
+        if bridge_error:
+            link_status.setText(f"Tablet link unavailable: {bridge_error}")
         layout.addWidget(link_status)
 
         row = QHBoxLayout()
@@ -1646,22 +1653,28 @@ class DashboardWindow(QWidget):
         layout.addLayout(row)
 
         def refresh_link_ui(status_text=""):
-            if self.tablet_bridge.is_running:
-                link_value.setText(self.tablet_bridge.public_url())
+            if bridge and bridge.is_running:
+                link_value.setText(bridge.public_url())
             else:
                 link_value.setText("Not running")
             if status_text:
                 link_status.setText(status_text)
 
         def on_start():
+            if bridge is None:
+                refresh_link_ui("Tablet link is unavailable in this build.")
+                return
             try:
-                url = self.tablet_bridge.start()
+                url = bridge.start()
                 refresh_link_ui(f"Tablet link is active: {url}")
             except Exception as exc:
                 refresh_link_ui(f"Failed to start tablet link: {exc}")
 
         def on_stop():
-            self.tablet_bridge.stop()
+            if bridge is None:
+                refresh_link_ui("Tablet link is unavailable in this build.")
+                return
+            bridge.stop()
             refresh_link_ui("Tablet link stopped.")
 
         def on_copy():
@@ -1677,6 +1690,12 @@ class DashboardWindow(QWidget):
         copy_btn.clicked.connect(on_copy)
         close_btn.clicked.connect(dialog.accept)
         dialog.exec()
+
+    def get_tablet_bridge(self):
+        if self.tablet_bridge is None:
+            from core.tablet_bridge import TabletBridge
+            self.tablet_bridge = TabletBridge()
+        return self.tablet_bridge
 
     def on_resident_selected(self, item):
         resident_id = item.data(Qt.ItemDataRole.UserRole)
@@ -2657,7 +2676,8 @@ class DashboardWindow(QWidget):
 
     def closeEvent(self, event):
         try:
-            self.tablet_bridge.stop()
+            if self.tablet_bridge is not None:
+                self.tablet_bridge.stop()
         except Exception:
             pass
         try:
