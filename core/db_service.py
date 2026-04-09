@@ -1,6 +1,5 @@
 import json
 import sqlite3
-import socket
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -30,15 +29,7 @@ class DatabaseService:
 
         try:
             config = dict(DB_CONFIG)
-            host = config.get("host")
-            port = int(config.get("port", 5432))
-            if host:
-                try:
-                    with socket.create_connection((host, port), timeout=0.8):
-                        pass
-                except OSError:
-                    raise psycopg2.OperationalError("database host unreachable")
-            config.setdefault("connect_timeout", 1)
+            config.setdefault("connect_timeout", 2)
             self.conn = psycopg2.connect(**config)
             self.backend = "postgres"
         except Exception:

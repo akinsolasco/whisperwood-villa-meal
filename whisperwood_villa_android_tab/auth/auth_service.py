@@ -1,23 +1,10 @@
 import bcrypt
 import psycopg2
-import socket
 
 try:
     from ..db_config import DB_CONFIG
 except ImportError:
     from db_config import DB_CONFIG
-
-
-def _postgres_reachable(timeout: float = 0.8) -> bool:
-    host = DB_CONFIG.get("host")
-    port = int(DB_CONFIG.get("port", 5432))
-    if not host:
-        return True
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
 
 
 class AuthService:
@@ -26,10 +13,8 @@ class AuthService:
 
     def connect(self):
         if self.conn is None or self.conn.closed:
-            if not _postgres_reachable():
-                raise psycopg2.OperationalError("database host unreachable")
             config = dict(DB_CONFIG)
-            config.setdefault("connect_timeout", 1)
+            config.setdefault("connect_timeout", 2)
             self.conn = psycopg2.connect(**config)
 
     def close(self):
