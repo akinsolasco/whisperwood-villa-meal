@@ -414,7 +414,7 @@ class DatabaseService:
                         battery_level = EXCLUDED.battery_level,
                         last_sync_at = NOW(),
                         updated_at = NOW()
-                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, True, d.battery_level))
+                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, bool(d.is_online), d.battery_level))
             else:
                 cur.execute("""
                     INSERT INTO device_registry (
@@ -431,7 +431,7 @@ class DatabaseService:
                         battery_level = excluded.battery_level,
                         last_sync_at = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
-                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, 1, d.battery_level))
+                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, int(bool(d.is_online)), d.battery_level))
         self.conn.commit()
         cur.close()
 

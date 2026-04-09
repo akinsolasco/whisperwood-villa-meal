@@ -1726,7 +1726,7 @@ class DashboardWindow(QWidget):
             self.db.delete_resident(resident_id)
             self.db.log_update(
                 "resident_delete",
-                resident_id,
+                None,
                 resident_uid,
                 row.get("paired_device_id"),
                 self.current_user.get("id"),
