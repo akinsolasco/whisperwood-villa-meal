@@ -19,16 +19,48 @@ class TabletBridge:
     def is_running(self) -> bool:
         return self._server is not None and self._thread is not None and self._thread.is_alive()
 
+    @staticmethod
+    def _runtime_roots():
+        roots = []
+
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            roots.append(Path(meipass))
+
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            roots.append(exe_dir)
+            roots.append(exe_dir / "_internal")
+
+        roots.append(Path(__file__).resolve().parent.parent)
+
+        seen = set()
+        unique_roots = []
+        for root in roots:
+            key = str(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_roots.append(root)
+        return unique_roots
+
+    def _resolve_tablet_app_file(self) -> Path:
+        searched = []
+        for root in self._runtime_roots():
+            candidate = root / "whisperwood_villa_android_tab" / "app.py"
+            searched.append(str(candidate))
+            if candidate.exists():
+                return candidate
+        searched_list = "\n".join(f"- {path}" for path in searched)
+        raise RuntimeError(f"Tablet app not found. Searched:\n{searched_list}")
+
     def _load_flask_app(self):
         try:
             from werkzeug.serving import make_server  # noqa: F401
         except Exception as exc:
             raise RuntimeError("Flask/Werkzeug is not installed in this build.") from exc
 
-        project_root = Path(__file__).resolve().parent.parent
-        app_file = project_root / "whisperwood_villa_android_tab" / "app.py"
-        if not app_file.exists():
-            raise RuntimeError(f"Tablet app not found: {app_file}")
+        app_file = self._resolve_tablet_app_file()
 
         tablet_dir = str(app_file.parent)
         if tablet_dir not in sys.path:
@@ -79,4 +111,3 @@ class TabletBridge:
         if self._thread is not None:
             self._thread.join(timeout=1.5)
             self._thread = None
-

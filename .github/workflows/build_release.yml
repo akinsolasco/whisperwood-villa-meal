@@ -35,7 +35,7 @@ jobs:
 
       - name: Build app with PyInstaller
         run: |
-          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVilla --icon assets/app_icon.ico --add-data "assets;assets" main.py
+          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVilla --icon assets/app_icon.ico --add-data "assets;assets" --add-data "whisperwood_villa_android_tab;whisperwood_villa_android_tab" main.py
 
       - name: Install Inno Setup
         shell: powershell
