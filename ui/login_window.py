@@ -14,18 +14,11 @@ class LoginWorker(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def run(self):
-        auth = None
         try:
             auth = AuthService()
             result = auth.login(self.username, self.password)
         except Exception as exc:
             result = {"success": False, "message": str(exc), "user": None}
-        finally:
-            try:
-                if auth is not None:
-                    auth.close()
-            except Exception:
-                pass
         self.finished.emit(result)
 
 
@@ -259,15 +252,9 @@ class LoginWindow(QtWidgets.QWidget):
     def _on_login_result(self, result: dict):
         self._stop_login_loading()
         if result["success"]:
-            self.login_btn.setEnabled(False)
-            self.login_btn.setText("Opening dashboard...")
-            QtCore.QTimer.singleShot(0, lambda: self.login_success.emit(result["user"]))
+            self.login_success.emit(result["user"])
         else:
             QtWidgets.QMessageBox.critical(self, "Login Failed", result["message"])
-
-    def handle_dashboard_open_error(self, message: str):
-        self._stop_login_loading()
-        QtWidgets.QMessageBox.critical(self, "Open Dashboard Failed", message)
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:

@@ -24,8 +24,8 @@ class DashboardWindow(QWidget):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
         self.db = DatabaseService()
+        self.db.ensure_tables()
         self.gateway = GatewayClient()
-        self.tablet_bridge = None
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -54,21 +54,12 @@ class DashboardWindow(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
         self.timer.timeout.connect(self.refresh_devices)
-        QTimer.singleShot(0, self.bootstrap_startup_data)
 
-    def bootstrap_startup_data(self):
-        try:
-            self.db.ensure_tables()
-            self.new_resident()
-            self.load_residents()
-            self.load_update_targets()
-            self.load_pairing_views()
-            self.load_recent_logs()
-            self.refresh_dashboard_summary()
-            self.load_schedule_view()
-            QTimer.singleShot(50, self.refresh_devices)
-        except Exception as exc:
-            self.show_error("Startup Error", f"Failed to initialize dashboard data: {exc}")
+        self.new_resident()
+        self.refresh_devices()
+        self.load_residents()
+        self.load_recent_logs()
+        self.refresh_dashboard_summary()
 
     # ---------------------------- styles ----------------------------
 
@@ -1601,14 +1592,8 @@ class DashboardWindow(QWidget):
     def show_profile_settings(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
-        dialog.resize(560, 500)
+        dialog.resize(520, 420)
         layout = QVBoxLayout(dialog)
-        bridge = None
-        bridge_error = ""
-        try:
-            bridge = self.get_tablet_bridge()
-        except Exception as exc:
-            bridge_error = str(exc)
         body = QTextEdit(dialog)
         body.setReadOnly(True)
         body.setStyleSheet(self.input_style())
@@ -1625,82 +1610,11 @@ class DashboardWindow(QWidget):
             "- admin permissions"
         )
         layout.addWidget(body)
-
-        link_title = QLabel("Tablet Link", dialog)
-        link_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #dcdcdc;")
-        layout.addWidget(link_title)
-
-        link_value = QLineEdit(dialog)
-        link_value.setReadOnly(True)
-        link_value.setStyleSheet(self.input_style())
-        link_value.setText(bridge.public_url() if bridge and bridge.is_running else "Not running")
-        layout.addWidget(link_value)
-
-        link_status = QLabel("", dialog)
-        link_status.setStyleSheet("font-size: 12px; color: #a7a7a7;")
-        if bridge_error:
-            link_status.setText(f"Tablet link unavailable: {bridge_error}")
-        layout.addWidget(link_status)
-
-        row = QHBoxLayout()
-        start_btn = QPushButton("Start Tablet Link", dialog)
-        start_btn.setStyleSheet(self.primary_btn_style())
-        stop_btn = QPushButton("Stop Link", dialog)
-        stop_btn.setStyleSheet(self.secondary_btn_style())
-        copy_btn = QPushButton("Copy Link", dialog)
-        copy_btn.setStyleSheet(self.secondary_btn_style())
         close_btn = QPushButton("Close", dialog)
-        close_btn.setStyleSheet(self.secondary_btn_style())
-        row.addWidget(start_btn)
-        row.addWidget(stop_btn)
-        row.addWidget(copy_btn)
-        row.addWidget(close_btn)
-        layout.addLayout(row)
-
-        def refresh_link_ui(status_text=""):
-            if bridge and bridge.is_running:
-                link_value.setText(bridge.public_url())
-            else:
-                link_value.setText("Not running")
-            if status_text:
-                link_status.setText(status_text)
-
-        def on_start():
-            if bridge is None:
-                refresh_link_ui("Tablet link is unavailable in this build.")
-                return
-            try:
-                url = bridge.start()
-                refresh_link_ui(f"Tablet link is active: {url}")
-            except Exception as exc:
-                refresh_link_ui(f"Failed to start tablet link: {exc}")
-
-        def on_stop():
-            if bridge is None:
-                refresh_link_ui("Tablet link is unavailable in this build.")
-                return
-            bridge.stop()
-            refresh_link_ui("Tablet link stopped.")
-
-        def on_copy():
-            text = link_value.text().strip()
-            if text and text != "Not running":
-                QGuiApplication.clipboard().setText(text)
-                refresh_link_ui("Link copied to clipboard.")
-            else:
-                refresh_link_ui("Start tablet link first.")
-
-        start_btn.clicked.connect(on_start)
-        stop_btn.clicked.connect(on_stop)
-        copy_btn.clicked.connect(on_copy)
+        close_btn.setStyleSheet(self.primary_btn_style())
         close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
         dialog.exec()
-
-    def get_tablet_bridge(self):
-        if self.tablet_bridge is None:
-            from core.tablet_bridge import TabletBridge
-            self.tablet_bridge = TabletBridge()
-        return self.tablet_bridge
 
     def on_resident_selected(self, item):
         resident_id = item.data(Qt.ItemDataRole.UserRole)
@@ -2680,11 +2594,6 @@ class DashboardWindow(QWidget):
             self.position_window_controls()
 
     def closeEvent(self, event):
-        try:
-            if self.tablet_bridge is not None:
-                self.tablet_bridge.stop()
-        except Exception:
-            pass
         try:
             self.db.close()
         except Exception:
