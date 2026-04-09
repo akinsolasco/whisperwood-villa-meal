@@ -1,13 +1,9 @@
-import json
-import sqlite3
 import uuid
 from datetime import datetime
-from pathlib import Path
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
-from config import APP_DATA_DIR, BASE_DIR
 from db_config import DB_CONFIG
 
 
@@ -19,93 +15,40 @@ class DatabaseService:
     def __init__(self):
         self.conn = None
         self.backend = None
-        self.local_path = Path(APP_DATA_DIR) / "whisperwood_local.sqlite3"
 
     def connect(self):
-        if self.backend == "postgres" and self.conn is not None and not self.conn.closed:
-            return
-        if self.backend == "sqlite" and self.conn is not None:
+        if self.conn is not None and not self.conn.closed:
             return
 
-        try:
-            config = dict(DB_CONFIG)
-            config.setdefault("connect_timeout", 2)
-            self.conn = psycopg2.connect(**config)
-            self.backend = "postgres"
-        except Exception:
-            try:
-                APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(self.local_path)
-                self.conn.execute("CREATE TABLE IF NOT EXISTS __connection_check (id INTEGER)")
-                self.conn.execute("INSERT INTO __connection_check DEFAULT VALUES")
-                self.conn.execute("DELETE FROM __connection_check")
-                self.conn.commit()
-            except sqlite3.OperationalError:
-                if self.conn is not None:
-                    self.conn.close()
-                fallback_dir = Path(BASE_DIR) / "data"
-                fallback_dir.mkdir(parents=True, exist_ok=True)
-                self.local_path = fallback_dir / "whisperwood_local.sqlite3"
-                self.conn = sqlite3.connect(self.local_path)
-                self.conn.execute("CREATE TABLE IF NOT EXISTS __connection_check (id INTEGER)")
-                self.conn.execute("INSERT INTO __connection_check DEFAULT VALUES")
-                self.conn.execute("DELETE FROM __connection_check")
-                self.conn.commit()
-            self.conn.row_factory = sqlite3.Row
-            self.backend = "sqlite"
+        config = dict(DB_CONFIG)
+        config.setdefault("connect_timeout", 2)
+        self.conn = psycopg2.connect(**config)
+        self.backend = "postgres"
 
     def close(self):
-        if self.conn and self.backend == "postgres" and not self.conn.closed:
-            self.conn.close()
-        elif self.conn and self.backend == "sqlite":
+        if self.conn and not self.conn.closed:
             self.conn.close()
         self.conn = None
         self.backend = None
 
     def _cursor(self, dict_rows=False):
         self.connect()
-        if self.backend == "postgres" and dict_rows:
+        if dict_rows:
             return self.conn.cursor(cursor_factory=RealDictCursor)
         return self.conn.cursor()
 
     def _rows(self, rows):
-        if self.backend == "sqlite":
-            return [dict(row) for row in rows]
         return rows
 
     def _row(self, row):
         if row is None:
             return None
-        if self.backend == "sqlite":
-            return dict(row)
         return row
 
     def _json_value(self, value):
         if value is None:
             return None
-        if self.backend == "postgres":
-            return Json(value)
-        return json.dumps(value)
-
-    def _add_resident_columns(self, cur):
-        columns = {
-            row["name"] if self.backend == "sqlite" else row[0]
-            for row in cur.execute("PRAGMA table_info(residents)").fetchall()
-        }
-        additions = {
-            "schedule": "ALTER TABLE residents ADD COLUMN schedule TEXT",
-            "source_document": "ALTER TABLE residents ADD COLUMN source_document TEXT",
-            "safety_review_note": "ALTER TABLE residents ADD COLUMN safety_review_note TEXT",
-            "needs_safety_review": "ALTER TABLE residents ADD COLUMN needs_safety_review BOOLEAN NOT NULL DEFAULT 0",
-            "lcd_image_path": "ALTER TABLE residents ADD COLUMN lcd_image_path TEXT",
-            "lcd_schedule_enabled": "ALTER TABLE residents ADD COLUMN lcd_schedule_enabled BOOLEAN NOT NULL DEFAULT 0",
-            "lcd_on_time": "ALTER TABLE residents ADD COLUMN lcd_on_time TEXT",
-            "lcd_off_time": "ALTER TABLE residents ADD COLUMN lcd_off_time TEXT",
-            "sleep_if_no_image": "ALTER TABLE residents ADD COLUMN sleep_if_no_image BOOLEAN NOT NULL DEFAULT 0",
-        }
-        for column, sql in additions.items():
-            if column not in columns:
-                cur.execute(sql)
+        return Json(value)
 
     def ensure_tables(self):
         self.connect()
@@ -243,6 +186,13 @@ class DatabaseService:
             );
             """)
 
+        self.conn.commit()
+        cur.close()
+
+    def wipe_operational_data(self):
+        self.connect()
+        cur = self.conn.cursor()
+        cur.execute("TRUNCATE TABLE display_updates, device_registry, residents RESTART IDENTITY CASCADE;")
         self.conn.commit()
         cur.close()
 

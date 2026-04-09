@@ -14,11 +14,18 @@ class LoginWorker(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def run(self):
+        auth = None
         try:
             auth = AuthService()
             result = auth.login(self.username, self.password)
         except Exception as exc:
             result = {"success": False, "message": str(exc), "user": None}
+        finally:
+            try:
+                if auth is not None:
+                    auth.close()
+            except Exception:
+                pass
         self.finished.emit(result)
 
 

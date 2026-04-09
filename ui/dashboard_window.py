@@ -26,6 +26,7 @@ class DashboardWindow(QWidget):
         self.db = DatabaseService()
         self.db.ensure_tables()
         self.gateway = GatewayClient()
+        self.gateway_online = False
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -50,6 +51,7 @@ class DashboardWindow(QWidget):
         self.build_ui()
         self.bind_events()
         self.fit_to_screen()
+        self.apply_write_lock()
 
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
@@ -1435,6 +1437,56 @@ class DashboardWindow(QWidget):
     def show_info(self, title, text):
         QMessageBox.information(self, title, text)
 
+    def set_gateway_state(self, online: bool):
+        self.gateway_online = bool(online)
+        if self.gateway_online:
+            self.connection_badge.setText("Gateway: Connected")
+            self.connection_badge.setStyleSheet("""
+                QLabel {
+                    background-color: #16351f;
+                    color: #76e28b;
+                    border-radius: 12px;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+            """)
+        else:
+            self.connection_badge.setText("Gateway: Offline")
+            self.connection_badge.setStyleSheet("""
+                QLabel {
+                    background-color: #351616;
+                    color: #ff9090;
+                    border-radius: 12px;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+            """)
+        self.apply_write_lock()
+
+    def apply_write_lock(self):
+        can_write = self.gateway_online
+        write_buttons = [
+            "btn_save_resident",
+            "btn_delete_resident",
+            "btn_pair_selected",
+            "btn_unpair_selected",
+            "btn_send_text",
+            "btn_send_image",
+            "btn_lcd_on",
+            "btn_lcd_off",
+            "btn_save_schedule",
+        ]
+        for btn_name in write_buttons:
+            btn = getattr(self, btn_name, None)
+            if btn is not None:
+                btn.setEnabled(can_write)
+
+    def require_network_for_write(self, action_name: str) -> bool:
+        if self.gateway_online:
+            return True
+        self.show_error("Network Required", f"{action_name} requires active gateway network connection.")
+        return False
+
     def attach_source_document(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1527,7 +1579,7 @@ class DashboardWindow(QWidget):
             if hasattr(self, "record_summary_labels") and key in self.record_summary_labels:
                 self.record_summary_labels[key].setText(f"{title}: {summary.get(key, 0)}")
         if hasattr(self, "record_summary_labels") and "database_mode" in self.record_summary_labels:
-            mode = "local fallback" if summary.get("database_mode") == "sqlite" else "gateway database"
+            mode = "network database" if summary.get("database_mode") == "postgres" else "unavailable"
             self.record_summary_labels["database_mode"].setText(f"Data store: {mode}")
 
         overview_values = {
@@ -1541,7 +1593,7 @@ class DashboardWindow(QWidget):
             if hasattr(self, "summary_labels") and key in self.summary_labels:
                 self.summary_labels[key].setText(str(value))
         if hasattr(self, "overview_status"):
-            mode = "local fallback" if summary.get("database_mode") == "sqlite" else "gateway database"
+            mode = "network database" if summary.get("database_mode") == "postgres" else "unavailable"
             self.overview_status.setText(f"Data store: {mode}\nGateway: {self.connection_badge.text()}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
         if hasattr(self, "overview_device_table"):
             self.load_overview_devices()
@@ -1657,6 +1709,8 @@ class DashboardWindow(QWidget):
         self.selected_pair_device_id = item.data(Qt.ItemDataRole.UserRole)
 
     def save_resident(self):
+        if not self.require_network_for_write("Saving resident information"):
+            return
         payload = self.collect_resident_payload()
 
         if not payload["resident_uid"]:
@@ -1701,6 +1755,8 @@ class DashboardWindow(QWidget):
             self.show_error("Save failed", str(e))
 
     def delete_selected_resident(self):
+        if not self.require_network_for_write("Deleting resident information"):
+            return
         if self.selected_resident_id is None:
             self.show_error("No resident", "Select a resident to delete.")
             return
@@ -1749,6 +1805,8 @@ class DashboardWindow(QWidget):
             self.show_error("Delete failed", str(e))
 
     def send_saved_resident_if_paired(self):
+        if not self.gateway_online:
+            return
         row = self.db.get_resident(self.selected_resident_id)
         device_id = row.get("paired_device_id") if row else None
         if not device_id:
@@ -1785,39 +1843,24 @@ class DashboardWindow(QWidget):
         try:
             devices = self.gateway.get_devices(self.base_url())
             self.db.upsert_devices(devices)
-            self.connection_badge.setText("Gateway: Connected")
-            self.connection_badge.setStyleSheet("""
-                QLabel {
-                    background-color: #16351f;
-                    color: #76e28b;
-                    border-radius: 12px;
-                    font-size: 13px;
-                    font-weight: 700;
-                }
-            """)
+            self.set_gateway_state(True)
         except Exception as e:
-            self.connection_badge.setText("Gateway: Offline")
-            self.connection_badge.setStyleSheet("""
-                QLabel {
-                    background-color: #351616;
-                    color: #ff9090;
-                    border-radius: 12px;
-                    font-size: 13px;
-                    font-weight: 700;
-                }
-            """)
-            self.db.log_update(
-                "device_refresh",
-                self.selected_resident_id,
-                self.current_resident_uid(),
-                None,
-                self.current_user.get("id"),
-                self.current_user.get("username"),
-                {"base_url": self.base_url()},
-                {"error": str(e)},
-                False,
-                f"Failed to refresh devices: {e}"
-            )
+            self.set_gateway_state(False)
+            try:
+                self.db.log_update(
+                    "device_refresh",
+                    self.selected_resident_id,
+                    self.current_resident_uid(),
+                    None,
+                    self.current_user.get("id"),
+                    self.current_user.get("username"),
+                    {"base_url": self.base_url()},
+                    {"error": str(e)},
+                    False,
+                    f"Failed to refresh devices: {e}"
+                )
+            except Exception:
+                pass
             self.load_recent_logs()
             self.refresh_dashboard_summary()
             self.load_schedule_view()
@@ -1880,6 +1923,8 @@ class DashboardWindow(QWidget):
         self.selected_pair_device_id = device_id
 
     def pair_selected_from_menu(self):
+        if not self.require_network_for_write("Pairing resident to device"):
+            return
         resident_item = self.pair_resident_list.currentItem()
         device_item = self.available_devices_list.currentItem()
 
@@ -1922,6 +1967,8 @@ class DashboardWindow(QWidget):
             self.show_error("Pair failed", str(e))
 
     def push_resident_row_to_device(self, row, device_id, action_type):
+        if not self.gateway_online:
+            return
         payload = {
             "id": device_id,
             "name": row.get("full_name") or "",
@@ -1958,6 +2005,8 @@ class DashboardWindow(QWidget):
         )
 
     def unpair_selected_from_menu(self):
+        if not self.require_network_for_write("Unpairing device"):
+            return
         device_item = self.available_devices_list.currentItem()
         device_id = device_item.data(Qt.ItemDataRole.UserRole) if device_item else self.selected_pair_device_id
         if not device_id:
@@ -2209,6 +2258,8 @@ class DashboardWindow(QWidget):
         return payload
 
     def send_text_update(self):
+        if not self.require_network_for_write("Sending text update"):
+            return
         if not self.selected_resident_id:
             self.show_error("No resident", "Select or save a resident first.")
             return
@@ -2263,6 +2314,8 @@ class DashboardWindow(QWidget):
             self.show_error("Network Error", str(e))
 
     def send_lcd_command(self, command, device_id=None):
+        if not self.require_network_for_write("Sending LCD command"):
+            return
         device_id = device_id or self.selected_device_id()
         if not device_id:
             self.show_error("No device", "Please select a paired device first.")
@@ -2296,6 +2349,8 @@ class DashboardWindow(QWidget):
             self.show_error("LCD Command", message)
 
     def save_lcd_schedule(self):
+        if not self.require_network_for_write("Saving LCD schedule"):
+            return
         devices = [d for d in self.db.get_devices() if d.get("device_id")]
         if not devices:
             self.show_error("No devices", "No LCD devices are available to apply the schedule.")
@@ -2384,6 +2439,8 @@ class DashboardWindow(QWidget):
         self.update_lcd_image_preview()
 
     def send_image(self):
+        if not self.require_network_for_write("Sending LCD image"):
+            return
         if not self.selected_resident_id:
             self.show_error("No resident", "Select or save a resident first.")
             return

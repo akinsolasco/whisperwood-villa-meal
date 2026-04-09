@@ -58,13 +58,9 @@ class AuthService:
 
         except psycopg2.OperationalError:
             return {
-                "success": True,
-                "message": "Database offline; opened in local fallback mode",
-                "user": {
-                    "id": None,
-                    "username": username,
-                    "role": "OFFLINE",
-                }
+                "success": False,
+                "message": "Cannot connect to network database. Connect to the network and try again.",
+                "user": None,
             }
         except Exception as e:
             return {"success": False, "message": str(e), "user": None}
