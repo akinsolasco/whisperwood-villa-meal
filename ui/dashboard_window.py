@@ -17,6 +17,7 @@ from config import DEFAULT_PI_BASE_URL, ASSETS_DIR
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
+from core.tablet_bridge import TabletBridge
 
 
 class DashboardWindow(QWidget):
@@ -26,6 +27,7 @@ class DashboardWindow(QWidget):
         self.db = DatabaseService()
         self.db.ensure_tables()
         self.gateway = GatewayClient()
+        self.tablet_bridge = TabletBridge()
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -1592,7 +1594,7 @@ class DashboardWindow(QWidget):
     def show_profile_settings(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
-        dialog.resize(520, 420)
+        dialog.resize(560, 500)
         layout = QVBoxLayout(dialog)
         body = QTextEdit(dialog)
         body.setReadOnly(True)
@@ -1610,10 +1612,67 @@ class DashboardWindow(QWidget):
             "- admin permissions"
         )
         layout.addWidget(body)
+
+        link_title = QLabel("Tablet Link", dialog)
+        link_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #dcdcdc;")
+        layout.addWidget(link_title)
+
+        link_value = QLineEdit(dialog)
+        link_value.setReadOnly(True)
+        link_value.setStyleSheet(self.input_style())
+        link_value.setText(self.tablet_bridge.public_url() if self.tablet_bridge.is_running else "Not running")
+        layout.addWidget(link_value)
+
+        link_status = QLabel("", dialog)
+        link_status.setStyleSheet("font-size: 12px; color: #a7a7a7;")
+        layout.addWidget(link_status)
+
+        row = QHBoxLayout()
+        start_btn = QPushButton("Start Tablet Link", dialog)
+        start_btn.setStyleSheet(self.primary_btn_style())
+        stop_btn = QPushButton("Stop Link", dialog)
+        stop_btn.setStyleSheet(self.secondary_btn_style())
+        copy_btn = QPushButton("Copy Link", dialog)
+        copy_btn.setStyleSheet(self.secondary_btn_style())
         close_btn = QPushButton("Close", dialog)
-        close_btn.setStyleSheet(self.primary_btn_style())
+        close_btn.setStyleSheet(self.secondary_btn_style())
+        row.addWidget(start_btn)
+        row.addWidget(stop_btn)
+        row.addWidget(copy_btn)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        def refresh_link_ui(status_text=""):
+            if self.tablet_bridge.is_running:
+                link_value.setText(self.tablet_bridge.public_url())
+            else:
+                link_value.setText("Not running")
+            if status_text:
+                link_status.setText(status_text)
+
+        def on_start():
+            try:
+                url = self.tablet_bridge.start()
+                refresh_link_ui(f"Tablet link is active: {url}")
+            except Exception as exc:
+                refresh_link_ui(f"Failed to start tablet link: {exc}")
+
+        def on_stop():
+            self.tablet_bridge.stop()
+            refresh_link_ui("Tablet link stopped.")
+
+        def on_copy():
+            text = link_value.text().strip()
+            if text and text != "Not running":
+                QGuiApplication.clipboard().setText(text)
+                refresh_link_ui("Link copied to clipboard.")
+            else:
+                refresh_link_ui("Start tablet link first.")
+
+        start_btn.clicked.connect(on_start)
+        stop_btn.clicked.connect(on_stop)
+        copy_btn.clicked.connect(on_copy)
         close_btn.clicked.connect(dialog.accept)
-        layout.addWidget(close_btn)
         dialog.exec()
 
     def on_resident_selected(self, item):
@@ -2594,6 +2653,10 @@ class DashboardWindow(QWidget):
             self.position_window_controls()
 
     def closeEvent(self, event):
+        try:
+            self.tablet_bridge.stop()
+        except Exception:
+            pass
         try:
             self.db.close()
         except Exception:
