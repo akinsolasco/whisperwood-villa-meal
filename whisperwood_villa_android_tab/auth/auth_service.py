@@ -2,10 +2,13 @@ import bcrypt
 import psycopg2
 import socket
 
-from db_config import DB_CONFIG
+try:
+    from ..db_config import DB_CONFIG
+except ImportError:
+    from db_config import DB_CONFIG
 
 
-def _postgres_reachable(timeout: float = 0.35) -> bool:
+def _postgres_reachable(timeout: float = 0.8) -> bool:
     host = DB_CONFIG.get("host")
     port = int(DB_CONFIG.get("port", 5432))
     if not host:

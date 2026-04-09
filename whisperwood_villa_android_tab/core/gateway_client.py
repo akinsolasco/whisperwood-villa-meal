@@ -3,7 +3,10 @@ from typing import Dict, Any, List
 
 import requests
 
-from core.models import Device
+try:
+    from .models import Device
+except ImportError:
+    from core.models import Device
 
 
 class GatewayClient:

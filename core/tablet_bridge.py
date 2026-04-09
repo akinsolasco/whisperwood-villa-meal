@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import socket
 import sys
@@ -61,19 +62,39 @@ class TabletBridge:
             raise RuntimeError("Flask/Werkzeug is not installed in this build.") from exc
 
         app_file = self._resolve_tablet_app_file()
+        package_root = app_file.parent.parent
 
-        tablet_dir = str(app_file.parent)
-        if tablet_dir not in sys.path:
-            sys.path.insert(0, tablet_dir)
+        package_root_str = str(package_root)
+        if package_root_str not in sys.path:
+            sys.path.insert(0, package_root_str)
 
-        spec = importlib.util.spec_from_file_location("whisperwood_villa_android_runtime", app_file)
-        if spec is None or spec.loader is None:
-            raise RuntimeError("Failed to load tablet app module.")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module_name = "whisperwood_villa_android_tab.app"
+        try:
+            module = importlib.import_module(module_name)
+            module = importlib.reload(module)
+        except Exception:
+            # Fallback to direct file load if package import is unavailable.
+            spec = importlib.util.spec_from_file_location("whisperwood_villa_android_runtime", app_file)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("Failed to load tablet app module.")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
         if not hasattr(module, "app"):
             raise RuntimeError("Tablet app module does not expose Flask app.")
-        return module.app
+        flask_app = module.app
+
+        # Safety: force correct template/static roots in bundled runtime.
+        app_dir = app_file.parent
+        template_dir = app_dir / "templates"
+        static_dir = app_dir / "static"
+        if template_dir.exists():
+            flask_app.template_folder = str(template_dir)
+            if hasattr(flask_app, "jinja_loader") and hasattr(flask_app.jinja_loader, "searchpath"):
+                flask_app.jinja_loader.searchpath = [str(template_dir)]
+        if static_dir.exists():
+            flask_app.static_folder = str(static_dir)
+
+        return flask_app
 
     @staticmethod
     def get_lan_ip() -> str:

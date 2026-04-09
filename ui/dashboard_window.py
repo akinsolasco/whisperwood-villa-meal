@@ -24,7 +24,6 @@ class DashboardWindow(QWidget):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
         self.db = DatabaseService()
-        self.db.ensure_tables()
         self.gateway = GatewayClient()
         self.tablet_bridge = None
 
@@ -55,15 +54,21 @@ class DashboardWindow(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
         self.timer.timeout.connect(self.refresh_devices)
+        QTimer.singleShot(0, self.bootstrap_startup_data)
 
-        self.new_resident()
-        self.load_residents()
-        self.load_update_targets()
-        self.load_pairing_views()
-        self.load_recent_logs()
-        self.refresh_dashboard_summary()
-        self.load_schedule_view()
-        QTimer.singleShot(50, self.refresh_devices)
+    def bootstrap_startup_data(self):
+        try:
+            self.db.ensure_tables()
+            self.new_resident()
+            self.load_residents()
+            self.load_update_targets()
+            self.load_pairing_views()
+            self.load_recent_logs()
+            self.refresh_dashboard_summary()
+            self.load_schedule_view()
+            QTimer.singleShot(50, self.refresh_devices)
+        except Exception as exc:
+            self.show_error("Startup Error", f"Failed to initialize dashboard data: {exc}")
 
     # ---------------------------- styles ----------------------------
 

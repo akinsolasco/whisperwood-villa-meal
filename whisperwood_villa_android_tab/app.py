@@ -2,16 +2,28 @@ from __future__ import annotations
 
 import os
 from functools import wraps
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from flask import Flask, jsonify, render_template, request, session
 
-from auth.auth_service import AuthService
-from config import DEFAULT_PI_BASE_URL
-from core.db_service import DatabaseService, generate_resident_uid
-from core.gateway_client import GatewayClient
+try:
+    from .auth.auth_service import AuthService
+    from .config import DEFAULT_PI_BASE_URL
+    from .core.db_service import DatabaseService, generate_resident_uid
+    from .core.gateway_client import GatewayClient
+except ImportError:
+    from auth.auth_service import AuthService
+    from config import DEFAULT_PI_BASE_URL
+    from core.db_service import DatabaseService, generate_resident_uid
+    from core.gateway_client import GatewayClient
 
-app = Flask(__name__)
+APP_DIR = Path(__file__).resolve().parent
+app = Flask(
+    __name__,
+    template_folder=str(APP_DIR / "templates"),
+    static_folder=str(APP_DIR / "static"),
+)
 app.secret_key = os.environ.get("WV_ANDROID_SECRET", "whisperwood-villa-android-tab")
 
 
@@ -141,7 +153,14 @@ def serialize_resident(row: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/")
 def home():
-    return render_template("index.html")
+    try:
+        return render_template("index.html")
+    except Exception as exc:
+        return (
+            f"Tablet UI failed to load: {exc}. "
+            "Ensure templates/static are bundled with whisperwood_villa_android_tab.",
+            500,
+        )
 
 
 @app.post("/api/login")
@@ -492,4 +511,3 @@ def logs():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8090, debug=False)
-

@@ -1,13 +1,22 @@
 import requests
 from pathlib import Path
 
-from config import (
-    APP_VERSION,
-    GITHUB_OWNER,
-    GITHUB_REPO,
-    INSTALLER_NAME,
-    UPDATE_DOWNLOAD_DIR,
-)
+try:
+    from ..config import (
+        APP_VERSION,
+        GITHUB_OWNER,
+        GITHUB_REPO,
+        INSTALLER_NAME,
+        UPDATE_DOWNLOAD_DIR,
+    )
+except ImportError:
+    from config import (
+        APP_VERSION,
+        GITHUB_OWNER,
+        GITHUB_REPO,
+        INSTALLER_NAME,
+        UPDATE_DOWNLOAD_DIR,
+    )
 
 
 class UpdaterService:

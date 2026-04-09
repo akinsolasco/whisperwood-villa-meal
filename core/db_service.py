@@ -34,7 +34,7 @@ class DatabaseService:
             port = int(config.get("port", 5432))
             if host:
                 try:
-                    with socket.create_connection((host, port), timeout=0.35):
+                    with socket.create_connection((host, port), timeout=0.8):
                         pass
                 except OSError:
                     raise psycopg2.OperationalError("database host unreachable")
