@@ -44,6 +44,7 @@ class DashboardWindow(QWidget):
         self.global_schedule_off = "20:00"
         self.global_schedule_sleep_if_no_image = False
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
+        self.page_base_width = 1218
 
         self.setWindowTitle("Whisperwood Villa Dashboard")
         self.setMinimumSize(1120, 760)
@@ -122,8 +123,8 @@ class DashboardWindow(QWidget):
 
     def fit_to_screen(self):
         screen = QGuiApplication.primaryScreen().availableGeometry()
-        width = min(1520, int(screen.width() * 0.97))
-        height = min(920, int(screen.height() * 0.96))
+        width = min(screen.width(), max(self.minimumWidth(), int(screen.width() * 0.98)))
+        height = min(screen.height(), max(self.minimumHeight(), int(screen.height() * 0.97)))
         x = screen.x() + (screen.width() - width) // 2
         y = screen.y() + (screen.height() - height) // 2
         self.setGeometry(x, y, width, height)
@@ -347,7 +348,7 @@ class DashboardWindow(QWidget):
 
         # Pages
         self.pages = QStackedWidget(self.container)
-        self.pages.setGeometry(280, 95, 1218, 805)
+        self.pages.setGeometry(280, 95, self.page_base_width, 805)
         self.pages.setStyleSheet("background: transparent;")
 
         self.page_overview = self.build_overview_page()
@@ -394,8 +395,14 @@ class DashboardWindow(QWidget):
         self.close_btn.move(right, 24)
         self.max_btn.move(right - 45, 24)
         self.min_btn.move(right - 90, 24)
-        self.base_url_edit.setGeometry(max(650, right - 470), 24, 330, 42)
-        self.pages.setGeometry(280, 95, self.container.width() - 302, self.container.height() - 115)
+        base_url_x = max(280, right - 470)
+        base_url_x = min(base_url_x, self.min_btn.x() - 342)
+        self.base_url_edit.setGeometry(base_url_x, 24, 330, 42)
+
+        available_width = max(640, self.container.width() - 302)
+        pages_width = min(self.page_base_width, available_width)
+        pages_x = 280 + max(0, (available_width - pages_width) // 2)
+        self.pages.setGeometry(pages_x, 95, pages_width, max(500, self.container.height() - 115))
 
     def card_style(self):
         return "background-color: #121212; border-radius: 18px; border: 1px solid #242424;"
@@ -447,10 +454,11 @@ class DashboardWindow(QWidget):
                 label.setStyleSheet("background: transparent; border: none;")
 
     def wrap_scroll_page(self, content: QWidget, min_height: int):
-        content.setMinimumSize(1218, min_height)
+        content.setMinimumSize(self.page_base_width, min_height)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
