@@ -3,7 +3,7 @@ import re
 import json
 from typing import Optional, List, Dict, Any
 
-from PyQt6.QtCore import Qt, QTimer, QTime
+from PyQt6.QtCore import Qt, QTimer, QTime, pyqtSignal
 from PyQt6.QtGui import QCursor, QPixmap, QGuiApplication, QTextDocument, QPageSize
 from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
@@ -20,6 +20,8 @@ from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
 
 
 class DashboardWindow(QWidget):
+    logout_requested = pyqtSignal()
+
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
@@ -271,6 +273,10 @@ class DashboardWindow(QWidget):
         self.btn_profile_settings.setGeometry(18, 705, 208, 42)
         self.btn_profile_settings.setStyleSheet(self.secondary_btn_style())
 
+        self.btn_logout = QPushButton("Logout", self.sidebar)
+        self.btn_logout.setGeometry(18, 755, 208, 42)
+        self.btn_logout.setStyleSheet(self.secondary_btn_style())
+
         # Title area
         self.title = QLabel("Whisperwood Villa Control Center", self.container)
         self.title.setGeometry(280, 22, 520, 32)
@@ -377,9 +383,11 @@ class DashboardWindow(QWidget):
         self.sidebar.setGeometry(12, 12, 245, max(640, self.container.height() - 24))
         sidebar_h = self.sidebar.height()
 
-        settings_y = max(540, sidebar_h - 52)
-        badge_y = max(500, settings_y - 44)
+        logout_y = max(540, sidebar_h - 52)
+        settings_y = max(490, logout_y - 50)
+        badge_y = max(446, settings_y - 44)
         self.btn_profile_settings.setGeometry(18, settings_y, 208, 42)
+        self.btn_logout.setGeometry(18, logout_y, 208, 42)
         self.connection_badge.setGeometry(18, badge_y, 208, 28)
 
         right = self.container.width() - 48
@@ -1301,6 +1309,7 @@ class DashboardWindow(QWidget):
         self.btn_menu_updates.clicked.connect(lambda: self.switch_page(self.page_updates, self.btn_menu_updates))
         self.btn_menu_logs.clicked.connect(lambda: self.switch_page(self.page_logs, self.btn_menu_logs))
         self.btn_profile_settings.clicked.connect(self.show_profile_settings)
+        self.btn_logout.clicked.connect(self.handle_logout)
         self.btn_overview_new_resident.clicked.connect(lambda: self.switch_page(self.page_dashboard, self.btn_menu_dashboard))
         self.btn_overview_pairing.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
 
@@ -1640,6 +1649,18 @@ class DashboardWindow(QWidget):
             ]
             for c, value in enumerate(values):
                 self.schedule_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def handle_logout(self):
+        answer = QMessageBox.question(
+            self,
+            "Logout",
+            "Logout and return to the login screen?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.logout_requested.emit()
 
     def show_profile_settings(self):
         dialog = QDialog(self)
@@ -2651,6 +2672,10 @@ class DashboardWindow(QWidget):
             self.position_window_controls()
 
     def closeEvent(self, event):
+        try:
+            self.timer.stop()
+        except Exception:
+            pass
         try:
             self.db.close()
         except Exception:

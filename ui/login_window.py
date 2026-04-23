@@ -191,7 +191,7 @@ class LoginWindow(QtWidgets.QWidget):
         """)
         self.login_btn.clicked.connect(self.handle_login)
 
-        self.close_btn = QtWidgets.QPushButton("✕", self.container)
+        self.close_btn = QtWidgets.QPushButton("X", self.container)
         self.close_btn.setGeometry(1090, 18, 38, 38)
         self.close_btn.setStyleSheet("""
             QPushButton {
@@ -208,6 +208,18 @@ class LoginWindow(QtWidgets.QWidget):
             }
         """)
         self.close_btn.clicked.connect(self.close)
+
+    def prepare_for_show(self, clear_username: bool = False):
+        self._stop_login_loading()
+        if clear_username:
+            self.username_input.clear()
+        self.password_input.clear()
+        self.username_input.setEnabled(True)
+        self.password_input.setEnabled(True)
+        self.login_btn.setEnabled(True)
+        self.login_btn.setText("Login")
+        self.raise_()
+        self.activateWindow()
 
     def handle_login(self):
         username = self.username_input.text().strip()
