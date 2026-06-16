@@ -9,14 +9,20 @@ else:
 
 ASSETS_DIR = BASE_DIR / "assets"
 
-APP_NAME = "Whisperwood Villa"
-APP_VERSION = "2.0.4"
+APP_NAME = "Whisperwood Villa Demo"
+APP_VERSION = "2.0.4.1"
+APP_CHANNEL = "demo"
+RELEASE_TAG_PREFIX = "demo-v"
 DEFAULT_PI_BASE_URL = "http://192.168.4.1:8080"
 
 GITHUB_OWNER = "akinsolasco"
 GITHUB_REPO = "whisperwood-villa-meal"
-INSTALLER_NAME = "WhisperwoodVillaSetup.exe"
+INSTALLER_NAME = "WhisperwoodVillaDemoSetup.exe"
 
-APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WhisperwoodVilla"
+APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WhisperwoodVillaDemo"
 UPDATE_DOWNLOAD_DIR = APP_DATA_DIR / "updates"
-UPDATE_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+DATABASE_MODE = "sqlite"
+LOCAL_DB_PATH = APP_DATA_DIR / "whisperwood_demo.sqlite3"
+DEMO_DEFAULT_USERNAME = "admin"
+DEMO_DEFAULT_PASSWORD = "admin123"

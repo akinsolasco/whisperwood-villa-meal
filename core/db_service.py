@@ -1,9 +1,12 @@
+import json
+import sqlite3
 import uuid
 from datetime import datetime
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
+from config import DATABASE_MODE, LOCAL_DB_PATH
 from db_config import DB_CONFIG
 
 
@@ -17,7 +20,17 @@ class DatabaseService:
         self.backend = None
 
     def connect(self):
-        if self.conn is not None and not self.conn.closed:
+        if self.conn is not None:
+            if self.backend == "sqlite":
+                return
+            if not self.conn.closed:
+                return
+
+        if DATABASE_MODE.lower() in {"sqlite", "local", "demo"}:
+            LOCAL_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(str(LOCAL_DB_PATH))
+            self.conn.row_factory = sqlite3.Row
+            self.backend = "sqlite"
             return
 
         config = dict(DB_CONFIG)
@@ -26,28 +39,36 @@ class DatabaseService:
         self.backend = "postgres"
 
     def close(self):
-        if self.conn and not self.conn.closed:
+        if self.conn and (self.backend == "sqlite" or not self.conn.closed):
             self.conn.close()
         self.conn = None
         self.backend = None
 
     def _cursor(self, dict_rows=False):
         self.connect()
+        if self.backend == "sqlite":
+            return self.conn.cursor()
         if dict_rows:
             return self.conn.cursor(cursor_factory=RealDictCursor)
         return self.conn.cursor()
 
     def _rows(self, rows):
+        if self.backend == "sqlite":
+            return [dict(row) for row in rows]
         return rows
 
     def _row(self, row):
         if row is None:
             return None
+        if self.backend == "sqlite":
+            return dict(row)
         return row
 
     def _json_value(self, value):
         if value is None:
             return None
+        if self.backend == "sqlite":
+            return json.dumps(value)
         return Json(value)
 
     def ensure_tables(self):
@@ -189,10 +210,33 @@ class DatabaseService:
         self.conn.commit()
         cur.close()
 
+    def _add_resident_columns(self, cur):
+        existing = {row["name"] for row in cur.execute("PRAGMA table_info(residents)").fetchall()}
+        columns = {
+            "schedule": "TEXT",
+            "source_document": "TEXT",
+            "safety_review_note": "TEXT",
+            "needs_safety_review": "INTEGER NOT NULL DEFAULT 0",
+            "lcd_image_path": "TEXT",
+            "lcd_schedule_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "lcd_on_time": "TEXT",
+            "lcd_off_time": "TEXT",
+            "sleep_if_no_image": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                cur.execute(f"ALTER TABLE residents ADD COLUMN {name} {definition}")
+
     def wipe_operational_data(self):
         self.connect()
         cur = self.conn.cursor()
-        cur.execute("TRUNCATE TABLE display_updates, device_registry, residents RESTART IDENTITY CASCADE;")
+        if self.backend == "postgres":
+            cur.execute("TRUNCATE TABLE display_updates, device_registry, residents RESTART IDENTITY CASCADE;")
+        else:
+            cur.execute("DELETE FROM display_updates")
+            cur.execute("DELETE FROM device_registry")
+            cur.execute("DELETE FROM residents")
+            cur.execute("DELETE FROM sqlite_sequence WHERE name IN ('display_updates', 'device_registry', 'residents')")
         self.conn.commit()
         cur.close()
 

@@ -1,7 +1,7 @@
 import subprocess
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from config import ASSETS_DIR
+from config import APP_NAME, ASSETS_DIR
 from core.updater import UpdaterService
 
 
@@ -93,7 +93,7 @@ class SplashScreen(QtWidgets.QWidget):
             )
             self.logo.setPixmap(pix)
         else:
-            self.logo.setText("Whisperwood Villa")
+            self.logo.setText(APP_NAME)
             self.logo.setStyleSheet("color:#e2ab09;font-size:28px;font-weight:700;")
 
         self.spinner = SafeSpinner(self.container)

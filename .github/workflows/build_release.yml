@@ -1,10 +1,10 @@
-name: Build and Release Windows App
+name: Build and Release Windows Demo App
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "demo" ]
     tags:
-      - "v*"
+      - "demo-v*"
   workflow_dispatch:
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
 
       - name: Build app with PyInstaller
         run: |
-          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVilla --icon assets/app_icon.ico --add-data "assets;assets" main.py
+          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVillaDemo --icon assets/app_icon.ico --add-data "assets;assets" main.py
 
       - name: Install Inno Setup
         shell: powershell
@@ -50,13 +50,13 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WhisperwoodVilla-installer
-          path: dist_installer/WhisperwoodVillaSetup.exe
+          name: WhisperwoodVillaDemo-installer
+          path: dist_installer/WhisperwoodVillaDemoSetup.exe
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/demo-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist_installer/WhisperwoodVillaSetup.exe
+          files: dist_installer/WhisperwoodVillaDemoSetup.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

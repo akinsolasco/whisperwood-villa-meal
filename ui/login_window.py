@@ -1,6 +1,6 @@
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from config import ASSETS_DIR
+from config import APP_NAME, ASSETS_DIR
 from auth.auth_service import AuthService
 
 
@@ -45,7 +45,7 @@ class LoginWindow(QtWidgets.QWidget):
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
         self.photo_path = ASSETS_DIR / "senior-woman-talking-with-her-doctor.jpg"
 
-        self.setWindowTitle("Whisperwood Villa Login")
+        self.setWindowTitle(f"{APP_NAME} Login")
         self.setFixedSize(1150, 740)
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
 

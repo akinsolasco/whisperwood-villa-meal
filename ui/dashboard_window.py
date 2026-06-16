@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea
 )
 
-from config import DEFAULT_PI_BASE_URL, ASSETS_DIR
+from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
@@ -46,7 +46,7 @@ class DashboardWindow(QWidget):
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
         self.page_base_width = 1218
 
-        self.setWindowTitle("Whisperwood Villa Dashboard")
+        self.setWindowTitle(f"{APP_NAME} Dashboard")
         self.setMinimumSize(1120, 760)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setStyleSheet("QLabel { border: none; background: transparent; }")
@@ -161,7 +161,7 @@ class DashboardWindow(QWidget):
                 )
             )
         else:
-            self.logo.setText("Whisperwood Villa")
+            self.logo.setText(APP_NAME)
             self.logo.setStyleSheet("font-size: 22px; font-weight: 700; color: #e2ab09;")
 
         self.user_card = QFrame(self.sidebar)
@@ -279,7 +279,7 @@ class DashboardWindow(QWidget):
         self.btn_logout.setStyleSheet(self.secondary_btn_style())
 
         # Title area
-        self.title = QLabel("Whisperwood Villa Control Center", self.container)
+        self.title = QLabel(f"{APP_NAME} Control Center", self.container)
         self.title.setGeometry(280, 22, 520, 32)
         self.title.setStyleSheet("font-size: 28px; font-weight: 700; color: white;")
 
