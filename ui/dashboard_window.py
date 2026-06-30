@@ -13,7 +13,8 @@ from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea
 )
 
-from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR
+from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
+from auth.auth_service import AuthService
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
@@ -25,6 +26,7 @@ class DashboardWindow(QWidget):
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
+        self.current_role = self.normalize_role(self.current_user.get("role", "NURSE_ADMIN"))
         self.db = DatabaseService()
         self.db.ensure_tables()
         self.gateway = GatewayClient()
@@ -38,6 +40,8 @@ class DashboardWindow(QWidget):
         self.selected_pair_device_id: Optional[str] = None
         self.selected_image_path: Optional[str] = None
         self.selected_source_document: Optional[str] = None
+        self.selected_review_request_id: Optional[int] = None
+        self.selected_verification_resident_id: Optional[int] = None
         self.rules: List[HighlightRule] = []
         self.global_schedule_enabled = False
         self.global_schedule_on = "07:00"
@@ -54,6 +58,7 @@ class DashboardWindow(QWidget):
         self.build_ui()
         self.bind_events()
         self.fit_to_screen()
+        self.apply_role_permissions()
         self.apply_write_lock()
 
         self.timer = QTimer(self)
@@ -65,6 +70,44 @@ class DashboardWindow(QWidget):
         self.load_residents()
         self.load_recent_logs()
         self.refresh_dashboard_summary()
+        self.load_approvals()
+        self.load_verification_page()
+        self.load_it_health()
+
+    # ---------------------------- roles ----------------------------
+
+    def normalize_role(self, role: str) -> str:
+        role = (role or "NURSE").upper()
+        if role == "ADMIN":
+            return "NURSE_ADMIN"
+        return role
+
+    def role_label(self, role: Optional[str] = None) -> str:
+        return ROLE_LABELS.get(self.normalize_role(role or self.current_role), role or self.current_role)
+
+    def is_nurse_admin(self) -> bool:
+        return self.current_role in {"NURSE_ADMIN"}
+
+    def is_nurse(self) -> bool:
+        return self.current_role == "NURSE"
+
+    def is_verifier(self) -> bool:
+        return self.current_role == "VERIFIER"
+
+    def is_it_admin(self) -> bool:
+        return self.current_role == "IT_ADMIN"
+
+    def can_edit_residents(self) -> bool:
+        return self.is_nurse_admin()
+
+    def can_view_residents(self) -> bool:
+        return self.current_role in {"NURSE_ADMIN", "NURSE", "VERIFIER"}
+
+    def can_manage_devices(self) -> bool:
+        return self.current_role in {"NURSE_ADMIN", "IT_ADMIN"}
+
+    def can_view_technical(self) -> bool:
+        return self.current_role in {"NURSE_ADMIN", "IT_ADMIN"}
 
     # ---------------------------- styles ----------------------------
 
@@ -189,15 +232,18 @@ class DashboardWindow(QWidget):
 
         self.user_role = QLabel(self.user_card)
         self.user_role.setGeometry(72, 45, 120, 18)
-        self.user_role.setText(str(self.current_user.get("role", "ADMIN")))
+        self.user_role.setText(self.role_label())
         self.user_role.setStyleSheet("font-size: 12px; color: #bdbdbd;")
 
         nav_buttons = [
-            ("Overview", 235),
-            ("Resident Records", 285),
-            ("Device Pairing", 335),
-            ("LCD Schedule", 385),
-            ("Logs Admin", 435),
+            ("Overview", 190),
+            ("Resident Records", 235),
+            ("Approvals", 280),
+            ("Device Pairing", 325),
+            ("LCD Schedule", 370),
+            ("Verification", 415),
+            ("IT Health", 460),
+            ("Logs Admin", 505),
         ]
 
         self.btn_menu_overview = QPushButton(nav_buttons[0][0], self.sidebar)
@@ -206,16 +252,36 @@ class DashboardWindow(QWidget):
         self.btn_menu_dashboard = QPushButton(nav_buttons[1][0], self.sidebar)
         self.btn_menu_dashboard.setGeometry(18, nav_buttons[1][1], 208, 42)
 
-        self.btn_menu_pairing = QPushButton(nav_buttons[2][0], self.sidebar)
-        self.btn_menu_pairing.setGeometry(18, nav_buttons[2][1], 208, 42)
+        self.btn_menu_approvals = QPushButton(nav_buttons[2][0], self.sidebar)
+        self.btn_menu_approvals.setGeometry(18, nav_buttons[2][1], 208, 42)
 
-        self.btn_menu_updates = QPushButton(nav_buttons[3][0], self.sidebar)
-        self.btn_menu_updates.setGeometry(18, nav_buttons[3][1], 208, 42)
+        self.btn_menu_pairing = QPushButton(nav_buttons[3][0], self.sidebar)
+        self.btn_menu_pairing.setGeometry(18, nav_buttons[3][1], 208, 42)
 
-        self.btn_menu_logs = QPushButton(nav_buttons[4][0], self.sidebar)
-        self.btn_menu_logs.setGeometry(18, nav_buttons[4][1], 208, 42)
+        self.btn_menu_updates = QPushButton(nav_buttons[4][0], self.sidebar)
+        self.btn_menu_updates.setGeometry(18, nav_buttons[4][1], 208, 42)
 
-        for b in [self.btn_menu_overview, self.btn_menu_dashboard, self.btn_menu_pairing, self.btn_menu_updates, self.btn_menu_logs]:
+        self.btn_menu_verification = QPushButton(nav_buttons[5][0], self.sidebar)
+        self.btn_menu_verification.setGeometry(18, nav_buttons[5][1], 208, 42)
+
+        self.btn_menu_it_health = QPushButton(nav_buttons[6][0], self.sidebar)
+        self.btn_menu_it_health.setGeometry(18, nav_buttons[6][1], 208, 42)
+
+        self.btn_menu_logs = QPushButton(nav_buttons[7][0], self.sidebar)
+        self.btn_menu_logs.setGeometry(18, nav_buttons[7][1], 208, 42)
+
+        self.nav_buttons = [
+            self.btn_menu_overview,
+            self.btn_menu_dashboard,
+            self.btn_menu_approvals,
+            self.btn_menu_pairing,
+            self.btn_menu_updates,
+            self.btn_menu_verification,
+            self.btn_menu_it_health,
+            self.btn_menu_logs,
+        ]
+
+        for b in self.nav_buttons:
             b.setStyleSheet("""
                 QPushButton {
                     text-align: left;
@@ -233,11 +299,11 @@ class DashboardWindow(QWidget):
             """)
 
         self.btn_refresh_devices = QPushButton("Refresh Devices", self.sidebar)
-        self.btn_refresh_devices.setGeometry(18, 520, 208, 42)
+        self.btn_refresh_devices.setGeometry(18, 590, 208, 42)
         self.btn_refresh_devices.setStyleSheet(self.secondary_btn_style())
 
         self.auto_refresh = QCheckBox("Auto-refresh every 3s", self.sidebar)
-        self.auto_refresh.setGeometry(24, 575, 180, 24)
+        self.auto_refresh.setGeometry(24, 642, 180, 24)
         self.auto_refresh.setStyleSheet("""
             QCheckBox {
                 color: #d2d2d2;
@@ -258,7 +324,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.connection_badge = QLabel("Gateway: Unknown", self.sidebar)
-        self.connection_badge.setGeometry(18, 630, 208, 28)
+        self.connection_badge.setGeometry(18, 680, 208, 28)
         self.connection_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.connection_badge.setStyleSheet("""
             QLabel {
@@ -353,11 +419,23 @@ class DashboardWindow(QWidget):
 
         self.page_overview = self.build_overview_page()
         self.page_dashboard = self.build_dashboard_page()
+        self.page_approvals = self.build_approvals_page()
         self.page_pairing = self.build_pairing_page()
         self.page_updates = self.build_updates_page()
+        self.page_verification = self.build_verification_page()
+        self.page_it_health = self.build_it_health_page()
         self.page_logs = self.build_logs_page()
 
-        for p in [self.page_overview, self.page_dashboard, self.page_pairing, self.page_updates, self.page_logs]:
+        for p in [
+            self.page_overview,
+            self.page_dashboard,
+            self.page_approvals,
+            self.page_pairing,
+            self.page_updates,
+            self.page_verification,
+            self.page_it_health,
+            self.page_logs,
+        ]:
             self.pages.addWidget(p)
 
         self.pages.setCurrentWidget(self.page_overview)
@@ -386,7 +464,11 @@ class DashboardWindow(QWidget):
 
         logout_y = max(540, sidebar_h - 52)
         settings_y = max(490, logout_y - 50)
-        badge_y = max(446, settings_y - 44)
+        badge_y = max(610, settings_y - 44)
+        auto_y = max(558, badge_y - 34)
+        refresh_y = max(550, auto_y - 52)
+        self.btn_refresh_devices.setGeometry(18, refresh_y, 208, 42)
+        self.auto_refresh.setGeometry(24, auto_y, 180, 24)
         self.btn_profile_settings.setGeometry(18, settings_y, 208, 42)
         self.btn_logout.setGeometry(18, logout_y, 208, 42)
         self.connection_badge.setGeometry(18, badge_y, 208, 28)
@@ -507,11 +589,11 @@ class DashboardWindow(QWidget):
         hero.setGeometry(0, 0, 1218, 145)
         self.apply_frame_style(hero, "background-color: #101010; border-radius: 22px; border: 1px solid #273447;")
 
-        title = QLabel("Care operations dashboard", hero)
+        title = QLabel("Clinical Operations Dashboard", hero)
         title.setGeometry(24, 22, 420, 32)
         title.setStyleSheet("font-size: 26px; font-weight: 800; color: white;")
 
-        subtitle = QLabel("Follow the resident-first flow: save record, pair device, auto-send to display pipeline, confirm LCD schedule, then review logs.", hero)
+        subtitle = QLabel("Resident data, approval workflow, display verification, and technical readiness for site rollout.", hero)
         subtitle.setGeometry(24, 58, 780, 24)
         subtitle.setStyleSheet("font-size: 13px; color: #b8c1cc;")
 
@@ -541,11 +623,11 @@ class DashboardWindow(QWidget):
 
         self.summary_labels = {}
         cards = [
-            ("active_residents", "Saved residents", 0, 165),
-            ("known_devices", "Known devices", 248, 165),
-            ("paired_devices", "Paired devices", 496, 165),
-            ("recent_activity", "Recent activity (today)", 744, 165),
-            ("online_devices", "Connected now", 992, 165),
+            ("active_residents", "Active residents", 0, 165),
+            ("pending_requests", "Pending approvals", 248, 165),
+            ("verification_mismatches", "Display mismatches", 496, 165),
+            ("online_devices", "Connected now", 744, 165),
+            ("failed_updates", "Failed updates", 992, 165),
         ]
         for key, label, x, y in cards:
             card = QFrame(page)
@@ -566,11 +648,11 @@ class DashboardWindow(QWidget):
         workflow_title.setGeometry(22, 20, 180, 24)
         workflow_title.setStyleSheet("font-size: 18px; color: white; font-weight: 800;")
         steps = [
-            "1. Create or update the resident record.",
-            "2. Pair the resident to a known device.",
-            "3. On pairing, latest resident text auto-sends to the device.",
-            "4. If already paired, saving updates auto-sends the latest text.",
-            "5. Save LCD image and schedule, then confirm in Logs Admin.",
+            "1. Nurse submits observation or source-document note.",
+            "2. Nurse admin reviews, edits, and approves resident data.",
+            "3. Approved save prepares the display payload and audit entry.",
+            "4. Verifier confirms software record against the e-paper screen.",
+            "5. IT monitors gateway, Raspberry Pi, and device health separately.",
         ]
         for i, step in enumerate(steps):
             lbl = QLabel(step, workflow)
@@ -600,7 +682,7 @@ class DashboardWindow(QWidget):
         page.setStyleSheet("background: transparent;")
 
         self.residents_panel = QFrame(page)
-        self.residents_panel.setGeometry(0, 0, 330, 805)
+        self.residents_panel.setGeometry(0, 0, 330, 940)
         self.apply_frame_style(self.residents_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Residents", self.residents_panel)
@@ -613,7 +695,7 @@ class DashboardWindow(QWidget):
         self.search_resident.setStyleSheet(self.input_style())
 
         self.resident_list = QListWidget(self.residents_panel)
-        self.resident_list.setGeometry(18, 110, 294, 677)
+        self.resident_list.setGeometry(18, 110, 294, 812)
         self.resident_list.setStyleSheet("""
             QListWidget {
                 background-color: transparent;
@@ -635,7 +717,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.form_panel = QFrame(page)
-        self.form_panel.setGeometry(345, 0, 420, 805)
+        self.form_panel.setGeometry(345, 0, 420, 940)
         self.apply_frame_style(self.form_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.form_heading = QLabel("Resident Information", self.form_panel)
@@ -784,6 +866,19 @@ class DashboardWindow(QWidget):
             }
         """)
 
+        review_label = QLabel("Nurse review note", self.form_panel)
+        review_label.setGeometry(22, 790, 150, 18)
+        review_label.setStyleSheet(self.label_style())
+
+        self.nurse_review_comment = QTextEdit(self.form_panel)
+        self.nurse_review_comment.setGeometry(22, 814, 376, 72)
+        self.nurse_review_comment.setPlaceholderText("Write what needs review, the source checked, or the observation to verify.")
+        self.nurse_review_comment.setStyleSheet(self.input_style())
+
+        self.btn_submit_review_request = QPushButton("Submit for Nurse Admin Review", self.form_panel)
+        self.btn_submit_review_request.setGeometry(22, 898, 376, 38)
+        self.btn_submit_review_request.setStyleSheet(self.primary_btn_style())
+
         self.preview_panel = QFrame(page)
         self.preview_panel.setGeometry(780, 0, 438, 805)
         self.apply_frame_style(self.preview_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
@@ -885,8 +980,8 @@ class DashboardWindow(QWidget):
         summary_items = [
             ("active_residents", "Active residents", 52),
             ("online_devices", "Online devices", 90),
-            ("paired_devices", "Paired devices", 128),
-            ("safety_reviews", "Safety reviews", 166),
+            ("pending_requests", "Pending approvals", 128),
+            ("verification_mismatches", "Display mismatches", 166),
             ("failed_updates", "Failed updates", 204),
         ]
         for key, title_text, y in summary_items:
@@ -899,6 +994,228 @@ class DashboardWindow(QWidget):
         self.record_summary_labels["database_mode"].setGeometry(210, 14, 160, 22)
         self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
         self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #e2ab09;")
+
+        return self.wrap_scroll_page(page, 980)
+
+    # ---------------------------- approvals page ----------------------------
+
+    def build_approvals_page(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+
+        left = QFrame(page)
+        left.setGeometry(0, 0, 420, 805)
+        self.apply_frame_style(left, self.card_style())
+
+        title = QLabel("Resident Review Queue", left)
+        title.setGeometry(22, 18, 260, 24)
+        title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+
+        self.approval_table = QTableWidget(left)
+        self.approval_table.setGeometry(18, 58, 384, 640)
+        self.approval_table.setColumnCount(5)
+        self.approval_table.setHorizontalHeaderLabels(["Status", "Resident", "Room", "By", "Date"])
+        self.approval_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.approval_table.verticalHeader().setVisible(False)
+        self.approval_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.approval_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.approval_table.setStyleSheet(self.table_style())
+
+        self.btn_refresh_approvals = QPushButton("Refresh Queue", left)
+        self.btn_refresh_approvals.setGeometry(18, 718, 180, 42)
+        self.btn_refresh_approvals.setStyleSheet(self.secondary_btn_style())
+
+        self.approval_count_label = QLabel("Pending: 0", left)
+        self.approval_count_label.setGeometry(210, 728, 160, 22)
+        self.approval_count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.approval_count_label.setStyleSheet("font-size: 13px; color: #e2ab09; font-weight: 700;")
+
+        right = QFrame(page)
+        right.setGeometry(440, 0, 778, 805)
+        self.apply_frame_style(right, self.card_style())
+
+        detail_title = QLabel("Review Detail", right)
+        detail_title.setGeometry(22, 18, 180, 24)
+        detail_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+
+        self.approval_detail = QTextEdit(right)
+        self.approval_detail.setGeometry(22, 58, 734, 420)
+        self.approval_detail.setReadOnly(True)
+        self.approval_detail.setStyleSheet(self.input_style())
+
+        note_label = QLabel("Nurse admin decision note", right)
+        note_label.setGeometry(22, 498, 220, 22)
+        note_label.setStyleSheet(self.label_style())
+
+        self.approval_review_note = QTextEdit(right)
+        self.approval_review_note.setGeometry(22, 526, 734, 110)
+        self.approval_review_note.setPlaceholderText("Document verification outcome, correction made, or reason for rejection.")
+        self.approval_review_note.setStyleSheet(self.input_style())
+
+        self.btn_approve_request = QPushButton("Approve and Record", right)
+        self.btn_approve_request.setGeometry(22, 662, 210, 44)
+        self.btn_approve_request.setStyleSheet(self.primary_btn_style())
+
+        self.btn_reject_request = QPushButton("Reject Request", right)
+        self.btn_reject_request.setGeometry(246, 662, 170, 44)
+        self.btn_reject_request.setStyleSheet(self.secondary_btn_style())
+
+        self.approval_guidance = QLabel(
+            "Approve only after checking the source document or resident chart. Approved changes are recorded for audit review.",
+            right
+        )
+        self.approval_guidance.setGeometry(22, 724, 700, 40)
+        self.approval_guidance.setWordWrap(True)
+        self.approval_guidance.setStyleSheet("font-size: 13px; color: #b8c1cc;")
+
+        return self.wrap_scroll_page(page, 860)
+
+    # ---------------------------- verification page ----------------------------
+
+    def build_verification_page(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+
+        left = QFrame(page)
+        left.setGeometry(0, 0, 330, 805)
+        self.apply_frame_style(left, self.card_style())
+
+        title = QLabel("Display Verification", left)
+        title.setGeometry(20, 18, 220, 24)
+        title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+
+        self.verify_resident_list = QListWidget(left)
+        self.verify_resident_list.setGeometry(18, 58, 294, 660)
+        self.verify_resident_list.setStyleSheet(self.resident_list.styleSheet() if hasattr(self, "resident_list") else "")
+
+        self.btn_refresh_verification = QPushButton("Refresh Residents", left)
+        self.btn_refresh_verification.setGeometry(18, 738, 294, 42)
+        self.btn_refresh_verification.setStyleSheet(self.secondary_btn_style())
+
+        center = QFrame(page)
+        center.setGeometry(350, 0, 430, 805)
+        self.apply_frame_style(center, self.card_style())
+
+        detail_title = QLabel("Software Record", center)
+        detail_title.setGeometry(22, 18, 180, 24)
+        detail_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+
+        self.verify_detail = QTextEdit(center)
+        self.verify_detail.setGeometry(22, 58, 386, 520)
+        self.verify_detail.setReadOnly(True)
+        self.verify_detail.setStyleSheet(self.input_style())
+
+        self.verify_note = QTextEdit(center)
+        self.verify_note.setGeometry(22, 606, 386, 84)
+        self.verify_note.setPlaceholderText("Optional note for mismatch, unreadable display, or device issue.")
+        self.verify_note.setStyleSheet(self.input_style())
+
+        self.btn_mark_verified = QPushButton("Display Matches", center)
+        self.btn_mark_verified.setGeometry(22, 714, 180, 44)
+        self.btn_mark_verified.setStyleSheet(self.primary_btn_style())
+
+        self.btn_mark_mismatch = QPushButton("Report Mismatch", center)
+        self.btn_mark_mismatch.setGeometry(214, 714, 180, 44)
+        self.btn_mark_mismatch.setStyleSheet(self.secondary_btn_style())
+
+        right = QFrame(page)
+        right.setGeometry(800, 0, 418, 805)
+        self.apply_frame_style(right, self.card_style())
+
+        history_title = QLabel("Verification History", right)
+        history_title.setGeometry(22, 18, 220, 24)
+        history_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+
+        self.verification_table = QTableWidget(right)
+        self.verification_table.setGeometry(18, 58, 382, 720)
+        self.verification_table.setColumnCount(4)
+        self.verification_table.setHorizontalHeaderLabels(["Status", "Resident", "Device", "Checked By"])
+        self.verification_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.verification_table.verticalHeader().setVisible(False)
+        self.verification_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.verification_table.setStyleSheet(self.table_style())
+
+        return self.wrap_scroll_page(page, 860)
+
+    # ---------------------------- IT health page ----------------------------
+
+    def build_it_health_page(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+
+        top = QFrame(page)
+        top.setGeometry(0, 0, 1218, 138)
+        self.apply_frame_style(top, "background-color: #101010; border-radius: 18px; border: 1px solid #273447;")
+
+        title = QLabel("Technical Health Center", top)
+        title.setGeometry(24, 20, 380, 32)
+        title.setStyleSheet("font-size: 24px; font-weight: 800; color: white;")
+
+        subtitle = QLabel("Gateway reachability, Raspberry Pi/device status, and AI-ready technical debugging.", top)
+        subtitle.setGeometry(24, 58, 600, 22)
+        subtitle.setStyleSheet("font-size: 13px; color: #b8c1cc;")
+
+        self.it_health_labels = {}
+        cards = [
+            ("gateway", "Gateway", 670),
+            ("database", "Database", 810),
+            ("devices", "Devices", 950),
+            ("offline", "Offline", 1090),
+        ]
+        for key, label, x in cards:
+            small = QLabel(label, top)
+            small.setGeometry(x, 26, 100, 18)
+            small.setStyleSheet("font-size: 12px; color: #aeb7c2; font-weight: 700;")
+            value = QLabel("Checking", top)
+            value.setGeometry(x, 50, 110, 34)
+            value.setStyleSheet("font-size: 20px; color: white; font-weight: 800;")
+            self.it_health_labels[key] = value
+
+        left = QFrame(page)
+        left.setGeometry(0, 160, 648, 645)
+        self.apply_frame_style(left, self.card_style())
+
+        device_title = QLabel("Device Technical Snapshot", left)
+        device_title.setGeometry(22, 18, 260, 24)
+        device_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+
+        self.it_device_table = QTableWidget(left)
+        self.it_device_table.setGeometry(18, 58, 612, 560)
+        self.it_device_table.setColumnCount(7)
+        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Last Seen"])
+        self.it_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.it_device_table.verticalHeader().setVisible(False)
+        self.it_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.it_device_table.setStyleSheet(self.table_style())
+
+        right = QFrame(page)
+        right.setGeometry(670, 160, 548, 645)
+        self.apply_frame_style(right, self.card_style())
+
+        brief_title = QLabel("AI Debug Brief", right)
+        brief_title.setGeometry(22, 18, 260, 24)
+        brief_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+
+        self.debug_brief = QTextEdit(right)
+        self.debug_brief.setGeometry(22, 58, 504, 430)
+        self.debug_brief.setReadOnly(True)
+        self.debug_brief.setStyleSheet(self.input_style())
+
+        self.btn_generate_debug_brief = QPushButton("Generate AI Debug Brief", right)
+        self.btn_generate_debug_brief.setGeometry(22, 514, 210, 44)
+        self.btn_generate_debug_brief.setStyleSheet(self.primary_btn_style())
+
+        self.btn_copy_debug_brief = QPushButton("Copy Brief", right)
+        self.btn_copy_debug_brief.setGeometry(246, 514, 150, 44)
+        self.btn_copy_debug_brief.setStyleSheet(self.secondary_btn_style())
+
+        self.it_guidance = QLabel(
+            "IT view masks resident names and focuses on connectivity, device state, and operational faults.",
+            right
+        )
+        self.it_guidance.setGeometry(22, 582, 490, 36)
+        self.it_guidance.setWordWrap(True)
+        self.it_guidance.setStyleSheet("font-size: 13px; color: #b8c1cc;")
 
         return self.wrap_scroll_page(page, 860)
 
@@ -1313,8 +1630,11 @@ class DashboardWindow(QWidget):
 
         self.btn_menu_overview.clicked.connect(lambda: self.switch_page(self.page_overview, self.btn_menu_overview))
         self.btn_menu_dashboard.clicked.connect(lambda: self.switch_page(self.page_dashboard, self.btn_menu_dashboard))
+        self.btn_menu_approvals.clicked.connect(lambda: self.switch_page(self.page_approvals, self.btn_menu_approvals))
         self.btn_menu_pairing.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_menu_updates.clicked.connect(lambda: self.switch_page(self.page_updates, self.btn_menu_updates))
+        self.btn_menu_verification.clicked.connect(lambda: self.switch_page(self.page_verification, self.btn_menu_verification))
+        self.btn_menu_it_health.clicked.connect(lambda: self.switch_page(self.page_it_health, self.btn_menu_it_health))
         self.btn_menu_logs.clicked.connect(lambda: self.switch_page(self.page_logs, self.btn_menu_logs))
         self.btn_profile_settings.clicked.connect(self.show_profile_settings)
         self.btn_logout.clicked.connect(self.handle_logout)
@@ -1327,6 +1647,7 @@ class DashboardWindow(QWidget):
         self.btn_delete_resident.clicked.connect(self.delete_selected_resident)
         self.btn_go_pairing_after_save.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_attach_source.clicked.connect(self.attach_source_document)
+        self.btn_submit_review_request.clicked.connect(self.submit_resident_review_request)
 
         self.search_resident.textChanged.connect(self.filter_residents)
         self.resident_list.itemClicked.connect(self.on_resident_selected)
@@ -1352,6 +1673,16 @@ class DashboardWindow(QWidget):
         self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
         self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
         self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
+        self.btn_refresh_approvals.clicked.connect(self.load_approvals)
+        self.approval_table.cellClicked.connect(lambda row, _col: self.show_approval_detail(row))
+        self.btn_approve_request.clicked.connect(lambda: self.review_selected_request("APPROVED"))
+        self.btn_reject_request.clicked.connect(lambda: self.review_selected_request("REJECTED"))
+        self.verify_resident_list.itemClicked.connect(self.on_verify_resident_selected)
+        self.btn_refresh_verification.clicked.connect(self.load_verification_page)
+        self.btn_mark_verified.clicked.connect(lambda: self.record_verification("MATCH"))
+        self.btn_mark_mismatch.clicked.connect(lambda: self.record_verification("MISMATCH"))
+        self.btn_generate_debug_brief.clicked.connect(self.generate_debug_brief)
+        self.btn_copy_debug_brief.clicked.connect(self.copy_debug_brief)
         self.logs_table.cellDoubleClicked.connect(lambda row, _col: self.show_log_detail(row))
         self.btn_view_log.clicked.connect(self.show_selected_log_detail)
         self.btn_export_logs_pdf.clicked.connect(self.export_logs_pdf)
@@ -1364,8 +1695,7 @@ class DashboardWindow(QWidget):
     # ---------------------------- page switching ----------------------------
 
     def set_active_menu(self, active_btn):
-        buttons = [self.btn_menu_overview, self.btn_menu_dashboard, self.btn_menu_pairing, self.btn_menu_updates, self.btn_menu_logs]
-        for btn in buttons:
+        for btn in self.nav_buttons:
             if btn == active_btn:
                 btn.setStyleSheet("""
                     QPushButton {
@@ -1403,10 +1733,16 @@ class DashboardWindow(QWidget):
             self.refresh_dashboard_summary()
         elif page == self.page_pairing:
             self.load_pairing_views()
+        elif page == self.page_approvals:
+            self.load_approvals()
         elif page == self.page_updates:
             self.load_update_targets()
             self.load_schedule_view()
             self.update_preview()
+        elif page == self.page_verification:
+            self.load_verification_page()
+        elif page == self.page_it_health:
+            self.load_it_health()
         elif page == self.page_logs:
             self.load_recent_logs()
 
@@ -1480,23 +1816,69 @@ class DashboardWindow(QWidget):
             """)
         self.apply_write_lock()
 
-    def apply_write_lock(self):
-        can_write = self.gateway_online
-        write_buttons = [
-            "btn_save_resident",
-            "btn_delete_resident",
-            "btn_pair_selected",
-            "btn_unpair_selected",
-            "btn_send_text",
-            "btn_send_image",
-            "btn_lcd_on",
-            "btn_lcd_off",
-            "btn_save_schedule",
+    def apply_role_permissions(self):
+        access = {
+            self.btn_menu_overview: True,
+            self.btn_menu_dashboard: self.can_view_residents(),
+            self.btn_menu_approvals: self.is_nurse_admin(),
+            self.btn_menu_pairing: self.can_manage_devices() and not self.is_it_admin(),
+            self.btn_menu_updates: self.can_manage_devices() and not self.is_it_admin(),
+            self.btn_menu_verification: self.is_nurse_admin() or self.is_verifier(),
+            self.btn_menu_it_health: self.can_view_technical(),
+            self.btn_menu_logs: self.is_nurse_admin(),
+        }
+        for btn, allowed in access.items():
+            btn.setVisible(bool(allowed))
+
+        self.base_url_edit.setEnabled(self.can_view_technical() or self.is_nurse_admin())
+        self.btn_refresh_devices.setVisible(self.can_view_technical() or self.is_nurse_admin())
+        self.auto_refresh.setVisible(self.can_view_technical() or self.is_nurse_admin())
+        self.btn_profile_settings.setVisible(self.is_nurse_admin() or self.is_it_admin())
+
+        field_widgets = [
+            self.txt_name, self.txt_room, self.cmb_alert, self.txt_diet,
+            self.txt_allergies, self.txt_note, self.txt_drinks, self.txt_schedule,
+            self.chk_active, self.chk_safety_review, self.btn_attach_source,
+            self.btn_choose_image, self.btn_clear_image,
         ]
-        for btn_name in write_buttons:
+        for widget in field_widgets:
+            widget.setEnabled(self.can_edit_residents())
+
+        if hasattr(self, "nurse_review_comment"):
+            self.nurse_review_comment.setEnabled(self.is_nurse() or self.is_nurse_admin())
+        if hasattr(self, "btn_submit_review_request"):
+            self.btn_submit_review_request.setVisible(self.is_nurse())
+
+        if self.is_it_admin() and self.pages.currentWidget() != self.page_it_health:
+            self.switch_page(self.page_it_health, self.btn_menu_it_health)
+        elif not self.can_view_residents() and self.pages.currentWidget() == self.page_dashboard:
+            self.switch_page(self.page_overview, self.btn_menu_overview)
+
+    def apply_write_lock(self):
+        resident_write = self.can_edit_residents()
+        device_write = self.gateway_online and self.can_manage_devices() and not self.is_it_admin()
+        settings = {
+            "btn_new_resident": resident_write,
+            "btn_save_resident": resident_write,
+            "btn_clear_fields": resident_write or self.is_nurse(),
+            "btn_delete_resident": resident_write,
+            "btn_go_pairing_after_save": resident_write,
+            "btn_pair_selected": device_write,
+            "btn_unpair_selected": device_write,
+            "btn_send_text": device_write,
+            "btn_send_image": device_write,
+            "btn_lcd_on": device_write,
+            "btn_lcd_off": device_write,
+            "btn_save_schedule": device_write,
+            "btn_approve_request": self.is_nurse_admin(),
+            "btn_reject_request": self.is_nurse_admin(),
+            "btn_mark_verified": self.is_nurse_admin() or self.is_verifier(),
+            "btn_mark_mismatch": self.is_nurse_admin() or self.is_verifier(),
+        }
+        for btn_name, enabled in settings.items():
             btn = getattr(self, btn_name, None)
             if btn is not None:
-                btn.setEnabled(can_write)
+                btn.setEnabled(bool(enabled))
 
     def require_network_for_write(self, action_name: str) -> bool:
         if self.gateway_online:
@@ -1588,29 +1970,29 @@ class DashboardWindow(QWidget):
         titles = {
             "active_residents": "Active residents",
             "online_devices": "Online devices",
-            "paired_devices": "Paired devices",
-            "safety_reviews": "Safety reviews",
+            "pending_requests": "Pending approvals",
+            "verification_mismatches": "Display mismatches",
             "failed_updates": "Failed updates",
         }
         for key, title in titles.items():
             if hasattr(self, "record_summary_labels") and key in self.record_summary_labels:
                 self.record_summary_labels[key].setText(f"{title}: {summary.get(key, 0)}")
         if hasattr(self, "record_summary_labels") and "database_mode" in self.record_summary_labels:
-            mode = "network database" if summary.get("database_mode") == "postgres" else "unavailable"
+            mode = "network database" if summary.get("database_mode") == "postgres" else "local demo database"
             self.record_summary_labels["database_mode"].setText(f"Data store: {mode}")
 
         overview_values = {
             "active_residents": summary.get("active_residents", 0),
-            "known_devices": summary.get("known_devices", summary.get("online_devices", 0)),
-            "paired_devices": summary.get("paired_devices", 0),
-            "recent_activity": summary.get("recent_activity_today", summary.get("recent_activity", 0)),
+            "pending_requests": summary.get("pending_requests", 0),
+            "verification_mismatches": summary.get("verification_mismatches", 0),
             "online_devices": summary.get("online_devices", 0),
+            "failed_updates": summary.get("failed_updates", 0),
         }
         for key, value in overview_values.items():
             if hasattr(self, "summary_labels") and key in self.summary_labels:
                 self.summary_labels[key].setText(str(value))
         if hasattr(self, "overview_status"):
-            mode = "network database" if summary.get("database_mode") == "postgres" else "unavailable"
+            mode = "network database" if summary.get("database_mode") == "postgres" else "local demo database"
             self.overview_status.setText(f"Data store: {mode}\nGateway: {self.connection_badge.text()}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
         if hasattr(self, "overview_device_table"):
             self.load_overview_devices()
@@ -1623,7 +2005,7 @@ class DashboardWindow(QWidget):
                 d.get("device_id") or "",
                 "Online" if d.get("is_online") else "Offline",
                 f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A",
-                d.get("resident_name") or "Unassigned",
+                ("Assigned" if d.get("resident_name") else "Unassigned") if self.is_it_admin() else (d.get("resident_name") or "Unassigned"),
                 str(d.get("last_seen_s") or ""),
             ]
             for c, value in enumerate(values):
@@ -1658,6 +2040,270 @@ class DashboardWindow(QWidget):
             for c, value in enumerate(values):
                 self.schedule_table.setItem(r, c, QTableWidgetItem(str(value)))
 
+    def load_approvals(self):
+        if not hasattr(self, "approval_table"):
+            return
+        requests = self.db.get_change_requests(limit=100)
+        self.approval_table.setRowCount(len(requests))
+        pending = 0
+        for r, request in enumerate(requests):
+            if request.get("status") == "PENDING":
+                pending += 1
+            values = [
+                request.get("status") or "",
+                request.get("full_name") or request.get("resident_uid") or "Unknown",
+                request.get("room") or "",
+                request.get("requested_by_username") or "",
+                self.db.format_timestamp(request.get("created_at")),
+            ]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setData(Qt.ItemDataRole.UserRole, request.get("id"))
+                self.approval_table.setItem(r, c, item)
+        self.approval_count_label.setText(f"Pending: {pending}")
+        if len(requests) == 0:
+            self.selected_review_request_id = None
+            self.approval_detail.setPlainText("No resident review requests.")
+
+    def show_approval_detail(self, row):
+        item = self.approval_table.item(row, 0)
+        if item is None:
+            return
+        request_id = item.data(Qt.ItemDataRole.UserRole)
+        self.selected_review_request_id = request_id
+        request = None
+        for candidate in self.db.get_change_requests(limit=200):
+            if candidate.get("id") == request_id:
+                request = candidate
+                break
+        if not request:
+            self.approval_detail.setPlainText("Request no longer exists.")
+            return
+
+        payload = request.get("proposed_payload") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {"raw_payload": payload}
+
+        fields = [
+            f"Status: {request.get('status')}",
+            f"Resident: {request.get('full_name') or request.get('resident_uid')}",
+            f"Room: {request.get('room') or ''}",
+            f"Submitted By: {request.get('requested_by_username') or ''}",
+            f"Submitted At: {self.db.format_timestamp(request.get('created_at'))}",
+            "",
+            "Nurse Note:",
+            request.get("comment") or "",
+            "",
+            "Resident Snapshot:",
+        ]
+        for key in ["full_name", "room", "diet", "allergies", "note", "drinks", "schedule"]:
+            if payload.get(key):
+                fields.append(f"{key.replace('_', ' ').title()}: {payload.get(key)}")
+        if request.get("review_note"):
+            fields.extend(["", "Nurse Admin Decision:", request.get("review_note")])
+        self.approval_detail.setPlainText("\n".join(fields))
+
+    def review_selected_request(self, status):
+        if not self.is_nurse_admin():
+            self.show_error("Permission Required", "Only nurse admins can review resident requests.")
+            return
+        if self.selected_review_request_id is None:
+            self.show_error("No request", "Select a request from the queue.")
+            return
+        note = self.approval_review_note.toPlainText().strip()
+        if not note:
+            self.show_error("Decision note required", "Add a short note before closing the request.")
+            return
+        try:
+            self.db.update_change_request_status(
+                self.selected_review_request_id,
+                status,
+                self.current_user.get("id"),
+                self.current_user.get("username"),
+                note,
+            )
+            self.db.log_update(
+                "resident_review_decision",
+                None,
+                None,
+                None,
+                self.current_user.get("id"),
+                self.current_user.get("username"),
+                {"request_id": self.selected_review_request_id, "status": status, "note": note},
+                {"reviewed": True},
+                True,
+                f"Resident review request {status.lower()}",
+            )
+            self.approval_review_note.clear()
+            self.selected_review_request_id = None
+            self.load_approvals()
+            self.load_recent_logs()
+            self.refresh_dashboard_summary()
+            self.show_info("Review recorded", f"Request marked {status.lower()}.")
+        except Exception as e:
+            self.show_error("Review failed", str(e))
+
+    def load_verification_page(self):
+        if not hasattr(self, "verify_resident_list"):
+            return
+        current_id = self.selected_verification_resident_id
+        self.verify_resident_list.clear()
+        for resident in self.db.get_residents():
+            label = f"{resident.get('full_name')} | {resident.get('room') or 'No room'} | {resident.get('resident_uid')}"
+            if resident.get("paired_device_id"):
+                label += f" | {resident.get('paired_device_id')}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, resident.get("id"))
+            self.verify_resident_list.addItem(item)
+            if current_id is not None and resident.get("id") == current_id:
+                self.verify_resident_list.setCurrentRow(self.verify_resident_list.count() - 1)
+        self.load_verification_history()
+
+    def on_verify_resident_selected(self, item):
+        resident_id = item.data(Qt.ItemDataRole.UserRole)
+        self.selected_verification_resident_id = resident_id
+        row = self.db.get_resident(resident_id)
+        if not row:
+            self.verify_detail.setPlainText("Resident record was not found.")
+            return
+        fields = [
+            f"Resident UID: {row.get('resident_uid') or ''}",
+            f"Name: {row.get('full_name') or ''}",
+            f"Room: {row.get('room') or ''}",
+            f"Paired Device: {row.get('paired_device_id') or 'Unpaired'}",
+            f"Device Status: {'Online' if row.get('paired_device_online') else 'Offline'}",
+            "",
+            f"Diet: {row.get('diet') or ''}",
+            f"Allergies: {row.get('allergies') or ''}",
+            f"Drinks: {row.get('drinks') or ''}",
+            f"Schedule: {row.get('schedule') or ''}",
+            "",
+            "Display Note:",
+            row.get("note") or "",
+        ]
+        self.verify_detail.setPlainText("\n".join(fields))
+
+    def record_verification(self, status):
+        if not (self.is_verifier() or self.is_nurse_admin()):
+            self.show_error("Permission Required", "Only display verifiers or nurse admins can record verification.")
+            return
+        if self.selected_verification_resident_id is None:
+            self.show_error("No resident", "Select a resident to verify.")
+            return
+        row = self.db.get_resident(self.selected_verification_resident_id)
+        if not row:
+            self.show_error("Not found", "Resident record was not found.")
+            return
+        note = self.verify_note.toPlainText().strip()
+        try:
+            self.db.create_verification_check(
+                self.selected_verification_resident_id,
+                row.get("resident_uid"),
+                row.get("paired_device_id"),
+                status,
+                note,
+                self.current_user.get("id"),
+                self.current_user.get("username"),
+            )
+            self.db.log_update(
+                "display_verification",
+                self.selected_verification_resident_id,
+                row.get("resident_uid"),
+                row.get("paired_device_id"),
+                self.current_user.get("id"),
+                self.current_user.get("username"),
+                {"status": status, "note": note},
+                {"recorded": True},
+                status == "MATCH",
+                "Display verification recorded",
+            )
+            self.verify_note.clear()
+            self.load_verification_history()
+            self.load_recent_logs()
+            self.refresh_dashboard_summary()
+            self.show_info("Verification recorded", "Display verification was recorded.")
+        except Exception as e:
+            self.show_error("Verification failed", str(e))
+
+    def load_verification_history(self):
+        if not hasattr(self, "verification_table"):
+            return
+        rows = self.db.get_verification_checks(limit=100)
+        self.verification_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            values = [
+                row.get("status") or "",
+                row.get("full_name") or row.get("resident_uid") or "",
+                row.get("device_id") or "",
+                row.get("checked_by_username") or "",
+            ]
+            for c, value in enumerate(values):
+                self.verification_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def load_it_health(self):
+        if not hasattr(self, "it_device_table"):
+            return
+        devices = self.db.get_devices()
+        summary = self.db.get_dashboard_summary()
+        offline = sum(1 for d in devices if not d.get("is_online"))
+
+        self.it_health_labels["gateway"].setText("Online" if self.gateway_online else "Offline")
+        self.it_health_labels["database"].setText(summary.get("database_mode", "unknown"))
+        self.it_health_labels["devices"].setText(str(len(devices)))
+        self.it_health_labels["offline"].setText(str(offline))
+
+        self.it_device_table.setRowCount(len(devices))
+        for r, d in enumerate(devices):
+            values = [
+                d.get("device_id") or "",
+                "Online" if d.get("is_online") else "Offline",
+                d.get("ip") or "",
+                str(d.get("port") or ""),
+                d.get("fw") or "",
+                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A",
+                str(d.get("last_seen_s") or ""),
+            ]
+            for c, value in enumerate(values):
+                self.it_device_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+    def generate_debug_brief(self):
+        self.load_it_health()
+        devices = self.db.get_devices()
+        logs = self.db.get_recent_logs(limit=10)
+        offline = [d for d in devices if not d.get("is_online")]
+        lines = [
+            f"Application: {APP_NAME}",
+            f"User role: {self.role_label()}",
+            f"Gateway URL: {self.base_url()}",
+            f"Gateway state: {'connected' if self.gateway_online else 'offline'}",
+            f"Database mode: {self.db.backend or 'unknown'}",
+            f"Known devices: {len(devices)}",
+            f"Offline devices: {len(offline)}",
+            "",
+            "Device health:",
+        ]
+        for d in devices:
+            lines.append(
+                f"- {d.get('device_id')}: {'online' if d.get('is_online') else 'offline'}, "
+                f"ip={d.get('ip') or 'n/a'}, fw={d.get('fw') or 'n/a'}, "
+                f"battery={d.get('battery_level') if d.get('battery_level') is not None else 'n/a'}, "
+                f"last_seen_s={d.get('last_seen_s')}"
+            )
+        lines.extend(["", "Recent technical events:"])
+        for log in logs:
+            action = log.get("action_type") or ""
+            success = "ok" if log.get("success") else "failed"
+            message = (log.get("message") or "").replace("\n", " ")[:160]
+            lines.append(f"- {self.db.format_timestamp(log.get('created_at'))}: {action} [{success}] {message}")
+        self.debug_brief.setPlainText("\n".join(lines))
+
+    def copy_debug_brief(self):
+        QGuiApplication.clipboard().setText(self.debug_brief.toPlainText())
+        self.show_info("Copied", "Technical debug brief copied.")
+
     def handle_logout(self):
         answer = QMessageBox.question(
             self,
@@ -1673,24 +2319,90 @@ class DashboardWindow(QWidget):
     def show_profile_settings(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
-        dialog.resize(520, 420)
+        dialog.resize(760, 560)
         layout = QVBoxLayout(dialog)
-        body = QTextEdit(dialog)
-        body.setReadOnly(True)
-        body.setStyleSheet(self.input_style())
-        body.setPlainText(
-            "Settings\n\n"
-            f"User: {self.current_user.get('username', 'admin')}\n"
-            f"Role: {self.current_user.get('role', 'ADMIN')}\n"
-            f"Gateway URL: {self.base_url()}\n\n"
-            "Configuration areas ready for later integration:\n"
-            "- theme choice\n"
-            "- add user\n"
-            "- change password\n"
-            "- gateway defaults\n"
-            "- admin permissions"
+
+        header = QLabel(
+            f"Signed in as {self.current_user.get('username', 'admin')} | {self.role_label()}\n"
+            f"Gateway: {self.base_url()}\n"
+            f"Database: {self.db.backend or 'unknown'}"
         )
-        layout.addWidget(body)
+        header.setStyleSheet("font-size: 13px; color: #d7d7d7; background: transparent; border: none;")
+        layout.addWidget(header)
+
+        users_table = QTableWidget(dialog)
+        users_table.setColumnCount(4)
+        users_table.setHorizontalHeaderLabels(["Username", "Role", "Active", "Created"])
+        users_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        users_table.verticalHeader().setVisible(False)
+        users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        users_table.setStyleSheet(self.table_style())
+        layout.addWidget(users_table)
+
+        def load_users():
+            auth = AuthService()
+            try:
+                rows = auth.list_users()
+            finally:
+                auth.close()
+            users_table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                values = [
+                    row.get("username") or "",
+                    self.role_label(row.get("role")),
+                    "Yes" if row.get("active") else "No",
+                    self.db.format_timestamp(row.get("created_at")),
+                ]
+                for c, value in enumerate(values):
+                    users_table.setItem(r, c, QTableWidgetItem(str(value)))
+
+        load_users()
+
+        create_panel = QFrame(dialog)
+        create_panel.setStyleSheet("QFrame { background-color: #111111; border: 1px solid #242424; border-radius: 8px; }")
+        create_layout = QHBoxLayout(create_panel)
+        create_layout.setContentsMargins(12, 12, 12, 12)
+
+        username_edit = QLineEdit(create_panel)
+        username_edit.setPlaceholderText("New username")
+        username_edit.setStyleSheet(self.input_style())
+        create_layout.addWidget(username_edit)
+
+        password_edit = QLineEdit(create_panel)
+        password_edit.setPlaceholderText("Temporary password")
+        password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        password_edit.setStyleSheet(self.input_style())
+        create_layout.addWidget(password_edit)
+
+        role_combo = QComboBox(create_panel)
+        for role in ["NURSE", "NURSE_ADMIN", "VERIFIER", "IT_ADMIN"]:
+            role_combo.addItem(self.role_label(role), role)
+        role_combo.setStyleSheet(self.input_style())
+        create_layout.addWidget(role_combo)
+
+        create_btn = QPushButton("Create User", create_panel)
+        create_btn.setStyleSheet(self.primary_btn_style())
+        create_layout.addWidget(create_btn)
+        layout.addWidget(create_panel)
+
+        def create_user():
+            if not self.is_nurse_admin():
+                self.show_error("Permission Required", "Only nurse admins can create users.")
+                return
+            auth = AuthService()
+            try:
+                auth.create_user(username_edit.text(), password_edit.text(), role_combo.currentData())
+            except Exception as e:
+                self.show_error("Create user failed", str(e))
+            finally:
+                auth.close()
+            username_edit.clear()
+            password_edit.clear()
+            load_users()
+
+        create_btn.clicked.connect(create_user)
+        create_panel.setVisible(self.is_nurse_admin())
+
         close_btn = QPushButton("Close", dialog)
         close_btn.setStyleSheet(self.primary_btn_style())
         close_btn.clicked.connect(dialog.accept)
@@ -1738,7 +2450,8 @@ class DashboardWindow(QWidget):
         self.selected_pair_device_id = item.data(Qt.ItemDataRole.UserRole)
 
     def save_resident(self):
-        if not self.require_network_for_write("Saving resident information"):
+        if not self.can_edit_residents():
+            self.show_error("Permission Required", "Only a nurse admin can save approved resident information.")
             return
         payload = self.collect_resident_payload()
 
@@ -1776,6 +2489,8 @@ class DashboardWindow(QWidget):
             self.load_residents()
             self.load_recent_logs()
             self.load_pairing_views()
+            self.load_verification_page()
+            self.load_approvals()
             self.refresh_dashboard_summary()
             self.send_saved_resident_if_paired()
             self.show_info("Saved", message)
@@ -1783,8 +2498,56 @@ class DashboardWindow(QWidget):
         except Exception as e:
             self.show_error("Save failed", str(e))
 
+    def submit_resident_review_request(self):
+        if not self.is_nurse():
+            self.show_error("Permission Required", "Only nurse users submit resident review requests from this view.")
+            return
+        if self.selected_resident_id is None:
+            self.show_error("No resident", "Select a resident before sending a review note.")
+            return
+        comment = self.nurse_review_comment.toPlainText().strip()
+        if not comment:
+            self.show_error("Missing review note", "Write the observation or correction request before sending.")
+            return
+
+        row = self.db.get_resident(self.selected_resident_id)
+        if not row:
+            self.show_error("Not found", "Resident record was not found.")
+            return
+
+        payload = self.collect_resident_payload()
+        try:
+            self.db.create_change_request(
+                self.selected_resident_id,
+                row.get("resident_uid"),
+                payload,
+                comment,
+                self.current_user.get("id"),
+                self.current_user.get("username"),
+            )
+            self.db.log_update(
+                "resident_review_request",
+                self.selected_resident_id,
+                row.get("resident_uid"),
+                row.get("paired_device_id"),
+                self.current_user.get("id"),
+                self.current_user.get("username"),
+                {"comment": comment},
+                {"status": "PENDING"},
+                True,
+                "Resident review request submitted",
+            )
+            self.nurse_review_comment.clear()
+            self.load_approvals()
+            self.load_recent_logs()
+            self.refresh_dashboard_summary()
+            self.show_info("Submitted", "Review request sent to the nurse admin queue.")
+        except Exception as e:
+            self.show_error("Submit failed", str(e))
+
     def delete_selected_resident(self):
-        if not self.require_network_for_write("Deleting resident information"):
+        if not self.can_edit_residents():
+            self.show_error("Permission Required", "Only a nurse admin can delete resident information.")
             return
         if self.selected_resident_id is None:
             self.show_error("No resident", "Select a resident to delete.")
@@ -1827,6 +2590,8 @@ class DashboardWindow(QWidget):
             self.load_residents()
             self.load_pairing_views()
             self.load_schedule_view()
+            self.load_verification_page()
+            self.load_approvals()
             self.load_recent_logs()
             self.refresh_dashboard_summary()
             self.show_info("Deleted", "Resident deleted successfully.")
@@ -1893,6 +2658,7 @@ class DashboardWindow(QWidget):
             self.load_recent_logs()
             self.refresh_dashboard_summary()
             self.load_schedule_view()
+            self.load_it_health()
             return
 
         self.load_update_targets()
@@ -1901,6 +2667,7 @@ class DashboardWindow(QWidget):
         self.load_recent_logs()
         self.refresh_dashboard_summary()
         self.load_schedule_view()
+        self.load_it_health()
 
     def load_update_targets(self):
         current_device = self.selected_device_id()

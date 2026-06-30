@@ -3,7 +3,7 @@ import sqlite3
 import bcrypt
 import psycopg2
 
-from config import DATABASE_MODE, LOCAL_DB_PATH, DEMO_DEFAULT_USERNAME, DEMO_DEFAULT_PASSWORD
+from config import DATABASE_MODE, LOCAL_DB_PATH, DEMO_USERS
 from db_config import DB_CONFIG
 
 
@@ -51,18 +51,70 @@ class AuthService:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        cur.execute("SELECT COUNT(*) AS count FROM users")
-        if cur.fetchone()["count"] == 0:
-            password_hash = bcrypt.hashpw(
-                DEMO_DEFAULT_PASSWORD.encode(),
-                bcrypt.gensalt(),
-            ).decode()
+        for username, password, role in DEMO_USERS:
+            cur.execute("SELECT id FROM users WHERE username = ?", (username,))
+            if cur.fetchone():
+                continue
+            password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
             cur.execute("""
                 INSERT INTO users (username, password_hash, role, active)
-                VALUES (?, ?, 'ADMIN', 1)
-            """, (DEMO_DEFAULT_USERNAME, password_hash))
+                VALUES (?, ?, ?, 1)
+            """, (username, password_hash, role))
         self.conn.commit()
         cur.close()
+
+    def list_users(self):
+        self.connect()
+        cur = self.conn.cursor()
+        if self.backend == "sqlite":
+            cur.execute("""
+                SELECT id, username, role, active, created_at
+                FROM users
+                ORDER BY username ASC
+            """)
+            rows = [dict(row) for row in cur.fetchall()]
+        else:
+            cur.execute("""
+                SELECT id, username, role, active, created_at
+                FROM users
+                ORDER BY username ASC
+            """)
+            rows = [
+                {
+                    "id": row[0],
+                    "username": row[1],
+                    "role": row[2],
+                    "active": row[3],
+                    "created_at": row[4],
+                }
+                for row in cur.fetchall()
+            ]
+        cur.close()
+        return rows
+
+    def create_user(self, username: str, password: str, role: str):
+        self.connect()
+        username = username.strip()
+        role = role.strip().upper()
+        if not username or not password:
+            raise ValueError("Username and password are required.")
+
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        cur = self.conn.cursor()
+        try:
+            if self.backend == "sqlite":
+                cur.execute("""
+                    INSERT INTO users (username, password_hash, role, active)
+                    VALUES (?, ?, ?, 1)
+                """, (username, password_hash, role))
+            else:
+                cur.execute("""
+                    INSERT INTO users (username, password_hash, role, active)
+                    VALUES (%s, %s, %s, TRUE)
+                """, (username, password_hash, role))
+            self.conn.commit()
+        finally:
+            cur.close()
 
     def login(self, username: str, password: str) -> dict:
         try:

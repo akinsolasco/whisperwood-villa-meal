@@ -144,6 +144,36 @@ class DatabaseService:
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             );
             """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_change_requests (
+                id SERIAL PRIMARY KEY,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid VARCHAR(32),
+                proposed_payload JSONB,
+                comment TEXT NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                requested_by_user_id INTEGER,
+                requested_by_username VARCHAR(255),
+                reviewed_by_user_id INTEGER,
+                reviewed_by_username VARCHAR(255),
+                review_note TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                reviewed_at TIMESTAMP
+            );
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS verification_checks (
+                id SERIAL PRIMARY KEY,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid VARCHAR(32),
+                device_id VARCHAR(128),
+                status VARCHAR(32) NOT NULL,
+                note TEXT,
+                checked_by_user_id INTEGER,
+                checked_by_username VARCHAR(255),
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """)
             cur.execute("ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_level INTEGER")
         else:
             cur.execute("""
@@ -206,6 +236,36 @@ class DatabaseService:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid TEXT,
+                proposed_payload TEXT,
+                comment TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                requested_by_user_id INTEGER,
+                requested_by_username TEXT,
+                reviewed_by_user_id INTEGER,
+                reviewed_by_username TEXT,
+                review_note TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TEXT
+            );
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS verification_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid TEXT,
+                device_id TEXT,
+                status TEXT NOT NULL,
+                note TEXT,
+                checked_by_user_id INTEGER,
+                checked_by_username TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
 
         self.conn.commit()
         cur.close()
@@ -231,12 +291,14 @@ class DatabaseService:
         self.connect()
         cur = self.conn.cursor()
         if self.backend == "postgres":
-            cur.execute("TRUNCATE TABLE display_updates, device_registry, residents RESTART IDENTITY CASCADE;")
+            cur.execute("TRUNCATE TABLE verification_checks, resident_change_requests, display_updates, device_registry, residents RESTART IDENTITY CASCADE;")
         else:
+            cur.execute("DELETE FROM verification_checks")
+            cur.execute("DELETE FROM resident_change_requests")
             cur.execute("DELETE FROM display_updates")
             cur.execute("DELETE FROM device_registry")
             cur.execute("DELETE FROM residents")
-            cur.execute("DELETE FROM sqlite_sequence WHERE name IN ('display_updates', 'device_registry', 'residents')")
+            cur.execute("DELETE FROM sqlite_sequence WHERE name IN ('verification_checks', 'resident_change_requests', 'display_updates', 'device_registry', 'residents')")
         self.conn.commit()
         cur.close()
 
@@ -512,6 +574,103 @@ class DatabaseService:
         self.conn.commit()
         cur.close()
 
+    def create_change_request(self, resident_id, resident_uid, proposed_payload, comment, requested_by_user_id, requested_by_username):
+        cur = self._cursor()
+        payload_value = self._json_value(proposed_payload)
+        if self.backend == "postgres":
+            cur.execute("""
+                INSERT INTO resident_change_requests (
+                    resident_id, resident_uid, proposed_payload, comment,
+                    requested_by_user_id, requested_by_username
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (resident_id, resident_uid, payload_value, comment, requested_by_user_id, requested_by_username))
+        else:
+            cur.execute("""
+                INSERT INTO resident_change_requests (
+                    resident_id, resident_uid, proposed_payload, comment,
+                    requested_by_user_id, requested_by_username
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (resident_id, resident_uid, payload_value, comment, requested_by_user_id, requested_by_username))
+        self.conn.commit()
+        cur.close()
+
+    def get_change_requests(self, status=None, limit=100):
+        cur = self._cursor(dict_rows=True)
+        marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "cr.created_at DESC, cr.id DESC" if self.backend == "postgres" else "datetime(cr.created_at) DESC, cr.id DESC"
+        if status:
+            cur.execute(f"""
+                SELECT cr.*,
+                       r.full_name,
+                       r.room
+                FROM resident_change_requests cr
+                LEFT JOIN residents r ON r.id = cr.resident_id
+                WHERE cr.status = {marker}
+                ORDER BY {order_clause}
+                LIMIT {marker}
+            """, (status, limit))
+        else:
+            cur.execute(f"""
+                SELECT cr.*,
+                       r.full_name,
+                       r.room
+                FROM resident_change_requests cr
+                LEFT JOIN residents r ON r.id = cr.resident_id
+                ORDER BY {order_clause}
+                LIMIT {marker}
+            """, (limit,))
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        return rows
+
+    def update_change_request_status(self, request_id, status, reviewed_by_user_id, reviewed_by_username, review_note=""):
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        cur.execute(f"""
+            UPDATE resident_change_requests
+            SET status = {marker},
+                reviewed_by_user_id = {marker},
+                reviewed_by_username = {marker},
+                review_note = {marker},
+                reviewed_at = {timestamp}
+            WHERE id = {marker}
+        """, (status, reviewed_by_user_id, reviewed_by_username, review_note, request_id))
+        self.conn.commit()
+        cur.close()
+
+    def create_verification_check(self, resident_id, resident_uid, device_id, status, note, checked_by_user_id, checked_by_username):
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        cur.execute(f"""
+            INSERT INTO verification_checks (
+                resident_id, resident_uid, device_id, status, note,
+                checked_by_user_id, checked_by_username
+            )
+            VALUES ({", ".join([marker] * 7)})
+        """, (resident_id, resident_uid, device_id, status, note, checked_by_user_id, checked_by_username))
+        self.conn.commit()
+        cur.close()
+
+    def get_verification_checks(self, limit=50):
+        cur = self._cursor(dict_rows=True)
+        marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "vc.created_at DESC, vc.id DESC" if self.backend == "postgres" else "datetime(vc.created_at) DESC, vc.id DESC"
+        cur.execute(f"""
+            SELECT vc.*,
+                   r.full_name,
+                   r.room
+            FROM verification_checks vc
+            LEFT JOIN residents r ON r.id = vc.resident_id
+            ORDER BY {order_clause}
+            LIMIT {marker}
+        """, (limit,))
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        return rows
+
     def get_recent_logs(self, limit=50):
         cur = self._cursor(dict_rows=True)
         marker = "%s" if self.backend == "postgres" else "?"
@@ -603,6 +762,12 @@ class DatabaseService:
         recent_activity_total = self._row(cur.fetchone())["count"]
         cur.execute(f"SELECT COUNT(*) AS count FROM residents WHERE {review_filter}")
         safety_reviews = self._row(cur.fetchone())["count"]
+        cur.execute("SELECT COUNT(*) AS count FROM resident_change_requests WHERE status = 'PENDING'")
+        pending_requests = self._row(cur.fetchone())["count"]
+        cur.execute("SELECT COUNT(*) AS count FROM verification_checks")
+        verification_checks = self._row(cur.fetchone())["count"]
+        cur.execute("SELECT COUNT(*) AS count FROM verification_checks WHERE status = 'MISMATCH'")
+        verification_mismatches = self._row(cur.fetchone())["count"]
         cur.close()
         return {
             "active_residents": active,
@@ -615,6 +780,9 @@ class DatabaseService:
             "recent_activity_today": recent_activity_today,
             "recent_activity_total": recent_activity_total,
             "safety_reviews": safety_reviews,
+            "pending_requests": pending_requests,
+            "verification_checks": verification_checks,
+            "verification_mismatches": verification_mismatches,
             "database_mode": self.backend or "unknown",
         }
 
