@@ -71,6 +71,18 @@ class DatabaseService:
             return json.dumps(value)
         return Json(value)
 
+    def _parse_json_field(self, value):
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return value
+        return value
+
     def ensure_tables(self):
         self.connect()
         cur = self.conn.cursor()
@@ -684,6 +696,45 @@ class DatabaseService:
         """, (limit,))
         rows = self._rows(cur.fetchall())
         cur.close()
+        return rows
+
+    def get_resident_audit_logs(self, limit=200):
+        cur = self._cursor(dict_rows=True)
+        marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "du.created_at DESC, du.id DESC" if self.backend == "postgres" else "datetime(du.created_at) DESC, du.id DESC"
+        resident_actions = [
+            "resident_create",
+            "resident_update",
+            "resident_delete",
+            "resident_review_request",
+            "resident_review_decision",
+        ]
+        placeholders = ", ".join([marker] * len(resident_actions))
+        cur.execute(f"""
+            SELECT du.id,
+                   du.created_at,
+                   du.action_type,
+                   du.resident_id,
+                   du.resident_uid,
+                   du.pushed_by_username,
+                   du.payload_json,
+                   du.response_json,
+                   du.success,
+                   du.message,
+                   r.full_name,
+                   r.room,
+                   r.source_document AS current_source_document
+            FROM display_updates du
+            LEFT JOIN residents r ON r.id = du.resident_id
+            WHERE du.action_type IN ({placeholders})
+            ORDER BY {order_clause}
+            LIMIT {marker}
+        """, (*resident_actions, limit))
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        for row in rows:
+            row["payload_json"] = self._parse_json_field(row.get("payload_json"))
+            row["response_json"] = self._parse_json_field(row.get("response_json"))
         return rows
 
     def get_log(self, log_id):

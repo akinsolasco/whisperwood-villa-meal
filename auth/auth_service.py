@@ -31,6 +31,7 @@ class AuthService:
         config.setdefault("connect_timeout", 2)
         self.conn = psycopg2.connect(**config)
         self.backend = "postgres"
+        self.ensure_user_columns()
 
     def close(self):
         if self.conn:
@@ -47,10 +48,12 @@ class AuthService:
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'ADMIN',
                 active INTEGER NOT NULL DEFAULT 1,
+                password_must_change INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        self.ensure_user_columns(cur)
         for username, password, role in DEMO_USERS:
             cur.execute("SELECT id FROM users WHERE username = ?", (username,))
             if cur.fetchone():
@@ -63,19 +66,34 @@ class AuthService:
         self.conn.commit()
         cur.close()
 
+    def ensure_user_columns(self, cur=None):
+        own_cursor = cur is None
+        cur = cur or self.conn.cursor()
+        try:
+            if self.backend == "sqlite":
+                columns = {row["name"] for row in cur.execute("PRAGMA table_info(users)").fetchall()}
+                if "password_must_change" not in columns:
+                    cur.execute("ALTER TABLE users ADD COLUMN password_must_change INTEGER NOT NULL DEFAULT 0")
+            else:
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_must_change BOOLEAN NOT NULL DEFAULT FALSE")
+            self.conn.commit()
+        finally:
+            if own_cursor:
+                cur.close()
+
     def list_users(self):
         self.connect()
         cur = self.conn.cursor()
         if self.backend == "sqlite":
             cur.execute("""
-                SELECT id, username, role, active, created_at
+                SELECT id, username, role, active, password_must_change, created_at
                 FROM users
                 ORDER BY username ASC
             """)
             rows = [dict(row) for row in cur.fetchall()]
         else:
             cur.execute("""
-                SELECT id, username, role, active, created_at
+                SELECT id, username, role, active, password_must_change, created_at
                 FROM users
                 ORDER BY username ASC
             """)
@@ -85,14 +103,15 @@ class AuthService:
                     "username": row[1],
                     "role": row[2],
                     "active": row[3],
-                    "created_at": row[4],
+                    "password_must_change": row[4],
+                    "created_at": row[5],
                 }
                 for row in cur.fetchall()
             ]
         cur.close()
         return rows
 
-    def create_user(self, username: str, password: str, role: str):
+    def create_user(self, username: str, password: str, role: str, must_change_password: bool = True):
         self.connect()
         username = username.strip()
         role = role.strip().upper()
@@ -104,14 +123,74 @@ class AuthService:
         try:
             if self.backend == "sqlite":
                 cur.execute("""
-                    INSERT INTO users (username, password_hash, role, active)
-                    VALUES (?, ?, ?, 1)
-                """, (username, password_hash, role))
+                    INSERT INTO users (username, password_hash, role, active, password_must_change)
+                    VALUES (?, ?, ?, 1, ?)
+                """, (username, password_hash, role, int(bool(must_change_password))))
             else:
                 cur.execute("""
-                    INSERT INTO users (username, password_hash, role, active)
-                    VALUES (%s, %s, %s, TRUE)
-                """, (username, password_hash, role))
+                    INSERT INTO users (username, password_hash, role, active, password_must_change)
+                    VALUES (%s, %s, %s, TRUE, %s)
+                """, (username, password_hash, role, bool(must_change_password)))
+            self.conn.commit()
+        finally:
+            cur.close()
+
+    def change_password(self, user_id: int, current_password: str, new_password: str):
+        self.connect()
+        if not current_password or not new_password:
+            raise ValueError("Current and new password are required.")
+        if len(new_password) < 8:
+            raise ValueError("New password must be at least 8 characters.")
+
+        cur = self.conn.cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        try:
+            cur.execute(f"SELECT password_hash FROM users WHERE id = {marker} AND active = {marker}", (user_id, True if self.backend == "postgres" else 1))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("Active user account was not found.")
+            password_hash = row[0] if self.backend == "postgres" else row["password_hash"]
+            if not bcrypt.checkpw(current_password.encode(), password_hash.encode()):
+                raise ValueError("Current password is incorrect.")
+
+            new_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+            timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+            cur.execute(f"""
+                UPDATE users
+                SET password_hash = {marker},
+                    password_must_change = {marker},
+                    updated_at = {timestamp}
+                WHERE id = {marker}
+            """, (new_hash, False if self.backend == "postgres" else 0, user_id))
+            self.conn.commit()
+        finally:
+            cur.close()
+
+    def set_temporary_password(self, user_id: int, temporary_password: str):
+        self.connect()
+        if not temporary_password or len(temporary_password) < 8:
+            raise ValueError("Temporary password must be at least 8 characters.")
+
+        cur = self.conn.cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        try:
+            cur.execute(f"SELECT id, active FROM users WHERE id = {marker}", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("User account was not found.")
+            active = row[1] if self.backend == "postgres" else row["active"]
+            if not active:
+                raise ValueError("User account is inactive. Reactivate or verify the account before issuing a temporary password.")
+
+            password_hash = bcrypt.hashpw(temporary_password.encode(), bcrypt.gensalt()).decode()
+            timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+            cur.execute(f"""
+                UPDATE users
+                SET password_hash = {marker},
+                    password_must_change = {marker},
+                    updated_at = {timestamp}
+                WHERE id = {marker}
+            """, (password_hash, True if self.backend == "postgres" else 1, user_id))
             self.conn.commit()
         finally:
             cur.close()
@@ -123,7 +202,7 @@ class AuthService:
 
             marker = "%s" if self.backend == "postgres" else "?"
             cur.execute(f"""
-                SELECT id, username, password_hash, role, active
+                SELECT id, username, password_hash, role, active, password_must_change
                 FROM users
                 WHERE username = {marker}
             """, (username,))
@@ -140,8 +219,9 @@ class AuthService:
                 password_hash = row["password_hash"]
                 role = row["role"]
                 active = row["active"]
+                password_must_change = row["password_must_change"]
             else:
-                user_id, db_username, password_hash, role, active = row
+                user_id, db_username, password_hash, role, active, password_must_change = row
 
             if not active:
                 return {"success": False, "message": "Account disabled", "user": None}
@@ -156,6 +236,7 @@ class AuthService:
                     "id": user_id,
                     "username": db_username,
                     "role": role,
+                    "password_must_change": bool(password_must_change),
                 }
             }
 
