@@ -114,53 +114,68 @@ class DashboardWindow(QWidget):
     def primary_btn_style(self):
         return """
             QPushButton {
-                background-color: #e2ab09;
-                color: #111111;
+                background-color: #0f766e;
+                color: white;
                 border: none;
-                border-radius: 12px;
+                border-radius: 8px;
                 font-size: 14px;
                 font-weight: 700;
             }
             QPushButton:hover {
-                background-color: #f0b814;
+                background-color: #11857c;
             }
             QPushButton:pressed {
-                background-color: #c99508;
+                background-color: #0b5f59;
+            }
+            QPushButton:disabled {
+                background-color: #26323d;
+                color: #7f8b96;
             }
         """
 
     def secondary_btn_style(self):
         return """
             QPushButton {
-                background-color: #202020;
-                color: white;
-                border: 1px solid #2d2d2d;
-                border-radius: 12px;
+                background-color: #17212b;
+                color: #edf2f7;
+                border: 1px solid #304050;
+                border-radius: 8px;
                 font-size: 13px;
                 font-weight: 700;
             }
             QPushButton:hover {
-                background-color: #2a2a2a;
+                background-color: #21303d;
+                border: 1px solid #3d5367;
+            }
+            QPushButton:disabled {
+                background-color: #111922;
+                color: #687787;
+                border: 1px solid #253241;
             }
         """
 
     def input_style(self):
         return """
             QLineEdit, QTextEdit, QComboBox, QTimeEdit {
-                background-color: #1a1a1a;
-                color: white;
-                border: 1px solid #262626;
-                border-radius: 12px;
+                background-color: #0d141c;
+                color: #f8fafc;
+                border: 1px solid #2b3a48;
+                border-radius: 8px;
                 padding: 10px 12px;
                 font-size: 14px;
             }
             QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QTimeEdit:focus {
-                border: 1px solid #e2ab09;
+                border: 1px solid #2dd4bf;
+            }
+            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QTimeEdit:disabled {
+                background-color: #101820;
+                color: #8b98a6;
+                border: 1px solid #243242;
             }
         """
 
     def label_style(self):
-        return "font-size: 13px; font-weight: 600; color: #d7d7d7; background: transparent; border: none;"
+        return "font-size: 13px; font-weight: 700; color: #c9d5df; background: transparent; border: none;"
 
     # ---------------------------- window helpers ----------------------------
 
@@ -181,8 +196,8 @@ class DashboardWindow(QWidget):
 
         self.container = QFrame()
         self.container.setStyleSheet("""
-            background-color: #0a0a0a;
-            border-radius: 28px;
+            background-color: #0b1117;
+            border-radius: 8px;
             color: white;
         """)
         root.addWidget(self.container)
@@ -190,7 +205,7 @@ class DashboardWindow(QWidget):
         # Sidebar
         self.sidebar = QFrame(self.container)
         self.sidebar.setGeometry(12, 12, 245, 896)
-        self.apply_frame_style(self.sidebar, "background-color: #121212; border-radius: 22px;")
+        self.apply_frame_style(self.sidebar, "background-color: #0f1720; border-radius: 10px; border: 1px solid #1f2a35;")
 
         self.logo = QLabel(self.sidebar)
         self.logo.setGeometry(22, 20, 200, 82)
@@ -205,11 +220,11 @@ class DashboardWindow(QWidget):
             )
         else:
             self.logo.setText(APP_NAME)
-            self.logo.setStyleSheet("font-size: 22px; font-weight: 700; color: #e2ab09;")
+            self.logo.setStyleSheet("font-size: 22px; font-weight: 800; color: #2dd4bf;")
 
         self.user_card = QFrame(self.sidebar)
         self.user_card.setGeometry(18, 115, 208, 88)
-        self.apply_frame_style(self.user_card, "background-color: #1a1a1a; border-radius: 16px;")
+        self.apply_frame_style(self.user_card, "background-color: #13202a; border-radius: 8px; border: 1px solid #253241;")
 
         self.user_avatar = QLabel(self.user_card)
         self.user_avatar.setGeometry(12, 20, 48, 48)
@@ -217,8 +232,8 @@ class DashboardWindow(QWidget):
         self.user_avatar.setText((self.current_user.get("username") or "U")[0].upper())
         self.user_avatar.setStyleSheet("""
             QLabel {
-                background-color: #e2ab09;
-                color: #101010;
+                background-color: #0f766e;
+                color: white;
                 border-radius: 24px;
                 font-size: 18px;
                 font-weight: 700;
@@ -228,12 +243,12 @@ class DashboardWindow(QWidget):
         self.user_name = QLabel(self.user_card)
         self.user_name.setGeometry(72, 18, 120, 22)
         self.user_name.setText(self.current_user.get("username", "admin"))
-        self.user_name.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self.user_name.setStyleSheet("font-size: 16px; font-weight: 800; color: #f8fafc;")
 
         self.user_role = QLabel(self.user_card)
         self.user_role.setGeometry(72, 45, 120, 18)
         self.user_role.setText(self.role_label())
-        self.user_role.setStyleSheet("font-size: 12px; color: #bdbdbd;")
+        self.user_role.setStyleSheet("font-size: 12px; color: #9fb2c3;")
 
         nav_buttons = [
             ("Overview", 190),
@@ -287,14 +302,15 @@ class DashboardWindow(QWidget):
                     text-align: left;
                     padding-left: 18px;
                     background-color: transparent;
-                    color: #dddddd;
+                    color: #d7e0ea;
                     border: none;
-                    border-radius: 12px;
+                    border-radius: 8px;
                     font-size: 14px;
                     font-weight: 600;
                 }
                 QPushButton:hover {
-                    background-color: #1f1f1f;
+                    background-color: #17212b;
+                    color: white;
                 }
             """)
 
@@ -318,8 +334,8 @@ class DashboardWindow(QWidget):
                 background: transparent;
             }
             QCheckBox::indicator:checked {
-                background-color: #e2ab09;
-                border: 1px solid #e2ab09;
+                background-color: #0f766e;
+                border: 1px solid #2dd4bf;
             }
         """)
 
@@ -328,9 +344,10 @@ class DashboardWindow(QWidget):
         self.connection_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.connection_badge.setStyleSheet("""
             QLabel {
-                background-color: #1a1a1a;
-                color: #cfcfcf;
-                border-radius: 12px;
+                background-color: #13202a;
+                color: #c9d5df;
+                border: 1px solid #253241;
+                border-radius: 8px;
                 font-size: 13px;
                 font-weight: 700;
             }
@@ -347,11 +364,11 @@ class DashboardWindow(QWidget):
         # Title area
         self.title = QLabel(f"{APP_NAME} Control Center", self.container)
         self.title.setGeometry(280, 22, 520, 32)
-        self.title.setStyleSheet("font-size: 28px; font-weight: 700; color: white;")
+        self.title.setStyleSheet("font-size: 26px; font-weight: 800; color: #f8fafc;")
 
-        self.subtitle = QLabel("Overview, resident records, pairing, LCD schedule, and logs admin", self.container)
-        self.subtitle.setGeometry(280, 56, 520, 18)
-        self.subtitle.setStyleSheet("font-size: 13px; color: #aaaaaa;")
+        self.subtitle = QLabel("Hospital-grade resident display operations, approvals, verification, and technical health", self.container)
+        self.subtitle.setGeometry(280, 56, 690, 18)
+        self.subtitle.setStyleSheet("font-size: 13px; color: #9fb2c3;")
 
         self.base_url_edit = QLineEdit(self.container)
         self.base_url_edit.setGeometry(1020, 24, 320, 42)
@@ -372,7 +389,7 @@ class DashboardWindow(QWidget):
             QPushButton:hover {
                 color: white;
                 background-color: rgba(255,255,255,0.08);
-                border-radius: 19px;
+                border-radius: 8px;
             }
         """)
 
@@ -390,7 +407,7 @@ class DashboardWindow(QWidget):
             QPushButton:hover {
                 color: white;
                 background-color: rgba(255,255,255,0.08);
-                border-radius: 19px;
+                border-radius: 8px;
             }
         """)
 
@@ -408,7 +425,7 @@ class DashboardWindow(QWidget):
             QPushButton:hover {
                 color: white;
                 background-color: rgba(255,255,255,0.08);
-                border-radius: 19px;
+                border-radius: 8px;
             }
         """)
 
@@ -487,30 +504,53 @@ class DashboardWindow(QWidget):
         self.pages.setGeometry(pages_x, 95, pages_width, max(500, self.container.height() - 115))
 
     def card_style(self):
-        return "background-color: #121212; border-radius: 18px; border: 1px solid #242424;"
+        return "background-color: #101820; border-radius: 8px; border: 1px solid #253241;"
 
     def table_style(self):
         return """
             QTableWidget {
-                background-color: #111111;
-                color: white;
-                border: 1px solid #242424;
-                border-radius: 14px;
-                gridline-color: #2a2a2a;
+                background-color: #0d141c;
+                alternate-background-color: #101a23;
+                color: #eef2f7;
+                border: 1px solid #253241;
+                border-radius: 8px;
+                gridline-color: #21303d;
                 font-size: 12px;
+                selection-background-color: #0f766e;
+                selection-color: white;
             }
             QHeaderView::section {
-                background-color: #1b1b1b;
-                color: #d7d7d7;
+                background-color: #17212b;
+                color: #d9e2ec;
                 padding: 8px;
                 border: none;
                 font-weight: 700;
+            }
+            QTableWidget::item {
+                padding: 6px;
             }
         """
 
     def apply_frame_style(self, frame: QFrame, css: str):
         if not frame.objectName():
             frame.setObjectName(f"frame_{id(frame)}")
+        replacements = {
+            "#0a0a0a": "#0b1117",
+            "#101010": "#101820",
+            "#111111": "#0d141c",
+            "#121212": "#101820",
+            "#1a1a1a": "#17212b",
+            "#1f1f1f": "#253241",
+            "#242424": "#253241",
+            "#262626": "#253241",
+            "#273447": "#2b3a48",
+            "#efefef": "#f8fafc",
+            "#0a1831": "#09283a",
+            "#20457b": "#1f5f7a",
+        }
+        for old, new in replacements.items():
+            css = css.replace(old, new)
+        css = re.sub(r"border-radius:\s*(?:1[0-9]|2[0-9])px", "border-radius: 8px", css)
         frame.setStyleSheet(f"QFrame#{frame.objectName()} {{{css}}}")
 
     def strip_text_only_label_frames(self):
@@ -550,24 +590,24 @@ class DashboardWindow(QWidget):
                 border: none;
             }
             QScrollBar:vertical {
-                background: #121212;
+                background: #0d141c;
                 width: 10px;
                 border-radius: 5px;
                 margin: 6px 2px 6px 2px;
             }
             QScrollBar::handle:vertical {
-                background: #2d2d2d;
+                background: #304050;
                 border-radius: 5px;
                 min-height: 28px;
             }
             QScrollBar:horizontal {
-                background: #121212;
+                background: #0d141c;
                 height: 10px;
                 border-radius: 5px;
                 margin: 2px 6px 2px 6px;
             }
             QScrollBar::handle:horizontal {
-                background: #2d2d2d;
+                background: #304050;
                 border-radius: 5px;
                 min-width: 28px;
             }
@@ -699,20 +739,26 @@ class DashboardWindow(QWidget):
         self.resident_list.setStyleSheet("""
             QListWidget {
                 background-color: transparent;
-                color: white;
+                color: #edf2f7;
                 border: none;
                 outline: none;
                 font-size: 14px;
             }
             QListWidget::item {
-                background-color: #1a1a1a;
-                border-radius: 12px;
+                background-color: #111c26;
+                border: 1px solid #223040;
+                border-radius: 8px;
                 padding: 12px;
                 margin-bottom: 8px;
             }
+            QListWidget::item:hover {
+                background-color: #172636;
+                border: 1px solid #30475d;
+            }
             QListWidget::item:selected {
-                background-color: #e2ab09;
-                color: #111111;
+                background-color: #0f766e;
+                color: white;
+                border: 1px solid #2dd4bf;
             }
         """)
 
@@ -750,8 +796,8 @@ class DashboardWindow(QWidget):
                 background: transparent;
             }
             QCheckBox::indicator:checked {
-                background-color: #e2ab09;
-                border: 1px solid #e2ab09;
+                background-color: #0f766e;
+                border: 1px solid #2dd4bf;
             }
         """)
 
@@ -857,7 +903,7 @@ class DashboardWindow(QWidget):
                 background-color: #2a1616;
                 color: #ffb3b3;
                 border: 1px solid #5a2323;
-                border-radius: 12px;
+                border-radius: 8px;
                 font-size: 13px;
                 font-weight: 700;
             }
@@ -933,8 +979,8 @@ class DashboardWindow(QWidget):
         self.lcd_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lcd_image.setStyleSheet("""
             QLabel {
-                background-color: #0a1831;
-                border-radius: 10px;
+                background-color: #09283a;
+                border-radius: 8px;
             }
         """)
         self.lcd_image.hide()
@@ -956,7 +1002,7 @@ class DashboardWindow(QWidget):
             QLabel {
                 background-color: #146c2e;
                 color: white;
-                border-radius: 10px;
+                border-radius: 8px;
                 font-size: 16px;
                 font-weight: 700;
             }
@@ -993,7 +1039,7 @@ class DashboardWindow(QWidget):
         self.record_summary_labels["database_mode"] = QLabel("Data store: checking", self.overview_panel)
         self.record_summary_labels["database_mode"].setGeometry(210, 14, 160, 22)
         self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #e2ab09;")
+        self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #2dd4bf;")
 
         return self.wrap_scroll_page(page, 980)
 
@@ -1028,7 +1074,7 @@ class DashboardWindow(QWidget):
         self.approval_count_label = QLabel("Pending: 0", left)
         self.approval_count_label.setGeometry(210, 728, 160, 22)
         self.approval_count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.approval_count_label.setStyleSheet("font-size: 13px; color: #e2ab09; font-weight: 700;")
+        self.approval_count_label.setStyleSheet("font-size: 13px; color: #2dd4bf; font-weight: 700;")
 
         right = QFrame(page)
         right.setGeometry(440, 0, 778, 805)
@@ -1242,20 +1288,26 @@ class DashboardWindow(QWidget):
         for lw in [self.pair_resident_list, self.available_devices_list]:
             lw.setStyleSheet("""
                 QListWidget {
-                    background-color: #1a1a1a;
-                    color: white;
-                    border: 1px solid #262626;
-                    border-radius: 14px;
+                    background-color: #0d141c;
+                    color: #edf2f7;
+                    border: 1px solid #253241;
+                    border-radius: 8px;
                     padding: 6px;
                 }
                 QListWidget::item {
                     padding: 10px;
                     margin-bottom: 4px;
-                    border-radius: 10px;
+                    border-radius: 8px;
+                    border: 1px solid transparent;
+                }
+                QListWidget::item:hover {
+                    background-color: #172636;
+                    border: 1px solid #30475d;
                 }
                 QListWidget::item:selected {
-                    background-color: #e2ab09;
-                    color: #111111;
+                    background-color: #0f766e;
+                    color: white;
+                    border: 1px solid #2dd4bf;
                 }
             """)
 
@@ -1286,23 +1338,7 @@ class DashboardWindow(QWidget):
         self.pair_table.setColumnCount(5)
         self.pair_table.setHorizontalHeaderLabels(["Device ID", "Resident", "Resident UID", "Online", "Battery"])
         self.pair_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.pair_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #121212;
-                color: white;
-                border: 1px solid #1f1f1f;
-                border-radius: 14px;
-                gridline-color: #262626;
-                font-size: 12px;
-            }
-            QHeaderView::section {
-                background-color: #1a1a1a;
-                color: #d7d7d7;
-                padding: 8px;
-                border: none;
-                font-weight: 700;
-            }
-        """)
+        self.pair_table.setStyleSheet(self.table_style())
         self.pair_table.verticalHeader().setVisible(False)
         self.pair_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
@@ -1355,11 +1391,15 @@ class DashboardWindow(QWidget):
         self.token_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.token_list.setStyleSheet("""
             QListWidget {
-                background-color: #1a1a1a;
-                color: white;
-                border: 1px solid #262626;
-                border-radius: 12px;
+                background-color: #0d141c;
+                color: #edf2f7;
+                border: 1px solid #253241;
+                border-radius: 8px;
                 padding: 6px;
+            }
+            QListWidget::item:selected {
+                background-color: #0f766e;
+                color: white;
             }
         """)
 
@@ -1367,11 +1407,15 @@ class DashboardWindow(QWidget):
         self.rules_list.setGeometry(22, 340, 320, 120)
         self.rules_list.setStyleSheet("""
             QListWidget {
-                background-color: #1a1a1a;
-                color: white;
-                border: 1px solid #262626;
-                border-radius: 12px;
+                background-color: #0d141c;
+                color: #edf2f7;
+                border: 1px solid #253241;
+                border-radius: 8px;
                 padding: 6px;
+            }
+            QListWidget::item:selected {
+                background-color: #0f766e;
+                color: white;
             }
         """)
 
@@ -1474,8 +1518,8 @@ class DashboardWindow(QWidget):
         self.upd_lcd_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.upd_lcd_image.setStyleSheet("""
             QLabel {
-                background-color: #0a1831;
-                border-radius: 12px;
+                background-color: #09283a;
+                border-radius: 8px;
             }
         """)
         self.upd_lcd_image.hide()
@@ -1497,7 +1541,7 @@ class DashboardWindow(QWidget):
             QLabel {
                 background-color: #146c2e;
                 color: white;
-                border-radius: 12px;
+                border-radius: 8px;
                 font-size: 18px;
                 font-weight: 700;
             }
@@ -1583,23 +1627,7 @@ class DashboardWindow(QWidget):
         self.logs_table.setColumnCount(7)
         self.logs_table.setHorizontalHeaderLabels(["Date/Time", "Action", "Resident UID", "Device", "Pushed By", "Success", "Message"])
         self.logs_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.logs_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #121212;
-                color: white;
-                border: 1px solid #1f1f1f;
-                border-radius: 14px;
-                gridline-color: #262626;
-                font-size: 12px;
-            }
-            QHeaderView::section {
-                background-color: #1a1a1a;
-                color: #d7d7d7;
-                padding: 8px;
-                border: none;
-                font-weight: 700;
-            }
-        """)
+        self.logs_table.setStyleSheet(self.table_style())
         self.logs_table.verticalHeader().setVisible(False)
         self.logs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.logs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -1701,10 +1729,10 @@ class DashboardWindow(QWidget):
                     QPushButton {
                         text-align: left;
                         padding-left: 18px;
-                        background-color: #e2ab09;
-                        color: #111111;
+                        background-color: #0f766e;
+                        color: white;
                         border: none;
-                        border-radius: 12px;
+                        border-radius: 8px;
                         font-size: 14px;
                         font-weight: 700;
                     }
@@ -1715,14 +1743,15 @@ class DashboardWindow(QWidget):
                         text-align: left;
                         padding-left: 18px;
                         background-color: transparent;
-                        color: #dddddd;
+                        color: #d7e0ea;
                         border: none;
-                        border-radius: 12px;
+                        border-radius: 8px;
                         font-size: 14px;
                         font-weight: 600;
                     }
                     QPushButton:hover {
-                        background-color: #1f1f1f;
+                        background-color: #17212b;
+                        color: white;
                     }
                 """)
 
@@ -1796,9 +1825,10 @@ class DashboardWindow(QWidget):
             self.connection_badge.setText("Gateway: Connected")
             self.connection_badge.setStyleSheet("""
                 QLabel {
-                    background-color: #16351f;
-                    color: #76e28b;
-                    border-radius: 12px;
+                    background-color: #093a35;
+                    color: #7dd3c7;
+                    border: 1px solid #0f766e;
+                    border-radius: 8px;
                     font-size: 13px;
                     font-weight: 700;
                 }
@@ -1807,9 +1837,10 @@ class DashboardWindow(QWidget):
             self.connection_badge.setText("Gateway: Offline")
             self.connection_badge.setStyleSheet("""
                 QLabel {
-                    background-color: #351616;
-                    color: #ff9090;
-                    border-radius: 12px;
+                    background-color: #381b1b;
+                    color: #fca5a5;
+                    border: 1px solid #7f1d1d;
+                    border-radius: 8px;
                     font-size: 13px;
                     font-weight: 700;
                 }
@@ -2359,7 +2390,7 @@ class DashboardWindow(QWidget):
         load_users()
 
         create_panel = QFrame(dialog)
-        create_panel.setStyleSheet("QFrame { background-color: #111111; border: 1px solid #242424; border-radius: 8px; }")
+        create_panel.setStyleSheet("QFrame { background-color: #101820; border: 1px solid #253241; border-radius: 8px; }")
         create_layout = QHBoxLayout(create_panel)
         create_layout.setContentsMargins(12, 12, 12, 12)
 
@@ -3007,12 +3038,12 @@ class DashboardWindow(QWidget):
 
         self.lcd_alert_banner.setText(alert)
         self.lcd_alert_banner.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 10px; font-size: 16px; font-weight: 700; }}"
+            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 16px; font-weight: 700; }}"
         )
 
         self.upd_lcd_alert.setText(alert)
         self.upd_lcd_alert.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 12px; font-size: 18px; font-weight: 700; }}"
+            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 18px; font-weight: 700; }}"
         )
 
         self.update_lcd_image_preview()
