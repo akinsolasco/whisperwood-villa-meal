@@ -7,7 +7,12 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from config import APP_DATA_DIR
+from config import (
+    APP_DATA_DIR,
+    DEFAULT_CONTROL_SERVICE_API_KEY,
+    DEFAULT_CONTROL_SERVICE_HOST,
+    DEFAULT_CONTROL_SERVICE_PORT,
+)
 
 
 SETTINGS_PATH = APP_DATA_DIR / "app_settings.json"
@@ -90,9 +95,21 @@ class AppSettingsStore:
 
     def default_settings(self) -> Dict:
         profiles = [
-            self._profile("Demo Pi", "", 7000, "", "Configure this for demo hardware or test Pi."),
-            self._profile("Production Pi", "", 7000, "", "Primary site Raspberry Pi Control Service."),
-            self._profile("Development Pi", "", 7000, "", "Developer or staging Raspberry Pi."),
+            self._profile(
+                "Whisperwood Pi",
+                DEFAULT_CONTROL_SERVICE_HOST,
+                DEFAULT_CONTROL_SERVICE_PORT,
+                DEFAULT_CONTROL_SERVICE_API_KEY,
+                "Default first-run Raspberry Pi Control Service.",
+            ),
+            self._profile(
+                "Production Pi",
+                DEFAULT_CONTROL_SERVICE_HOST,
+                DEFAULT_CONTROL_SERVICE_PORT,
+                DEFAULT_CONTROL_SERVICE_API_KEY,
+                "Primary site Raspberry Pi Control Service.",
+            ),
+            self._profile("Development Pi", "", DEFAULT_CONTROL_SERVICE_PORT, "", "Developer or staging Raspberry Pi."),
         ]
         profiles[0]["is_active"] = True
         return {
@@ -157,6 +174,17 @@ class AppSettingsStore:
             normalized.append(profile)
         if not any(p.get("is_active") for p in normalized) and normalized:
             normalized[0]["is_active"] = True
+        if normalized and not any((p.get("host") or "").strip() for p in normalized):
+            normalized[0].update({
+                "profile_name": "Whisperwood Pi",
+                "host": DEFAULT_CONTROL_SERVICE_HOST,
+                "port": DEFAULT_CONTROL_SERVICE_PORT,
+                "api_key_protected": _protect_secret(DEFAULT_CONTROL_SERVICE_API_KEY),
+                "description": "Default first-run Raspberry Pi Control Service.",
+                "is_active": True,
+            })
+            for profile in normalized[1:]:
+                profile["is_active"] = False
         active = next((p for p in normalized if p.get("is_active")), normalized[0] if normalized else None)
         settings["profiles"] = normalized
         settings["active_profile_id"] = active.get("id") if active else None

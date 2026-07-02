@@ -1406,7 +1406,6 @@ class DashboardWindow(QWidget):
 
         sections = [
             ("Dashboard", "dashboard", self.build_control_dashboard_section()),
-            ("Network", "network", self.build_control_network_section()),
             ("Services", "services", self.build_control_services_section()),
             ("Devices", "devices", self.build_control_devices_section()),
             ("OTA", "ota", self.build_control_ota_section()),
@@ -1449,12 +1448,10 @@ class DashboardWindow(QWidget):
         if index == 0:
             self.refresh_control_dashboard()
         elif index == 1:
-            self.load_control_profiles()
-        elif index == 2:
             self.load_control_services()
-        elif index == 3:
+        elif index == 2:
             self.load_control_devices()
-        elif index == 6:
+        elif index == 5:
             self.load_it_audit_logs()
 
     def build_control_dashboard_section(self):
@@ -3178,7 +3175,8 @@ class DashboardWindow(QWidget):
     def load_it_health(self):
         if not hasattr(self, "it_control_stack"):
             return
-        self.load_control_profiles()
+        if hasattr(self, "control_profile_combo"):
+            self.load_control_profiles()
         self.load_control_devices()
         self.load_control_services()
         self.load_it_recovery_users()
@@ -3606,16 +3604,16 @@ class DashboardWindow(QWidget):
             summary = "Demo Mode - no Raspberry Pi Control Service host is configured."
             cause = "The active connection profile does not have a host."
             fixes = [
-                "Open Network and enter the Pi hostname, LAN IP, or Tailscale IP.",
-                "Confirm the Control Service port, usually 7000.",
-                "Enter the API key and run Test Connection.",
+                "Confirm this deployment build includes the site Raspberry Pi address.",
+                "Confirm the Control Service port is 7000.",
+                "Use the login Server Connection test if a support technician needs to verify connectivity.",
             ]
         elif not profile.get("api_key"):
             summary = "Control Service profile is missing an API key."
             cause = "Protected requests require X-Whisperwood-Key."
             fixes = [
-                "Enter the Control Service API key in Network.",
-                "Save the profile and test the connection again.",
+                "Confirm this deployment build includes the Control Service API key.",
+                "Use the login Server Connection test if a support technician needs to verify connectivity.",
             ]
         elif health.get("ok"):
             op_status = self.control_value(operation.get("data") or {}, "status", default="operation status pending")
