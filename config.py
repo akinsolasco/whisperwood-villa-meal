@@ -10,7 +10,7 @@ else:
 ASSETS_DIR = BASE_DIR / "assets"
 
 APP_NAME = "Whisperwood Villa Demo"
-APP_VERSION = "2.0.5.4"
+APP_VERSION = "2.0.5.5"
 APP_CHANNEL = "demo"
 RELEASE_TAG_PREFIX = "demo-v"
 DEFAULT_PI_BASE_URL = "http://192.168.4.1:8080"

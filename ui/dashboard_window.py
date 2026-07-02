@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle
 )
 
 from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
@@ -35,6 +35,7 @@ class DashboardWindow(QWidget):
         self.db.ensure_tables()
         self.gateway = GatewayClient()
         self.gateway_online = False
+        self.control_service_online = False
         self.control_last_results: Dict[str, Dict[str, Any]] = {}
 
         self.drag_pos = None
@@ -79,10 +80,14 @@ class DashboardWindow(QWidget):
 
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
-        self.timer.timeout.connect(self.refresh_devices)
+        self.timer.timeout.connect(self.refresh_all)
+
+        self.control_status_timer = QTimer(self)
+        self.control_status_timer.setInterval(5000)
+        self.control_status_timer.timeout.connect(self.refresh_control_connection_status)
 
         self.new_resident()
-        self.refresh_devices()
+        self.refresh_all()
         self.load_residents()
         self.load_recent_logs()
         self.refresh_dashboard_summary()
@@ -90,6 +95,9 @@ class DashboardWindow(QWidget):
         self.load_resident_audit()
         self.load_verification_page()
         self.load_it_health()
+        self.control_status_timer.start()
+        QTimer.singleShot(0, self.position_window_controls)
+        QTimer.singleShot(200, self.refresh_control_connection_status)
         if self.current_user.get("password_must_change"):
             QTimer.singleShot(300, self.show_required_password_change)
 
@@ -349,7 +357,7 @@ class DashboardWindow(QWidget):
                 }
             """)
 
-        self.btn_refresh_devices = QPushButton("Refresh Devices", self.sidebar)
+        self.btn_refresh_devices = QPushButton("Refresh", self.sidebar)
         self.btn_refresh_devices.setGeometry(18, 590, 208, 42)
         self.btn_refresh_devices.setStyleSheet(self.secondary_btn_style())
 
@@ -374,7 +382,7 @@ class DashboardWindow(QWidget):
             }
         """)
 
-        self.connection_badge = QLabel("Gateway: Unknown", self.sidebar)
+        self.connection_badge = QLabel("Gateway: Checking", self.sidebar)
         self.connection_badge.setGeometry(18, 680, 208, 28)
         self.connection_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.connection_badge.setStyleSheet("""
@@ -398,17 +406,18 @@ class DashboardWindow(QWidget):
 
         # Title area
         self.title = QLabel(f"{APP_NAME} Control Center", self.container)
-        self.title.setGeometry(280, 22, 520, 32)
+        self.title.setGeometry(280, 22, 850, 32)
         self.title.setStyleSheet("font-size: 26px; font-weight: 800; color: #0f172a;")
 
         self.subtitle = QLabel("Hospital-grade resident display operations, approvals, verification, and technical health", self.container)
-        self.subtitle.setGeometry(280, 56, 690, 18)
+        self.subtitle.setGeometry(280, 56, 860, 18)
         self.subtitle.setStyleSheet("font-size: 13px; color: #475569;")
 
         self.base_url_edit = QLineEdit(self.container)
-        self.base_url_edit.setGeometry(1020, 24, 320, 42)
+        self.base_url_edit.setGeometry(0, 0, 1, 1)
         self.base_url_edit.setText(DEFAULT_PI_BASE_URL)
         self.base_url_edit.setStyleSheet(self.input_style())
+        self.base_url_edit.setVisible(False)
 
         self.min_btn = QPushButton("-", self.container)
         self.min_btn.setGeometry(1370, 24, 38, 38)
@@ -547,9 +556,7 @@ class DashboardWindow(QWidget):
         self.close_btn.move(right, 24)
         self.max_btn.move(right - 45, 24)
         self.min_btn.move(right - 90, 24)
-        base_url_x = max(280, right - 470)
-        base_url_x = min(base_url_x, self.min_btn.x() - 342)
-        self.base_url_edit.setGeometry(base_url_x, 24, 330, 42)
+        self.base_url_edit.setVisible(False)
 
         available_width = max(640, self.container.width() - 302)
         pages_width = min(self.page_base_width, available_width)
@@ -1355,76 +1362,79 @@ class DashboardWindow(QWidget):
         self.control_header_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.control_header_status.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 700;")
 
-        nav = QFrame(page)
-        nav.setGeometry(0, 135, 220, 905)
-        self.apply_frame_style(nav, self.card_style())
+        section_label = QLabel("Control Section", header)
+        section_label.setGeometry(24, 84, 130, 20)
+        section_label.setStyleSheet(self.label_style())
 
-        self.it_control_stack = QStackedWidget(page)
-        self.it_control_stack.setGeometry(240, 135, 978, 905)
-        self.it_control_stack.setStyleSheet("background: transparent;")
-
-        sections = [
-            ("Dashboard", self.build_control_dashboard_section()),
-            ("Network", self.build_control_network_section()),
-            ("Services", self.build_control_services_section()),
-            ("Devices", self.build_control_devices_section()),
-            ("OTA", self.build_control_ota_section()),
-            ("Backups", self.build_control_backups_section()),
-            ("Logs", self.build_control_logs_section()),
-            ("AI Debug", self.build_control_ai_section()),
-        ]
-        self.it_control_buttons = []
-        y = 18
-        for index, (label, section) in enumerate(sections):
-            self.it_control_stack.addWidget(section)
-            btn = QPushButton(label, nav)
-            btn.setGeometry(16, y, 188, 40)
-            btn.clicked.connect(lambda _checked=False, i=index: self.set_it_control_section(i))
-            self.it_control_buttons.append(btn)
-            y += 48
-
-        self.set_it_control_section(0)
-        return self.wrap_scroll_page(page, 1080)
-
-    def it_control_nav_style(self, active=False):
-        if active:
-            return """
-                QPushButton {
-                    text-align: left;
-                    padding-left: 16px;
-                    background-color: #0f766e;
-                    color: white;
-                    border: none;
-                    border-radius: 8px;
-                    font-size: 13px;
-                    font-weight: 800;
-                }
-            """
-        return """
-            QPushButton {
-                text-align: left;
-                padding-left: 16px;
-                background-color: transparent;
-                color: #334155;
-                border: none;
+        self.it_control_section_combo = QComboBox(header)
+        self.it_control_section_combo.setGeometry(160, 78, 300, 34)
+        self.it_control_section_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #ffffff;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
                 border-radius: 8px;
+                padding: 6px 12px;
                 font-size: 13px;
                 font-weight: 700;
             }
-            QPushButton:hover {
-                background-color: #eef4f8;
-                color: #0f172a;
+            QComboBox:focus {
+                border: 1px solid #0f766e;
             }
-        """
+            QComboBox::drop-down {
+                border: none;
+                width: 34px;
+            }
+        """)
+
+        self.it_control_stack = QStackedWidget(page)
+        self.it_control_stack.setGeometry(0, 145, 1218, 895)
+        self.it_control_stack.setStyleSheet("background: transparent;")
+
+        sections = [
+            ("Dashboard", "dashboard", self.build_control_dashboard_section()),
+            ("Network", "network", self.build_control_network_section()),
+            ("Services", "services", self.build_control_services_section()),
+            ("Devices", "devices", self.build_control_devices_section()),
+            ("OTA", "ota", self.build_control_ota_section()),
+            ("Backups", "backups", self.build_control_backups_section()),
+            ("Logs", "logs", self.build_control_logs_section()),
+            ("AI Debug", "ai", self.build_control_ai_section()),
+        ]
+        for label, icon_key, section in sections:
+            self.it_control_stack.addWidget(section)
+            self.it_control_section_combo.addItem(self.control_section_icon(icon_key), label)
+        self.it_control_section_combo.currentIndexChanged.connect(self.set_it_control_section)
+
+        self.it_control_stack.setCurrentIndex(0)
+        self.load_control_dashboard_placeholder()
+        return self.wrap_scroll_page(page, 1080)
+
+    def control_section_icon(self, key):
+        icon_map = {
+            "dashboard": QStyle.StandardPixmap.SP_ComputerIcon,
+            "network": QStyle.StandardPixmap.SP_DriveNetIcon,
+            "services": QStyle.StandardPixmap.SP_BrowserReload,
+            "devices": QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            "ota": QStyle.StandardPixmap.SP_ArrowUp,
+            "backups": QStyle.StandardPixmap.SP_DriveHDIcon,
+            "logs": QStyle.StandardPixmap.SP_FileDialogContentsView,
+            "ai": QStyle.StandardPixmap.SP_MessageBoxInformation,
+        }
+        return self.style().standardIcon(icon_map.get(key, QStyle.StandardPixmap.SP_FileIcon))
 
     def set_it_control_section(self, index):
         if not hasattr(self, "it_control_stack"):
             return
+        if index < 0:
+            return
         self.it_control_stack.setCurrentIndex(index)
-        for i, button in enumerate(getattr(self, "it_control_buttons", [])):
-            button.setStyleSheet(self.it_control_nav_style(active=i == index))
+        if hasattr(self, "it_control_section_combo") and self.it_control_section_combo.currentIndex() != index:
+            self.it_control_section_combo.blockSignals(True)
+            self.it_control_section_combo.setCurrentIndex(index)
+            self.it_control_section_combo.blockSignals(False)
         if index == 0:
-            self.load_control_dashboard_placeholder()
+            self.refresh_control_dashboard()
         elif index == 1:
             self.load_control_profiles()
         elif index == 2:
@@ -1466,13 +1476,8 @@ class DashboardWindow(QWidget):
             value.setStyleSheet("font-size: 15px; color: #0f172a; font-weight: 800;")
             self.control_dashboard_labels[key] = value
 
-        self.btn_control_refresh = QPushButton("Refresh Control Status", page)
-        self.btn_control_refresh.setGeometry(245, 316, 210, 44)
-        self.btn_control_refresh.setStyleSheet(self.primary_btn_style())
-        self.btn_control_refresh.clicked.connect(self.refresh_control_dashboard)
-
         note = QLabel("Desktop software communicates only with the Raspberry Pi Control Service. Operation Manager and ESP32 modules remain behind the Pi.", page)
-        note.setGeometry(0, 410, 900, 44)
+        note.setGeometry(245, 318, 700, 44)
         note.setWordWrap(True)
         note.setStyleSheet("font-size: 13px; color: #475569;")
         return page
@@ -2248,7 +2253,7 @@ class DashboardWindow(QWidget):
         self.min_btn.clicked.connect(self.showMinimized)
         self.max_btn.clicked.connect(self.toggle_max_restore)
 
-        self.btn_refresh_devices.clicked.connect(self.refresh_devices)
+        self.btn_refresh_devices.clicked.connect(self.refresh_all)
         self.auto_refresh.stateChanged.connect(self.toggle_auto_refresh)
 
         self.btn_menu_overview.clicked.connect(lambda: self.switch_page(self.page_overview, self.btn_menu_overview))
@@ -2442,31 +2447,61 @@ class DashboardWindow(QWidget):
 
     def set_gateway_state(self, online: bool):
         self.gateway_online = bool(online)
-        if self.gateway_online:
-            self.connection_badge.setText("Gateway: Connected")
-            self.connection_badge.setStyleSheet("""
-                QLabel {
-                    background-color: #ecfdf5;
-                    color: #047857;
-                    border: 1px solid #6ee7b7;
-                    border-radius: 8px;
-                    font-size: 13px;
-                    font-weight: 700;
-                }
-            """)
-        else:
-            self.connection_badge.setText("Gateway: Offline")
-            self.connection_badge.setStyleSheet("""
-                QLabel {
-                    background-color: #fff1f2;
-                    color: #b91c1c;
-                    border: 1px solid #fecdd3;
-                    border-radius: 8px;
-                    font-size: 13px;
-                    font-weight: 700;
-                }
-            """)
         self.apply_write_lock()
+
+    def set_control_gateway_state(self, result=None):
+        result = result or {}
+        profile = self.current_control_profile()
+        self.control_service_online = bool(result.get("ok"))
+        if not profile.get("host"):
+            text = "Gateway: Demo Mode"
+            color = "#64748b"
+            background = "#f8fafc"
+            border = "#d8e1ea"
+            tooltip = "Configure the Raspberry Pi Control Service in IT Control Center."
+        elif self.control_service_online:
+            text = "Gateway: Connected"
+            color = "#047857"
+            background = "#ecfdf5"
+            border = "#6ee7b7"
+            tooltip = f"Connected to {profile.get('profile_name') or 'Control Service'}."
+        else:
+            text = "Gateway: Offline"
+            color = "#b91c1c"
+            background = "#fff1f2"
+            border = "#fecdd3"
+            tooltip = result.get("error") or "Control Service Offline or Unreachable."
+        self.connection_badge.setText(text)
+        self.connection_badge.setToolTip(tooltip)
+        self.connection_badge.setStyleSheet(f"""
+            QLabel {{
+                background-color: {background};
+                color: {color};
+                border: 1px solid {border};
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+        """)
+        self.refresh_dashboard_summary()
+
+    def refresh_control_connection_status(self):
+        if not hasattr(self, "connection_badge"):
+            return
+        client = self.control_client(timeout=0.8)
+        result = client.health()
+        self.control_last_results["health"] = result
+        self.set_control_gateway_state(result)
+        self.update_control_header(result)
+        self.update_control_network_labels(result)
+        if hasattr(self, "control_dashboard_labels"):
+            self.control_dashboard_labels["service"].setText(self.control_status_text(result))
+            self.control_dashboard_labels["refreshed"].setText(time.strftime("%Y-%m-%d %H:%M:%S"))
+        self.load_control_services()
+
+    def refresh_all(self):
+        self.refresh_control_connection_status()
+        self.refresh_devices()
 
     def apply_role_permissions(self):
         access = {
@@ -2483,7 +2518,8 @@ class DashboardWindow(QWidget):
         for btn, allowed in access.items():
             btn.setVisible(bool(allowed))
 
-        self.base_url_edit.setEnabled(self.can_view_technical() or self.is_nurse_admin())
+        self.base_url_edit.setVisible(False)
+        self.base_url_edit.setEnabled(False)
         self.btn_refresh_devices.setVisible(self.can_view_technical() or self.is_nurse_admin())
         self.auto_refresh.setVisible(self.can_view_technical() or self.is_nurse_admin())
         self.btn_profile_settings.setVisible(self.is_nurse_admin())
@@ -2535,6 +2571,8 @@ class DashboardWindow(QWidget):
             btn = getattr(self, btn_name, None)
             if btn is not None:
                 btn.setEnabled(bool(enabled))
+        if hasattr(self, "close_btn"):
+            self.position_window_controls()
 
     def require_network_for_write(self, action_name: str) -> bool:
         if self.gateway_online:
@@ -2649,7 +2687,8 @@ class DashboardWindow(QWidget):
                 self.summary_labels[key].setText(str(value))
         if hasattr(self, "overview_status"):
             mode = "network database" if summary.get("database_mode") == "postgres" else "local demo database"
-            self.overview_status.setText(f"Data store: {mode}\nGateway: {self.connection_badge.text()}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
+            gateway_text = self.connection_badge.text().replace("Gateway: ", "")
+            self.overview_status.setText(f"Data store: {mode}\nGateway: {gateway_text}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
         if hasattr(self, "overview_device_table"):
             self.load_overview_devices()
 
@@ -3048,23 +3087,23 @@ class DashboardWindow(QWidget):
                 return row
         return self.db.get_active_control_profile() or {}
 
-    def control_client(self):
+    def control_client(self, timeout=2.0):
         profile = self.current_control_profile()
         return ControlServiceClient(
             profile.get("host") or "",
             profile.get("port") or 7000,
             profile.get("api_key") or "",
-            timeout=2.0,
+            timeout=timeout,
         )
 
-    def control_client_from_form(self):
+    def control_client_from_form(self, timeout=2.0):
         if not hasattr(self, "control_host"):
-            return self.control_client()
+            return self.control_client(timeout=timeout)
         return ControlServiceClient(
             self.control_host.text().strip(),
             self.control_port.text().strip(),
             self.control_api_key.text(),
-            timeout=2.0,
+            timeout=timeout,
         )
 
     def control_profile_from_form(self):
@@ -4836,9 +4875,19 @@ class DashboardWindow(QWidget):
         if hasattr(self, "close_btn"):
             self.position_window_controls()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "close_btn"):
+            self.position_window_controls()
+            QTimer.singleShot(0, self.position_window_controls)
+
     def closeEvent(self, event):
         try:
             self.timer.stop()
+        except Exception:
+            pass
+        try:
+            self.control_status_timer.stop()
         except Exception:
             pass
         try:
