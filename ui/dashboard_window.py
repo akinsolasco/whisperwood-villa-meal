@@ -3,6 +3,7 @@ import re
 import json
 import secrets
 import string
+import time
 from typing import Optional, List, Dict, Any
 
 from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, pyqtSignal
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
 
 from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
 from auth.auth_service import AuthService
+from core.control_service_client import ControlServiceClient
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
@@ -33,6 +35,7 @@ class DashboardWindow(QWidget):
         self.db.ensure_tables()
         self.gateway = GatewayClient()
         self.gateway_online = False
+        self.control_last_results: Dict[str, Dict[str, Any]] = {}
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -285,7 +288,7 @@ class DashboardWindow(QWidget):
             ("Device Pairing", 370),
             ("LCD Schedule", 415),
             ("Verification", 460),
-            ("IT Health", 505),
+            ("IT Control Center", 505),
             ("Logs Admin", 550),
         ]
 
@@ -1329,100 +1332,320 @@ class DashboardWindow(QWidget):
 
         return self.wrap_scroll_page(page, 860)
 
-    # ---------------------------- IT health page ----------------------------
+    # ---------------------------- IT control center ----------------------------
 
     def build_it_health_page(self):
         page = QWidget()
         page.setStyleSheet("background: transparent;")
 
-        top = QFrame(page)
-        top.setGeometry(0, 0, 1218, 138)
-        self.apply_frame_style(top, "background-color: #101010; border-radius: 18px; border: 1px solid #273447;")
+        header = QFrame(page)
+        header.setGeometry(0, 0, 1218, 118)
+        self.apply_frame_style(header, self.card_style())
 
-        title = QLabel("Technical Health Center", top)
-        title.setGeometry(24, 20, 380, 32)
-        title.setStyleSheet("font-size: 24px; font-weight: 800; color: white;")
+        title = QLabel("IT Control Center", header)
+        title.setGeometry(24, 18, 360, 32)
+        title.setStyleSheet("font-size: 24px; font-weight: 800; color: #0f172a;")
 
-        subtitle = QLabel("Gateway reachability, Raspberry Pi/device status, and AI-ready technical debugging.", top)
-        subtitle.setGeometry(24, 58, 600, 22)
-        subtitle.setStyleSheet("font-size: 13px; color: #b8c1cc;")
+        subtitle = QLabel("Raspberry Pi Control Service, network diagnostics, service control, future OTA, backups, logs, and AI guidance.", header)
+        subtitle.setGeometry(24, 56, 760, 22)
+        subtitle.setStyleSheet("font-size: 13px; color: #475569;")
 
-        self.it_health_labels = {}
-        cards = [
-            ("gateway", "Gateway", 670),
-            ("database", "Database", 810),
-            ("devices", "Devices", 950),
-            ("offline", "Offline", 1090),
+        self.control_header_status = QLabel("Demo Mode - No Raspberry Pi Connected", header)
+        self.control_header_status.setGeometry(820, 30, 360, 34)
+        self.control_header_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.control_header_status.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 700;")
+
+        nav = QFrame(page)
+        nav.setGeometry(0, 135, 220, 905)
+        self.apply_frame_style(nav, self.card_style())
+
+        self.it_control_stack = QStackedWidget(page)
+        self.it_control_stack.setGeometry(240, 135, 978, 905)
+        self.it_control_stack.setStyleSheet("background: transparent;")
+
+        sections = [
+            ("Dashboard", self.build_control_dashboard_section()),
+            ("Network", self.build_control_network_section()),
+            ("Services", self.build_control_services_section()),
+            ("Devices", self.build_control_devices_section()),
+            ("OTA", self.build_control_ota_section()),
+            ("Backups", self.build_control_backups_section()),
+            ("Logs", self.build_control_logs_section()),
+            ("AI Debug", self.build_control_ai_section()),
         ]
-        for key, label, x in cards:
-            small = QLabel(label, top)
-            small.setGeometry(x, 26, 100, 18)
-            small.setStyleSheet("font-size: 12px; color: #aeb7c2; font-weight: 700;")
-            value = QLabel("Checking", top)
-            value.setGeometry(x, 50, 110, 34)
-            value.setStyleSheet("font-size: 20px; color: white; font-weight: 800;")
-            self.it_health_labels[key] = value
+        self.it_control_buttons = []
+        y = 18
+        for index, (label, section) in enumerate(sections):
+            self.it_control_stack.addWidget(section)
+            btn = QPushButton(label, nav)
+            btn.setGeometry(16, y, 188, 40)
+            btn.clicked.connect(lambda _checked=False, i=index: self.set_it_control_section(i))
+            self.it_control_buttons.append(btn)
+            y += 48
 
-        left = QFrame(page)
-        left.setGeometry(0, 160, 648, 645)
-        self.apply_frame_style(left, self.card_style())
+        self.set_it_control_section(0)
+        return self.wrap_scroll_page(page, 1080)
 
-        device_title = QLabel("Device Technical Snapshot", left)
-        device_title.setGeometry(22, 18, 260, 24)
-        device_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+    def it_control_nav_style(self, active=False):
+        if active:
+            return """
+                QPushButton {
+                    text-align: left;
+                    padding-left: 16px;
+                    background-color: #0f766e;
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    font-weight: 800;
+                }
+            """
+        return """
+            QPushButton {
+                text-align: left;
+                padding-left: 16px;
+                background-color: transparent;
+                color: #334155;
+                border: none;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background-color: #eef4f8;
+                color: #0f172a;
+            }
+        """
 
-        self.it_device_table = QTableWidget(left)
-        self.it_device_table.setGeometry(18, 58, 612, 560)
-        self.it_device_table.setColumnCount(7)
-        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Last Seen"])
-        self.it_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.it_device_table.verticalHeader().setVisible(False)
-        self.it_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.it_device_table.setStyleSheet(self.table_style())
+    def set_it_control_section(self, index):
+        if not hasattr(self, "it_control_stack"):
+            return
+        self.it_control_stack.setCurrentIndex(index)
+        for i, button in enumerate(getattr(self, "it_control_buttons", [])):
+            button.setStyleSheet(self.it_control_nav_style(active=i == index))
+        if index == 0:
+            self.load_control_dashboard_placeholder()
+        elif index == 1:
+            self.load_control_profiles()
+        elif index == 2:
+            self.load_control_services()
+        elif index == 3:
+            self.load_control_devices()
+        elif index == 6:
+            self.load_it_audit_logs()
 
-        right = QFrame(page)
-        right.setGeometry(670, 160, 548, 645)
-        self.apply_frame_style(right, self.card_style())
+    def build_control_dashboard_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("Raspberry Pi Dashboard", page)
+        title.setGeometry(0, 0, 360, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
 
-        brief_title = QLabel("AI Debug Brief", right)
-        brief_title.setGeometry(22, 18, 260, 24)
-        brief_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+        self.control_dashboard_labels = {}
+        cards = [
+            ("service", "Control Service Status", 0, 48),
+            ("hostname", "Hostname", 245, 48),
+            ("lan_ip", "LAN IP", 490, 48),
+            ("tailscale_ip", "Tailscale IP", 735, 48),
+            ("cpu", "CPU Usage", 0, 178),
+            ("memory", "Memory Usage", 245, 178),
+            ("disk", "Disk Usage", 490, 178),
+            ("operation", "Operation Manager", 735, 178),
+            ("refreshed", "Last Refresh", 0, 308),
+        ]
+        for key, label, x, y in cards:
+            card = QFrame(page)
+            card.setGeometry(x, y, 220, 102)
+            self.apply_frame_style(card, self.card_style())
+            small = QLabel(label, card)
+            small.setGeometry(16, 14, 185, 18)
+            small.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 800;")
+            value = QLabel("Pending backend support", card)
+            value.setGeometry(16, 42, 188, 42)
+            value.setWordWrap(True)
+            value.setStyleSheet("font-size: 15px; color: #0f172a; font-weight: 800;")
+            self.control_dashboard_labels[key] = value
 
-        self.debug_brief = QTextEdit(right)
-        self.debug_brief.setGeometry(22, 58, 504, 430)
-        self.debug_brief.setReadOnly(True)
-        self.debug_brief.setStyleSheet(self.input_style())
+        self.btn_control_refresh = QPushButton("Refresh Control Status", page)
+        self.btn_control_refresh.setGeometry(245, 316, 210, 44)
+        self.btn_control_refresh.setStyleSheet(self.primary_btn_style())
+        self.btn_control_refresh.clicked.connect(self.refresh_control_dashboard)
 
-        self.btn_generate_debug_brief = QPushButton("Generate AI Debug Brief", right)
-        self.btn_generate_debug_brief.setGeometry(22, 514, 210, 44)
-        self.btn_generate_debug_brief.setStyleSheet(self.primary_btn_style())
+        note = QLabel("Desktop software communicates only with the Raspberry Pi Control Service. Operation Manager and ESP32 modules remain behind the Pi.", page)
+        note.setGeometry(0, 410, 900, 44)
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 13px; color: #475569;")
+        return page
 
-        self.btn_copy_debug_brief = QPushButton("Copy Brief", right)
-        self.btn_copy_debug_brief.setGeometry(246, 514, 150, 44)
-        self.btn_copy_debug_brief.setStyleSheet(self.secondary_btn_style())
+    def build_control_network_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("Raspberry Pi Connection", page)
+        title.setGeometry(0, 0, 360, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
 
-        self.it_guidance = QLabel(
-            "IT view masks resident names and focuses on connectivity, device state, and operational faults.",
-            right
-        )
-        self.it_guidance.setGeometry(22, 582, 490, 36)
-        self.it_guidance.setWordWrap(True)
-        self.it_guidance.setStyleSheet("font-size: 13px; color: #b8c1cc;")
+        profile_panel = QFrame(page)
+        profile_panel.setGeometry(0, 48, 978, 330)
+        self.apply_frame_style(profile_panel, self.card_style())
+
+        profile_label = QLabel("Connection Profile", profile_panel)
+        profile_label.setGeometry(22, 20, 180, 20)
+        profile_label.setStyleSheet(self.label_style())
+        self.control_profile_combo = QComboBox(profile_panel)
+        self.control_profile_combo.setGeometry(22, 48, 300, 42)
+        self.control_profile_combo.setStyleSheet(self.input_style())
+        self.control_profile_combo.currentIndexChanged.connect(lambda _index: self.on_control_profile_selected())
+
+        self.btn_new_control_profile = QPushButton("New Profile", profile_panel)
+        self.btn_new_control_profile.setGeometry(342, 48, 125, 42)
+        self.btn_new_control_profile.setStyleSheet(self.secondary_btn_style())
+        self.btn_new_control_profile.clicked.connect(self.new_control_profile)
+
+        name_label = QLabel("Profile Name", profile_panel)
+        name_label.setGeometry(22, 110, 140, 20)
+        name_label.setStyleSheet(self.label_style())
+        self.control_profile_name = QLineEdit(profile_panel)
+        self.control_profile_name.setGeometry(22, 138, 210, 42)
+        self.control_profile_name.setStyleSheet(self.input_style())
+
+        host_label = QLabel("Control Service Host", profile_panel)
+        host_label.setGeometry(250, 110, 180, 20)
+        host_label.setStyleSheet(self.label_style())
+        self.control_host = QLineEdit(profile_panel)
+        self.control_host.setGeometry(250, 138, 240, 42)
+        self.control_host.setPlaceholderText("whisperwood-pi.local or LAN/Tailscale IP")
+        self.control_host.setStyleSheet(self.input_style())
+        self.control_host.textChanged.connect(lambda _text: self.update_control_url_preview())
+
+        port_label = QLabel("Port", profile_panel)
+        port_label.setGeometry(510, 110, 80, 20)
+        port_label.setStyleSheet(self.label_style())
+        self.control_port = QLineEdit(profile_panel)
+        self.control_port.setGeometry(510, 138, 100, 42)
+        self.control_port.setText("7000")
+        self.control_port.setStyleSheet(self.input_style())
+        self.control_port.textChanged.connect(lambda _text: self.update_control_url_preview())
+
+        key_label = QLabel("Control Service API Key", profile_panel)
+        key_label.setGeometry(630, 110, 190, 20)
+        key_label.setStyleSheet(self.label_style())
+        self.control_api_key = QLineEdit(profile_panel)
+        self.control_api_key.setGeometry(630, 138, 250, 42)
+        self.control_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.control_api_key.setStyleSheet(self.input_style())
+        self.control_api_key.textChanged.connect(lambda _text: self.update_control_url_preview())
+
+        self.btn_copy_control_api_key = QPushButton("Copy API Key", profile_panel)
+        self.btn_copy_control_api_key.setGeometry(630, 190, 150, 38)
+        self.btn_copy_control_api_key.setStyleSheet(self.secondary_btn_style())
+        self.btn_copy_control_api_key.clicked.connect(self.copy_control_api_key)
+
+        self.control_masked_key = QLabel("API key: Not configured", profile_panel)
+        self.control_masked_key.setGeometry(790, 198, 170, 20)
+        self.control_masked_key.setStyleSheet("font-size: 12px; color: #64748b;")
+
+        desc_label = QLabel("Description", profile_panel)
+        desc_label.setGeometry(22, 195, 120, 20)
+        desc_label.setStyleSheet(self.label_style())
+        self.control_profile_description = QLineEdit(profile_panel)
+        self.control_profile_description.setGeometry(22, 222, 468, 42)
+        self.control_profile_description.setStyleSheet(self.input_style())
+
+        self.btn_save_control_profile = QPushButton("Save Profile", profile_panel)
+        self.btn_save_control_profile.setGeometry(510, 222, 150, 42)
+        self.btn_save_control_profile.setStyleSheet(self.primary_btn_style())
+        self.btn_save_control_profile.clicked.connect(self.save_control_profile)
+
+        self.btn_test_control_connection = QPushButton("Test Connection", profile_panel)
+        self.btn_test_control_connection.setGeometry(678, 222, 170, 42)
+        self.btn_test_control_connection.setStyleSheet(self.secondary_btn_style())
+        self.btn_test_control_connection.clicked.connect(self.test_control_connection)
+
+        self.control_url_preview = QLabel("Control Service URL: Pending profile configuration", profile_panel)
+        self.control_url_preview.setGeometry(22, 282, 460, 22)
+        self.control_url_preview.setStyleSheet("font-size: 12px; color: #475569;")
+
+        self.control_test_status = QLabel("Connection Status: Not tested", profile_panel)
+        self.control_test_status.setGeometry(510, 282, 390, 22)
+        self.control_test_status.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 700;")
+
+        status_panel = QFrame(page)
+        status_panel.setGeometry(0, 405, 978, 260)
+        self.apply_frame_style(status_panel, self.card_style())
+        self.control_network_labels = {}
+        rows = [
+            ("profile", "Connection Profile", 22, 22),
+            ("host", "Configured Host", 22, 70),
+            ("port", "Configured Port", 22, 118),
+            ("url", "Control Service URL", 22, 166),
+            ("hostname", "Hostname", 500, 22),
+            ("lan_ip", "LAN IP", 500, 70),
+            ("tailscale_ip", "Tailscale IP", 500, 118),
+            ("status", "Connection Status", 500, 166),
+        ]
+        for key, label, x, y in rows:
+            small = QLabel(label, status_panel)
+            small.setGeometry(x, y, 170, 18)
+            small.setStyleSheet(self.label_style())
+            value = QLabel("Pending backend support", status_panel)
+            value.setGeometry(x, y + 22, 420, 22)
+            value.setStyleSheet("font-size: 13px; color: #0f172a; font-weight: 700;")
+            self.control_network_labels[key] = value
+        return page
+
+    def build_control_services_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("Services", page)
+        title.setGeometry(0, 0, 260, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+
+        panel = QFrame(page)
+        panel.setGeometry(0, 48, 978, 260)
+        self.apply_frame_style(panel, self.card_style())
+        self.control_service_labels = {}
+        for key, label, y in [
+            ("control", "Control Service Status", 22),
+            ("operation", "Operation Manager Status", 72),
+            ("version", "Version", 122),
+            ("uptime", "Uptime", 172),
+            ("last_restart", "Last Restart", 222),
+        ]:
+            small = QLabel(label, panel)
+            small.setGeometry(22, y, 220, 18)
+            small.setStyleSheet(self.label_style())
+            value = QLabel("Pending backend support", panel)
+            value.setGeometry(250, y - 4, 360, 26)
+            value.setStyleSheet("font-size: 14px; color: #0f172a; font-weight: 800;")
+            self.control_service_labels[key] = value
+
+        self.btn_restart_operation = QPushButton("Restart Operation Manager", panel)
+        self.btn_restart_operation.setGeometry(665, 28, 230, 44)
+        self.btn_restart_operation.setStyleSheet(self.primary_btn_style())
+        self.btn_restart_operation.clicked.connect(self.restart_operation_manager)
+
+        self.btn_update_operation = QPushButton("Update Operation Manager", panel)
+        self.btn_update_operation.setGeometry(665, 92, 230, 44)
+        self.btn_update_operation.setStyleSheet(self.secondary_btn_style())
+        self.btn_update_operation.setEnabled(False)
+        self.btn_update_operation.setToolTip("Available after backend implementation.")
+
+        self.btn_rollback_operation = QPushButton("Rollback Operation Manager", panel)
+        self.btn_rollback_operation.setGeometry(665, 156, 230, 44)
+        self.btn_rollback_operation.setStyleSheet(self.secondary_btn_style())
+        self.btn_rollback_operation.setEnabled(False)
+        self.btn_rollback_operation.setToolTip("Available after backend implementation.")
 
         recovery = QFrame(page)
-        recovery.setGeometry(0, 830, 1218, 240)
+        recovery.setGeometry(0, 335, 978, 255)
         self.apply_frame_style(recovery, self.card_style())
-
         recovery_title = QLabel("IT Account Recovery", recovery)
         recovery_title.setGeometry(22, 18, 260, 24)
-        recovery_title.setStyleSheet("font-size: 18px; font-weight: 800; color: white;")
+        recovery_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
 
-        recovery_hint = QLabel(
-            "Issue temporary passwords only for active users. The user is forced to change it after login.",
-            recovery,
-        )
+        recovery_hint = QLabel("Issue temporary passwords only for active users. The user is forced to change it after login.", recovery)
         recovery_hint.setGeometry(22, 50, 720, 22)
-        recovery_hint.setStyleSheet("font-size: 12px; color: #9fb2c3;")
+        recovery_hint.setStyleSheet("font-size: 12px; color: #64748b;")
 
         self.it_recovery_user = QComboBox(recovery)
         self.it_recovery_user.setGeometry(22, 92, 330, 44)
@@ -1439,22 +1662,203 @@ class DashboardWindow(QWidget):
         self.btn_issue_temp_password.setStyleSheet(self.primary_btn_style())
 
         self.btn_copy_temp_password = QPushButton("Copy Password", recovery)
-        self.btn_copy_temp_password.setGeometry(898, 92, 150, 44)
+        self.btn_copy_temp_password.setGeometry(650, 150, 150, 40)
         self.btn_copy_temp_password.setStyleSheet(self.secondary_btn_style())
 
         self.it_recovery_status = QLabel("", recovery)
-        self.it_recovery_status.setGeometry(22, 150, 1000, 24)
-        self.it_recovery_status.setStyleSheet("font-size: 12px; color: #c9d5df;")
+        self.it_recovery_status.setGeometry(22, 150, 600, 24)
+        self.it_recovery_status.setStyleSheet("font-size: 12px; color: #475569;")
 
         self.it_2fa_note = QLabel(
-            "Future production recovery: if an IT admin loses access, recovery should require the configured two-step authenticator before a temporary password can be issued.",
+            "Future production recovery: IT admin account recovery should require the configured two-step authenticator before a temporary password can be issued.",
             recovery,
         )
-        self.it_2fa_note.setGeometry(22, 184, 1080, 36)
+        self.it_2fa_note.setGeometry(22, 196, 900, 36)
         self.it_2fa_note.setWordWrap(True)
-        self.it_2fa_note.setStyleSheet("font-size: 12px; color: #9fb2c3;")
+        self.it_2fa_note.setStyleSheet("font-size: 12px; color: #64748b;")
+        return page
 
-        return self.wrap_scroll_page(page, 1120)
+    def build_control_devices_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("Devices", page)
+        title.setGeometry(0, 0, 260, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+
+        self.control_device_summary = {}
+        for key, label, x in [
+            ("total", "Total Devices", 0),
+            ("online", "Online Devices", 195),
+            ("offline", "Offline Devices", 390),
+            ("low_battery", "Low Battery", 585),
+            ("firmware", "Firmware Status", 780),
+        ]:
+            card = QFrame(page)
+            card.setGeometry(x, 48, 175, 94)
+            self.apply_frame_style(card, self.card_style())
+            small = QLabel(label, card)
+            small.setGeometry(14, 12, 145, 18)
+            small.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 800;")
+            value = QLabel("0", card)
+            value.setGeometry(14, 38, 145, 34)
+            value.setStyleSheet("font-size: 24px; color: #0f172a; font-weight: 800;")
+            self.control_device_summary[key] = value
+
+        message = QLabel("ESP32 Registry Pending Operation Manager Integration", page)
+        message.setGeometry(0, 166, 600, 26)
+        message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
+
+        self.it_device_table = QTableWidget(page)
+        self.it_device_table.setGeometry(0, 210, 955, 500)
+        self.it_device_table.setColumnCount(7)
+        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Last Seen"])
+        self.it_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.it_device_table.verticalHeader().setVisible(False)
+        self.it_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.it_device_table.setStyleSheet(self.table_style())
+        return page
+
+    def build_control_ota_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("OTA", page)
+        title.setGeometry(0, 0, 260, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+        message = QLabel("OTA Framework Reserved For Future ESP32 Firmware Updates", page)
+        message.setGeometry(0, 48, 620, 24)
+        message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
+
+        upload = QPushButton("Upload Firmware", page)
+        upload.setGeometry(0, 92, 170, 44)
+        upload.setStyleSheet(self.secondary_btn_style())
+        upload.setEnabled(False)
+        upload.setToolTip("Available after backend implementation.")
+
+        release = QPushButton("Release Firmware", page)
+        release.setGeometry(190, 92, 170, 44)
+        release.setStyleSheet(self.secondary_btn_style())
+        release.setEnabled(False)
+        release.setToolTip("Available after backend implementation.")
+
+        table = QTableWidget(page)
+        table.setGeometry(0, 165, 955, 430)
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["Version", "Target", "Released By", "Status"])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setStyleSheet(self.table_style())
+        return page
+
+    def build_control_backups_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("Backups", page)
+        title.setGeometry(0, 0, 260, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+        message = QLabel("Backup API Pending Backend Implementation", page)
+        message.setGeometry(0, 48, 520, 24)
+        message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
+
+        create_btn = QPushButton("Create Backup", page)
+        create_btn.setGeometry(0, 92, 170, 44)
+        create_btn.setStyleSheet(self.secondary_btn_style())
+        create_btn.setEnabled(False)
+        create_btn.setToolTip("Available after backend implementation.")
+
+        restore_btn = QPushButton("Restore Backup", page)
+        restore_btn.setGeometry(190, 92, 170, 44)
+        restore_btn.setStyleSheet(self.secondary_btn_style())
+        restore_btn.setEnabled(False)
+        restore_btn.setToolTip("Available after backend implementation.")
+
+        table = QTableWidget(page)
+        table.setGeometry(0, 165, 955, 430)
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(["Created", "Type", "Size", "Created By", "Status"])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setStyleSheet(self.table_style())
+        return page
+
+    def build_control_logs_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("Logs", page)
+        title.setGeometry(0, 0, 260, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+
+        message = QLabel("System Logs, Operation Logs, Device Logs, and Update Logs: Log Endpoint Pending Backend Implementation", page)
+        message.setGeometry(0, 48, 830, 24)
+        message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
+
+        self.btn_refresh_it_audit = QPushButton("Refresh Local IT Audit", page)
+        self.btn_refresh_it_audit.setGeometry(0, 88, 190, 42)
+        self.btn_refresh_it_audit.setStyleSheet(self.secondary_btn_style())
+        self.btn_refresh_it_audit.clicked.connect(self.load_it_audit_logs)
+
+        self.it_audit_table = QTableWidget(page)
+        self.it_audit_table.setGeometry(0, 150, 955, 520)
+        self.it_audit_table.setColumnCount(6)
+        self.it_audit_table.setHorizontalHeaderLabels(["Date/Time", "User", "Action", "Target", "Result", "Message"])
+        self.it_audit_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.it_audit_table.verticalHeader().setVisible(False)
+        self.it_audit_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.it_audit_table.setStyleSheet(self.table_style())
+        return page
+
+    def build_control_ai_section(self):
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        title = QLabel("AI Debug", page)
+        title.setGeometry(0, 0, 260, 28)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+
+        self.btn_generate_debug_brief = QPushButton("Collect Diagnostics", page)
+        self.btn_generate_debug_brief.setGeometry(0, 48, 190, 44)
+        self.btn_generate_debug_brief.setStyleSheet(self.primary_btn_style())
+
+        self.btn_copy_debug_brief = QPushButton("Copy Diagnostics", page)
+        self.btn_copy_debug_brief.setGeometry(210, 48, 170, 44)
+        self.btn_copy_debug_brief.setStyleSheet(self.secondary_btn_style())
+
+        warning = QLabel("AI may recommend actions only. Human approval is required for restart, rollback, update, or delete operations.", page)
+        warning.setGeometry(400, 55, 540, 28)
+        warning.setStyleSheet("font-size: 12px; color: #b45309; font-weight: 800;")
+
+        diag_label = QLabel("Diagnostics Data", page)
+        diag_label.setGeometry(0, 115, 180, 20)
+        diag_label.setStyleSheet(self.label_style())
+        self.ai_diag_input = QTextEdit(page)
+        self.ai_diag_input.setGeometry(0, 142, 460, 260)
+        self.ai_diag_input.setStyleSheet(self.input_style())
+
+        summary_label = QLabel("AI Summary", page)
+        summary_label.setGeometry(492, 115, 180, 20)
+        summary_label.setStyleSheet(self.label_style())
+        self.ai_summary_text = QTextEdit(page)
+        self.ai_summary_text.setGeometry(492, 142, 460, 120)
+        self.ai_summary_text.setReadOnly(True)
+        self.ai_summary_text.setStyleSheet(self.input_style())
+        self.debug_brief = self.ai_summary_text
+
+        cause_label = QLabel("Likely Cause", page)
+        cause_label.setGeometry(492, 280, 180, 20)
+        cause_label.setStyleSheet(self.label_style())
+        self.ai_cause_text = QTextEdit(page)
+        self.ai_cause_text.setGeometry(492, 307, 460, 120)
+        self.ai_cause_text.setReadOnly(True)
+        self.ai_cause_text.setStyleSheet(self.input_style())
+
+        fixes_label = QLabel("Recommended Fixes", page)
+        fixes_label.setGeometry(0, 430, 180, 20)
+        fixes_label.setStyleSheet(self.label_style())
+        self.ai_fixes_text = QTextEdit(page)
+        self.ai_fixes_text.setGeometry(0, 457, 952, 180)
+        self.ai_fixes_text.setReadOnly(True)
+        self.ai_fixes_text.setStyleSheet(self.input_style())
+        return page
 
     # ---------------------------- pairing page ----------------------------
 
@@ -2637,17 +3041,334 @@ class DashboardWindow(QWidget):
             for c, value in enumerate(values):
                 self.verification_table.setItem(r, c, QTableWidgetItem(str(value)))
 
+    def current_control_profile(self):
+        if hasattr(self, "control_profile_combo"):
+            row = self.control_profile_combo.currentData()
+            if row:
+                return row
+        return self.db.get_active_control_profile() or {}
+
+    def control_client(self):
+        profile = self.current_control_profile()
+        return ControlServiceClient(
+            profile.get("host") or "",
+            profile.get("port") or 7000,
+            profile.get("api_key") or "",
+            timeout=2.0,
+        )
+
+    def control_client_from_form(self):
+        if not hasattr(self, "control_host"):
+            return self.control_client()
+        return ControlServiceClient(
+            self.control_host.text().strip(),
+            self.control_port.text().strip(),
+            self.control_api_key.text(),
+            timeout=2.0,
+        )
+
+    def control_profile_from_form(self):
+        if not hasattr(self, "control_host"):
+            return self.current_control_profile()
+        return {
+            "profile_name": self.control_profile_name.text().strip() or "Unsaved profile",
+            "host": self.control_host.text().strip(),
+            "port": self.control_port.text().strip() or 7000,
+            "api_key": self.control_api_key.text(),
+            "description": self.control_profile_description.text().strip(),
+        }
+
+    def control_value(self, data, *keys, default="Pending backend support"):
+        current = data
+        for key in keys:
+            if not isinstance(current, dict) or key not in current:
+                return default
+            current = current.get(key)
+        if current in (None, ""):
+            return default
+        return str(current)
+
+    def control_status_text(self, result):
+        if result.get("ok"):
+            return "Connected"
+        return result.get("error") or "Control Service Offline or Unreachable"
+
     def load_it_health(self):
+        if not hasattr(self, "it_control_stack"):
+            return
+        self.load_control_profiles()
+        self.load_control_devices()
+        self.load_control_services()
+        self.load_it_recovery_users()
+        self.load_it_audit_logs()
+
+    def load_control_dashboard_placeholder(self):
+        if not hasattr(self, "control_dashboard_labels"):
+            return
+        profile = self.current_control_profile()
+        if not profile.get("host"):
+            self.control_dashboard_labels["service"].setText("Demo Mode - No Raspberry Pi Connected")
+        else:
+            self.control_dashboard_labels["service"].setText("Not refreshed")
+        for key in ["hostname", "lan_ip", "tailscale_ip", "cpu", "memory", "disk", "operation"]:
+            self.control_dashboard_labels[key].setText("Pending backend support")
+        self.control_dashboard_labels["refreshed"].setText("Not refreshed")
+        self.update_control_header()
+
+    def load_control_profiles(self):
+        if not hasattr(self, "control_profile_combo"):
+            return
+        current_id = None
+        current = self.control_profile_combo.currentData()
+        if current:
+            current_id = current.get("id")
+
+        profiles = self.db.list_control_profiles()
+        self.control_profile_combo.blockSignals(True)
+        self.control_profile_combo.clear()
+        selected_index = 0
+        for idx, profile in enumerate(profiles):
+            suffix = " (active)" if profile.get("is_active") else ""
+            self.control_profile_combo.addItem(f"{profile.get('profile_name')}{suffix}", profile)
+            if current_id and profile.get("id") == current_id:
+                selected_index = idx
+            elif not current_id and profile.get("is_active"):
+                selected_index = idx
+        if profiles:
+            self.control_profile_combo.setCurrentIndex(selected_index)
+        self.control_profile_combo.blockSignals(False)
+        self.on_control_profile_selected()
+
+    def on_control_profile_selected(self):
+        if not hasattr(self, "control_profile_combo"):
+            return
+        profile = self.control_profile_combo.currentData() or self.db.get_active_control_profile() or {}
+        if hasattr(self, "control_profile_name"):
+            self.control_profile_name.setText(profile.get("profile_name") or "")
+            self.control_host.setText(profile.get("host") or "")
+            self.control_port.setText(str(profile.get("port") or 7000))
+            self.control_api_key.setText(profile.get("api_key") or "")
+            self.control_profile_description.setText(profile.get("description") or "")
+        self.update_control_url_preview()
+        self.update_control_network_labels()
+
+    def new_control_profile(self):
+        self.control_profile_combo.setCurrentIndex(-1)
+        self.control_profile_name.setText("New Pi Profile")
+        self.control_host.clear()
+        self.control_port.setText("7000")
+        self.control_api_key.clear()
+        self.control_profile_description.clear()
+        self.update_control_url_preview()
+
+    def update_control_url_preview(self):
+        if not hasattr(self, "control_url_preview"):
+            return
+        host = self.control_host.text().strip() if hasattr(self, "control_host") else ""
+        port = self.control_port.text().strip() if hasattr(self, "control_port") else "7000"
+        if host and port:
+            url = f"http://{host}:{port}"
+        else:
+            url = "Pending profile configuration"
+        self.control_url_preview.setText(f"Control Service URL: {url}")
+        if hasattr(self, "control_masked_key"):
+            try:
+                port_value = int(port or 7000)
+            except ValueError:
+                port_value = 7000
+            client = ControlServiceClient(host, port_value, self.control_api_key.text() if hasattr(self, "control_api_key") else "")
+            self.control_masked_key.setText(f"API key: {client.masked_api_key()}")
+
+    def update_control_network_labels(self, result=None, profile=None):
+        if not hasattr(self, "control_network_labels"):
+            return
+        profile = profile or self.current_control_profile()
+        host = profile.get("host") or ""
+        port = profile.get("port") or 7000
+        url = f"http://{host}:{port}" if host else "Pending profile configuration"
+        self.control_network_labels["profile"].setText(profile.get("profile_name") or "No profile")
+        self.control_network_labels["host"].setText(host or "Not configured")
+        self.control_network_labels["port"].setText(str(port))
+        self.control_network_labels["url"].setText(url)
+        self.control_network_labels["status"].setText(self.control_status_text(result) if result else "Not tested")
+
+        network_data = {}
+        health_data = {}
+        if result and result.get("ok"):
+            health_data = result.get("data") or {}
+        if self.control_last_results.get("network", {}).get("ok"):
+            network_data = self.control_last_results["network"].get("data") or {}
+        self.control_network_labels["hostname"].setText(
+            self.control_value(health_data, "hostname", default=self.control_value(network_data, "hostname"))
+        )
+        self.control_network_labels["lan_ip"].setText(
+            self.control_value(network_data, "lan_ip", default=self.control_value(network_data, "ip"))
+        )
+        self.control_network_labels["tailscale_ip"].setText(
+            self.control_value(network_data, "tailscale_ip")
+        )
+
+    def save_control_profile(self):
+        profile = self.control_profile_combo.currentData() if hasattr(self, "control_profile_combo") else None
+        profile_id = profile.get("id") if profile else None
+        try:
+            saved_id = self.db.save_control_profile(
+                profile_id,
+                self.control_profile_name.text(),
+                self.control_host.text(),
+                self.control_port.text(),
+                self.control_api_key.text(),
+                self.control_profile_description.text(),
+                True,
+            )
+            self.db.log_it_audit(
+                self.current_user.get("username"),
+                "Control Profile Save",
+                self.control_profile_name.text().strip(),
+                "Success",
+                "Raspberry Pi Control Service profile saved.",
+            )
+            self.load_control_profiles()
+            for idx in range(self.control_profile_combo.count()):
+                row = self.control_profile_combo.itemData(idx)
+                if row and row.get("id") == saved_id:
+                    self.control_profile_combo.setCurrentIndex(idx)
+                    break
+            self.show_info("Saved", "Raspberry Pi connection profile saved.")
+        except Exception as e:
+            self.db.log_it_audit(
+                self.current_user.get("username"),
+                "Control Profile Save",
+                self.control_profile_name.text().strip(),
+                "Failed",
+                str(e),
+            )
+            self.show_error("Save failed", str(e))
+
+    def copy_control_api_key(self):
+        key = self.control_api_key.text() if hasattr(self, "control_api_key") else ""
+        if not key:
+            self.show_error("No API key", "No Control Service API key is configured for this profile.")
+            return
+        QGuiApplication.clipboard().setText(key)
+        self.show_info("Copied", "API key copied.")
+
+    def test_control_connection(self):
+        client = self.control_client_from_form()
+        result = client.health()
+        self.control_last_results["health"] = result
+        if result.get("ok"):
+            data = result.get("data") or {}
+            hostname = data.get("hostname") or "unknown host"
+            version = data.get("version") or "version pending"
+            self.control_test_status.setText(f"Connection Status: Connected | {hostname} | {version}")
+            self.control_test_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+            audit_result = "Success"
+            message = f"Connected to Control Service at {client.base_url}"
+        else:
+            self.control_test_status.setText(f"Connection Status: {self.control_status_text(result)}")
+            self.control_test_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+            audit_result = "Failed"
+            message = self.control_status_text(result)
+        tested_profile = self.control_profile_from_form()
+        self.update_control_network_labels(result, tested_profile)
+        self.update_control_header(result, tested_profile)
+        self.db.log_it_audit(self.current_user.get("username"), "Connection Test", client.base_url, audit_result, message)
+        self.load_it_audit_logs()
+
+    def update_control_header(self, health_result=None, profile=None):
+        if not hasattr(self, "control_header_status"):
+            return
+        profile = profile or self.current_control_profile()
+        if not profile.get("host"):
+            self.control_header_status.setText("Demo Mode - No Raspberry Pi Connected")
+            self.control_header_status.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 800;")
+            return
+        if health_result and health_result.get("ok"):
+            self.control_header_status.setText(f"Control Service: Connected ({profile.get('profile_name')})")
+            self.control_header_status.setStyleSheet("font-size: 13px; color: #047857; font-weight: 800;")
+        elif health_result:
+            self.control_header_status.setText("Control Service Offline or Unreachable")
+            self.control_header_status.setStyleSheet("font-size: 13px; color: #b91c1c; font-weight: 800;")
+        else:
+            self.control_header_status.setText(f"Control Profile: {profile.get('profile_name')}")
+            self.control_header_status.setStyleSheet("font-size: 13px; color: #475569; font-weight: 800;")
+
+    def refresh_control_dashboard(self):
+        if not hasattr(self, "control_dashboard_labels"):
+            return
+        client = self.control_client()
+        health = client.health()
+        if health.get("ok"):
+            results = {
+                "health": health,
+                "system": client.system_status(),
+                "network": client.network_status(),
+                "tailscale": client.tailscale_status(),
+                "operation": client.operation_status(),
+            }
+        else:
+            skipped = {
+                "ok": False,
+                "error": health.get("error") or "Control Service Offline or Unreachable",
+                "data": {},
+            }
+            results = {
+                "health": health,
+                "system": skipped,
+                "network": skipped,
+                "tailscale": skipped,
+                "operation": skipped,
+            }
+        self.control_last_results.update(results)
+
+        health = results["health"]
+        system = results["system"].get("data") if results["system"].get("ok") else {}
+        network = results["network"].get("data") if results["network"].get("ok") else {}
+        tailscale = results["tailscale"].get("data") if results["tailscale"].get("ok") else {}
+        operation = results["operation"].get("data") if results["operation"].get("ok") else {}
+
+        self.control_dashboard_labels["service"].setText(self.control_status_text(health))
+        self.control_dashboard_labels["hostname"].setText(
+            self.control_value(health.get("data") or {}, "hostname", default=self.control_value(network, "hostname"))
+        )
+        self.control_dashboard_labels["lan_ip"].setText(self.control_value(network, "lan_ip", default=self.control_value(network, "ip")))
+        self.control_dashboard_labels["tailscale_ip"].setText(self.control_value(tailscale, "ip", default=self.control_value(network, "tailscale_ip")))
+        self.control_dashboard_labels["cpu"].setText(self.control_value(system, "cpu_usage", default=self.control_value(system, "cpu")))
+        self.control_dashboard_labels["memory"].setText(self.control_value(system, "memory_usage", default=self.control_value(system, "memory")))
+        self.control_dashboard_labels["disk"].setText(self.control_value(system, "disk_usage", default=self.control_value(system, "disk")))
+        self.control_dashboard_labels["operation"].setText(self.control_value(operation, "status", default=self.control_status_text(results["operation"])))
+        self.control_dashboard_labels["refreshed"].setText(time.strftime("%Y-%m-%d %H:%M:%S"))
+        self.update_control_network_labels(health)
+        self.update_control_header(health)
+        self.load_control_services()
+
+    def load_control_services(self):
+        if not hasattr(self, "control_service_labels"):
+            return
+        health = self.control_last_results.get("health") or {"ok": False, "error": "Not refreshed"}
+        operation = self.control_last_results.get("operation") or {"ok": False, "error": "Not refreshed"}
+
+        self.control_service_labels["control"].setText(self.control_status_text(health))
+        self.control_service_labels["operation"].setText(
+            self.control_value(operation.get("data") or {}, "status", default=self.control_status_text(operation))
+        )
+        self.control_service_labels["version"].setText(self.control_value(health.get("data") or {}, "version"))
+        self.control_service_labels["uptime"].setText(self.control_value(health.get("data") or {}, "uptime"))
+        self.control_service_labels["last_restart"].setText("Pending backend support")
+
+    def load_control_devices(self):
         if not hasattr(self, "it_device_table"):
             return
         devices = self.db.get_devices()
-        summary = self.db.get_dashboard_summary()
         offline = sum(1 for d in devices if not d.get("is_online"))
-
-        self.it_health_labels["gateway"].setText("Online" if self.gateway_online else "Offline")
-        self.it_health_labels["database"].setText(summary.get("database_mode", "unknown"))
-        self.it_health_labels["devices"].setText(str(len(devices)))
-        self.it_health_labels["offline"].setText(str(offline))
+        low_battery = sum(1 for d in devices if d.get("battery_level") is not None and int(d.get("battery_level")) < 20)
+        if hasattr(self, "control_device_summary"):
+            self.control_device_summary["total"].setText(str(len(devices)))
+            self.control_device_summary["online"].setText(str(len(devices) - offline))
+            self.control_device_summary["offline"].setText(str(offline))
+            self.control_device_summary["low_battery"].setText(str(low_battery))
+            self.control_device_summary["firmware"].setText("Pending")
 
         self.it_device_table.setRowCount(len(devices))
         for r, d in enumerate(devices):
@@ -2663,6 +3384,37 @@ class DashboardWindow(QWidget):
             for c, value in enumerate(values):
                 self.it_device_table.setItem(r, c, QTableWidgetItem(str(value)))
         self.load_it_recovery_users()
+
+    def restart_operation_manager(self):
+        client = self.control_client()
+        result = client.restart_operation()
+        audit_result = "Success" if result.get("ok") else "Failed"
+        message = "Operation Manager restart requested." if result.get("ok") else self.control_status_text(result)
+        self.db.log_it_audit(self.current_user.get("username"), "Restart Operation Manager", client.base_url, audit_result, message)
+        self.load_it_audit_logs()
+        self.control_last_results["operation"] = client.operation_status()
+        self.load_control_services()
+        if result.get("ok"):
+            self.show_info("Restart requested", "Operation Manager restart request was sent to the Raspberry Pi Control Service.")
+        else:
+            self.show_error("Restart failed", message)
+
+    def load_it_audit_logs(self):
+        if not hasattr(self, "it_audit_table"):
+            return
+        rows = self.db.get_it_audit_logs(limit=100)
+        self.it_audit_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            values = [
+                self.db.format_timestamp(row.get("created_at")),
+                row.get("username") or "",
+                row.get("action") or "",
+                row.get("target") or "",
+                row.get("result") or "",
+                row.get("message") or "",
+            ]
+            for c, value in enumerate(values):
+                self.it_audit_table.setItem(r, c, QTableWidgetItem(str(value)))
 
     def load_it_recovery_users(self):
         if not hasattr(self, "it_recovery_user"):
@@ -2721,7 +3473,15 @@ class DashboardWindow(QWidget):
             True,
             "IT admin issued temporary password",
         )
+        self.db.log_it_audit(
+            self.current_user.get("username"),
+            "Temporary Password Issued",
+            user.get("username"),
+            "Success",
+            "Temporary password issued; user must change it after login.",
+        )
         self.load_it_recovery_users()
+        self.load_it_audit_logs()
 
     def copy_temporary_password(self):
         value = self.it_temp_password.text().strip()
@@ -2732,39 +3492,96 @@ class DashboardWindow(QWidget):
         self.show_info("Copied", "Temporary password copied.")
 
     def generate_debug_brief(self):
-        self.load_it_health()
+        self.refresh_control_dashboard()
+        profile = self.current_control_profile()
         devices = self.db.get_devices()
-        logs = self.db.get_recent_logs(limit=10)
+        audit_logs = self.db.get_it_audit_logs(limit=10)
         offline = [d for d in devices if not d.get("is_online")]
-        lines = [
-            f"Application: {APP_NAME}",
-            f"User role: {self.role_label()}",
-            f"Gateway URL: {self.base_url()}",
-            f"Gateway state: {'connected' if self.gateway_online else 'offline'}",
-            f"Database mode: {self.db.backend or 'unknown'}",
-            f"Known devices: {len(devices)}",
-            f"Offline devices: {len(offline)}",
-            "",
-            "Device health:",
-        ]
-        for d in devices:
-            lines.append(
-                f"- {d.get('device_id')}: {'online' if d.get('is_online') else 'offline'}, "
-                f"ip={d.get('ip') or 'n/a'}, fw={d.get('fw') or 'n/a'}, "
-                f"battery={d.get('battery_level') if d.get('battery_level') is not None else 'n/a'}, "
-                f"last_seen_s={d.get('last_seen_s')}"
-            )
-        lines.extend(["", "Recent technical events:"])
-        for log in logs:
-            action = log.get("action_type") or ""
-            success = "ok" if log.get("success") else "failed"
-            message = (log.get("message") or "").replace("\n", " ")[:160]
-            lines.append(f"- {self.db.format_timestamp(log.get('created_at'))}: {action} [{success}] {message}")
-        self.debug_brief.setPlainText("\n".join(lines))
+        health = self.control_last_results.get("health", {})
+        operation = self.control_last_results.get("operation", {})
+
+        diagnostics = {
+            "application": APP_NAME,
+            "user_role": self.role_label(),
+            "control_profile": {
+                "name": profile.get("profile_name"),
+                "host": profile.get("host"),
+                "port": profile.get("port"),
+                "api_key": "configured" if profile.get("api_key") else "missing",
+            },
+            "control_service": self.control_last_results,
+            "legacy_gateway_url": self.base_url(),
+            "legacy_gateway_state": "connected" if self.gateway_online else "offline",
+            "database_mode": self.db.backend or "unknown",
+            "known_devices": len(devices),
+            "offline_devices": len(offline),
+            "recent_it_audit": audit_logs,
+        }
+        if hasattr(self, "ai_diag_input"):
+            self.ai_diag_input.setPlainText(json.dumps(diagnostics, indent=2, default=str))
+
+        if not profile.get("host"):
+            summary = "Demo Mode - no Raspberry Pi Control Service host is configured."
+            cause = "The active connection profile does not have a host."
+            fixes = [
+                "Open Network and enter the Pi hostname, LAN IP, or Tailscale IP.",
+                "Confirm the Control Service port, usually 7000.",
+                "Enter the API key and run Test Connection.",
+            ]
+        elif not profile.get("api_key"):
+            summary = "Control Service profile is missing an API key."
+            cause = "Protected requests require X-Whisperwood-Key."
+            fixes = [
+                "Enter the Control Service API key in Network.",
+                "Save the profile and test the connection again.",
+            ]
+        elif health.get("ok"):
+            op_status = self.control_value(operation.get("data") or {}, "status", default="operation status pending")
+            summary = f"Control Service is reachable. Operation Manager: {op_status}."
+            cause = "No connection fault detected from the currently implemented Control Service endpoints."
+            fixes = [
+                "Review Services for Operation Manager state.",
+                "Use Restart Operation Manager only when a human approves the action.",
+                "Check Devices once Operation Manager ESP32 registry integration is available.",
+            ]
+        else:
+            summary = "Control Service Offline or Unreachable."
+            cause = health.get("error") or "The Pi Control Service did not respond successfully."
+            fixes = [
+                "Verify the desktop and Raspberry Pi are on the same facility network.",
+                "Confirm the configured host resolves to the Raspberry Pi.",
+                "Confirm port 7000 is reachable and the Control Service is running.",
+                "Use Tailscale only for remote support, diagnostics, maintenance, or recovery.",
+            ]
+
+        self.ai_summary_text.setPlainText(summary)
+        self.ai_cause_text.setPlainText(cause)
+        self.ai_fixes_text.setPlainText("\n".join(f"- {fix}" for fix in fixes))
+        self.db.log_it_audit(
+            self.current_user.get("username"),
+            "Collect Diagnostics",
+            profile.get("profile_name") or "No profile",
+            "Success",
+            "AI debug diagnostics collected. Recommendations only; no automatic service action performed.",
+        )
+        self.load_it_audit_logs()
 
     def copy_debug_brief(self):
-        QGuiApplication.clipboard().setText(self.debug_brief.toPlainText())
-        self.show_info("Copied", "Technical debug brief copied.")
+        if hasattr(self, "ai_diag_input"):
+            text = "\n\n".join([
+                "Diagnostics Data:",
+                self.ai_diag_input.toPlainText(),
+                "AI Summary:",
+                self.ai_summary_text.toPlainText(),
+                "Likely Cause:",
+                self.ai_cause_text.toPlainText(),
+                "Recommended Fixes:",
+                self.ai_fixes_text.toPlainText(),
+            ])
+        else:
+            text = self.debug_brief.toPlainText()
+        QGuiApplication.clipboard().setText(text)
+        self.show_info("Copied", "Diagnostics copied.")
 
     def handle_logout(self):
         answer = QMessageBox.question(
