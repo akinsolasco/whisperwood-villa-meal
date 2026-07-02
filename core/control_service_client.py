@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 from typing import Any, Dict, Optional
 
 import requests
@@ -66,19 +67,30 @@ class ControlServiceClient:
             "url": f"{self.base_url}{endpoint}" if self.configured() else "",
         }
 
-    def _request(self, method: str, endpoint: str) -> Dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        json_body: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        require_key: bool = True,
+    ) -> Dict[str, Any]:
         if not self.host:
             return self._result(False, endpoint, error="Control Service host is not configured.")
         if not self.port or self.port < 1 or self.port > 65535:
             return self._result(False, endpoint, error="Control Service port is not valid.")
-        if not self.api_key:
+        if require_key and not self.api_key:
             return self._result(False, endpoint, error="Missing Control Service API key.")
 
         try:
             response = self.session.request(
                 method,
                 f"{self.base_url}{endpoint}",
-                headers=self._headers(),
+                headers=self._headers() if self.api_key else {},
+                json=json_body,
+                files=files,
+                data=data,
                 timeout=self.timeout,
             )
         except requests.Timeout:
@@ -103,7 +115,64 @@ class ControlServiceClient:
         return self._result(True, endpoint, response.status_code, data)
 
     def health(self) -> Dict[str, Any]:
-        return self._request("GET", "/health")
+        return self._request("GET", "/health", require_key=False)
+
+    def login(self, username: str, password: str) -> Dict[str, Any]:
+        return self._request("POST", "/auth/login", {"username": username, "password": password})
+
+    def get_users(self) -> Dict[str, Any]:
+        return self._request("GET", "/users")
+
+    def create_user(self, username: str, password: str, role: str, full_name: str = "") -> Dict[str, Any]:
+        payload = {
+            "username": username,
+            "password": password,
+            "role": role,
+        }
+        if full_name:
+            payload["full_name"] = full_name
+        return self._request("POST", "/users", payload)
+
+    def get_residents(self) -> Dict[str, Any]:
+        return self._request("GET", "/residents")
+
+    def create_resident(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/residents", payload)
+
+    def update_resident(self, resident_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("PUT", f"/residents/{resident_id}", payload)
+
+    def upload_document(self, resident_id: int, document_path: str) -> Dict[str, Any]:
+        if not document_path or not os.path.isfile(document_path):
+            return self._result(False, f"/residents/{resident_id}/document", error="Document file was not found.")
+        with open(document_path, "rb") as fh:
+            files = {"document": (os.path.basename(document_path), fh, "application/octet-stream")}
+            return self._request("POST", f"/residents/{resident_id}/document", files=files)
+
+    def upload_image(self, resident_id: int, image_path: str) -> Dict[str, Any]:
+        if not image_path or not os.path.isfile(image_path):
+            return self._result(False, f"/residents/{resident_id}/image", error="Image file was not found.")
+        with open(image_path, "rb") as fh:
+            files = {"image": (os.path.basename(image_path), fh, "application/octet-stream")}
+            return self._request("POST", f"/residents/{resident_id}/image", files=files)
+
+    def get_devices(self) -> Dict[str, Any]:
+        return self._request("GET", "/devices")
+
+    def upsert_device(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/devices", payload)
+
+    def pair_device(self, resident_id: int, device_id: str) -> Dict[str, Any]:
+        return self._request("POST", "/devices/pair", {"resident_id": resident_id, "device_id": device_id})
+
+    def get_schedules(self) -> Dict[str, Any]:
+        return self._request("GET", "/schedules")
+
+    def save_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/schedules", payload)
+
+    def get_logs(self) -> Dict[str, Any]:
+        return self._request("GET", "/logs")
 
     def system_status(self) -> Dict[str, Any]:
         return self._request("GET", "/system")
@@ -120,6 +189,9 @@ class ControlServiceClient:
     def restart_operation(self) -> Dict[str, Any]:
         return self._request("POST", "/operation/restart")
 
+    def bootstrap_info(self) -> Dict[str, Any]:
+        return self._request("GET", "/bootstrap/info")
+
     def pending(self, feature_name: str) -> Dict[str, Any]:
         return {
             "ok": False,
@@ -129,7 +201,7 @@ class ControlServiceClient:
         }
 
     def logs(self) -> Dict[str, Any]:
-        return self.pending("logs")
+        return self.get_logs()
 
     def create_backup(self) -> Dict[str, Any]:
         return self.pending("create_backup")

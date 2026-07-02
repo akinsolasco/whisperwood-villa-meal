@@ -1,7 +1,7 @@
 [Setup]
 AppId={{C4B9F4F2-9F0D-4F86-9E55-DE05B91CF001}
 AppName=Whisperwood Villa Demo
-AppVersion=2.0.5.5
+AppVersion=2.0.5.6
 AppPublisher=Whisperwood Villa
 DefaultDirName={autopf}\Whisperwood Villa Demo
 DefaultGroupName=Whisperwood Villa Demo

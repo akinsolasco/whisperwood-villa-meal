@@ -18,10 +18,13 @@ from PyQt6.QtWidgets import (
 
 from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
 from auth.auth_service import AuthService
+from core.app_settings import APP_MODE_DEMO, APP_MODE_SERVER, AppSettingsStore
 from core.control_service_client import ControlServiceClient
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
+from core.server_data_service import ServerDataService
+from core.server_gateway_client import ServerGatewayClient
 
 
 class DashboardWindow(QWidget):
@@ -31,9 +34,11 @@ class DashboardWindow(QWidget):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
         self.current_role = self.normalize_role(self.current_user.get("role", "NURSE_ADMIN"))
-        self.db = DatabaseService()
+        self.settings = AppSettingsStore()
+        self.server_mode = self.current_user.get("data_source") == "server" or self.settings.get_mode() == APP_MODE_SERVER
+        self.db = ServerDataService() if self.server_mode else DatabaseService()
         self.db.ensure_tables()
-        self.gateway = GatewayClient()
+        self.gateway = ServerGatewayClient() if self.server_mode else GatewayClient()
         self.gateway_online = False
         self.control_service_online = False
         self.control_last_results: Dict[str, Dict[str, Any]] = {}
@@ -100,14 +105,22 @@ class DashboardWindow(QWidget):
         QTimer.singleShot(200, self.refresh_control_connection_status)
         if self.current_user.get("password_must_change"):
             QTimer.singleShot(300, self.show_required_password_change)
+        elif self.current_user.get("force_password_change_warning"):
+            QTimer.singleShot(300, self.show_force_password_change_warning)
 
     # ---------------------------- roles ----------------------------
 
     def normalize_role(self, role: str) -> str:
-        role = (role or "NURSE").upper()
-        if role == "ADMIN":
+        role = (role or "NURSE").strip()
+        role_upper = role.upper()
+        role_lower = role.lower()
+        if role_upper == "ADMIN" or role_lower in {"admin", "nurse_admin", "nurseadmin"}:
             return "NURSE_ADMIN"
-        return role
+        if role_upper == "STAFF" or role_lower in {"staff", "nurse", "user"}:
+            return "NURSE"
+        if role_upper in {"IT_ADMIN", "ITADMIN"} or role_lower in {"it_admin", "itadmin", "it"}:
+            return "IT_ADMIN"
+        return role_upper
 
     def role_label(self, role: Optional[str] = None) -> str:
         return ROLE_LABELS.get(self.normalize_role(role or self.current_role), role or self.current_role)
@@ -785,8 +798,8 @@ class DashboardWindow(QWidget):
         workflow_title.setGeometry(22, 20, 180, 24)
         workflow_title.setStyleSheet("font-size: 18px; color: white; font-weight: 800;")
         steps = [
-            "1. Nurse submits observation or source-document note.",
-            "2. Nurse admin reviews, edits, and approves resident data.",
+            "1. Staff submits observation or source-document note.",
+            "2. Admin reviews, edits, and approves resident data.",
             "3. Approved save prepares the display payload and audit entry.",
             "4. Verifier confirms software record against the e-paper screen.",
             "5. IT monitors gateway, Raspberry Pi, and device health separately.",
@@ -1009,7 +1022,7 @@ class DashboardWindow(QWidget):
             }
         """)
 
-        review_label = QLabel("Nurse review note", self.form_panel)
+        review_label = QLabel("Staff review note", self.form_panel)
         review_label.setGeometry(22, 790, 150, 18)
         review_label.setStyleSheet(self.label_style())
 
@@ -1018,7 +1031,7 @@ class DashboardWindow(QWidget):
         self.nurse_review_comment.setPlaceholderText("Write what needs review, the source checked, or the observation to verify.")
         self.nurse_review_comment.setStyleSheet(self.input_style())
 
-        self.btn_submit_review_request = QPushButton("Submit for Nurse Admin Review", self.form_panel)
+        self.btn_submit_review_request = QPushButton("Submit for Admin Review", self.form_panel)
         self.btn_submit_review_request.setGeometry(22, 898, 376, 38)
         self.btn_submit_review_request.setStyleSheet(self.primary_btn_style())
 
@@ -1186,7 +1199,7 @@ class DashboardWindow(QWidget):
         self.approval_detail.setReadOnly(True)
         self.approval_detail.setStyleSheet(self.input_style())
 
-        note_label = QLabel("Nurse admin decision note", right)
+        note_label = QLabel("Admin decision note", right)
         note_label.setGeometry(22, 498, 220, 22)
         note_label.setStyleSheet(self.label_style())
 
@@ -1263,7 +1276,7 @@ class DashboardWindow(QWidget):
         self.btn_refresh_audit.setStyleSheet(self.secondary_btn_style())
 
         note = QLabel(
-            "Nursing sees resident-information history only. Technical send/device logs remain in IT Admin.",
+            "Admin and staff see resident-information history only. Technical send/device logs remain in IT Admin.",
             right,
         )
         note.setGeometry(22, 748, 430, 36)
@@ -2387,6 +2400,11 @@ class DashboardWindow(QWidget):
     # ---------------------------- helpers ----------------------------
 
     def base_url(self):
+        if self.server_mode:
+            profile = self.db.get_active_control_profile()
+            host = profile.get("host") or ""
+            port = profile.get("port") or 7000
+            return f"http://{host}:{port}".rstrip("/")
         return self.base_url_edit.text().strip().rstrip("/")
 
     def selected_device_id(self):
@@ -2406,6 +2424,7 @@ class DashboardWindow(QWidget):
             "resident_uid": self.txt_uid.text().strip(),
             "full_name": self.txt_name.text().strip(),
             "room": self.txt_room.text().strip(),
+            "status_alert": self.cmb_alert.currentText(),
             "diet": self.txt_diet.text().strip(),
             "allergies": self.txt_allergies.text().strip(),
             "note": self.txt_note.toPlainText().strip(),
@@ -2452,13 +2471,22 @@ class DashboardWindow(QWidget):
     def set_control_gateway_state(self, result=None):
         result = result or {}
         profile = self.current_control_profile()
-        self.control_service_online = bool(result.get("ok"))
+        has_api_key = bool(profile.get("api_key"))
+        self.control_service_online = bool(result.get("ok") and has_api_key)
+        if self.server_mode:
+            self.gateway_online = self.control_service_online
         if not profile.get("host"):
             text = "Gateway: Demo Mode"
             color = "#64748b"
             background = "#f8fafc"
             border = "#d8e1ea"
             tooltip = "Configure the Raspberry Pi Control Service in IT Control Center."
+        elif result.get("ok") and not has_api_key:
+            text = "Gateway: Missing Key"
+            color = "#b45309"
+            background = "#fffbeb"
+            border = "#fcd34d"
+            tooltip = "Control Service health is reachable, but protected requests require an API key."
         elif self.control_service_online:
             text = "Gateway: Connected"
             color = "#047857"
@@ -2484,13 +2512,20 @@ class DashboardWindow(QWidget):
             }}
         """)
         self.refresh_dashboard_summary()
+        self.apply_write_lock()
 
     def refresh_control_connection_status(self):
         if not hasattr(self, "connection_badge"):
             return
         client = self.control_client(timeout=0.8)
-        result = client.health()
-        self.control_last_results["health"] = result
+        health = client.health()
+        result = health
+        self.control_last_results["health"] = health
+        if health.get("ok") and client.api_key:
+            network = client.network_status()
+            self.control_last_results["network"] = network
+            if not network.get("ok"):
+                result = network
         self.set_control_gateway_state(result)
         self.update_control_header(result)
         self.update_control_network_labels(result)
@@ -2575,9 +2610,11 @@ class DashboardWindow(QWidget):
             self.position_window_controls()
 
     def require_network_for_write(self, action_name: str) -> bool:
-        if self.gateway_online:
+        if self.server_mode and self.control_service_online:
             return True
-        self.show_error("Network Required", f"{action_name} requires active gateway network connection.")
+        if not self.server_mode and self.gateway_online:
+            return True
+        self.show_error("Network Required", f"{action_name} requires an active Raspberry Pi Control Service connection.")
         return False
 
     def attach_source_document(self):
@@ -2672,7 +2709,10 @@ class DashboardWindow(QWidget):
             if hasattr(self, "record_summary_labels") and key in self.record_summary_labels:
                 self.record_summary_labels[key].setText(f"{title}: {summary.get(key, 0)}")
         if hasattr(self, "record_summary_labels") and "database_mode" in self.record_summary_labels:
-            mode = "network database" if summary.get("database_mode") == "postgres" else "local demo database"
+            if self.server_mode:
+                mode = "Server Mode Connected" if self.control_service_online else "Server Mode Offline"
+            else:
+                mode = "Offline Demo Mode"
             self.record_summary_labels["database_mode"].setText(f"Data store: {mode}")
 
         overview_values = {
@@ -2686,7 +2726,10 @@ class DashboardWindow(QWidget):
             if hasattr(self, "summary_labels") and key in self.summary_labels:
                 self.summary_labels[key].setText(str(value))
         if hasattr(self, "overview_status"):
-            mode = "network database" if summary.get("database_mode") == "postgres" else "local demo database"
+            if self.server_mode:
+                mode = "Server Mode Connected" if self.control_service_online else "Server Mode Offline"
+            else:
+                mode = "Offline Demo Mode"
             gateway_text = self.connection_badge.text().replace("Gateway: ", "")
             self.overview_status.setText(f"Data store: {mode}\nGateway: {gateway_text}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
         if hasattr(self, "overview_device_table"):
@@ -2789,7 +2832,7 @@ class DashboardWindow(QWidget):
             f"Submitted By: {request.get('requested_by_username') or ''}",
             f"Submitted At: {self.db.format_timestamp(request.get('created_at'))}",
             "",
-            "Nurse Note:",
+            "Staff Note:",
             request.get("comment") or "",
             "",
             "Resident Snapshot:",
@@ -2798,12 +2841,12 @@ class DashboardWindow(QWidget):
             if payload.get(key):
                 fields.append(f"{key.replace('_', ' ').title()}: {payload.get(key)}")
         if request.get("review_note"):
-            fields.extend(["", "Nurse Admin Decision:", request.get("review_note")])
+            fields.extend(["", "Admin Decision:", request.get("review_note")])
         self.approval_detail.setPlainText("\n".join(fields))
 
     def review_selected_request(self, status):
         if not self.is_nurse_admin():
-            self.show_error("Permission Required", "Only nurse admins can review resident requests.")
+            self.show_error("Permission Required", "Only admins can review resident requests.")
             return
         if self.selected_review_request_id is None:
             self.show_error("No request", "Select a request from the queue.")
@@ -3025,7 +3068,7 @@ class DashboardWindow(QWidget):
 
     def record_verification(self, status):
         if not (self.is_verifier() or self.is_nurse_admin()):
-            self.show_error("Permission Required", "Only display verifiers or nurse admins can record verification.")
+            self.show_error("Permission Required", "Only display verifiers or admins can record verification.")
             return
         if self.selected_verification_resident_id is None:
             self.show_error("No resident", "Select a resident to verify.")
@@ -3640,6 +3683,12 @@ class DashboardWindow(QWidget):
             self.show_info("Password change required", "A temporary password must be changed before using the dashboard.")
             self.logout_requested.emit()
 
+    def show_force_password_change_warning(self):
+        self.show_info(
+            "Temporary password",
+            "The Control Service marked this account for password change. Server password-change support is pending, so contact IT Admin for the approved recovery process.",
+        )
+
     def show_change_password_dialog(self, force=False):
         dialog = QDialog(self)
         dialog.setWindowTitle("Change Password")
@@ -3714,7 +3763,7 @@ class DashboardWindow(QWidget):
 
     def show_profile_settings(self):
         if not self.is_nurse_admin():
-            self.show_error("Permission Required", "Only nurse admins can open Settings.")
+            self.show_error("Permission Required", "Only admins can open Settings.")
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
@@ -3724,7 +3773,7 @@ class DashboardWindow(QWidget):
 
         header = QLabel(
             f"Signed in as {self.current_user.get('username', 'admin')} | {self.role_label()}\n"
-            "Nurse admin settings manage resident-team access and your own password. Forgotten-password recovery is handled by IT Admin."
+            "Admin settings manage staff access and your own password. Forgotten-password recovery is handled by IT Admin."
         )
         header.setWordWrap(True)
         header.setStyleSheet("font-size: 13px; color: #334155; background: transparent; border: none;")
@@ -3801,7 +3850,7 @@ class DashboardWindow(QWidget):
 
         def create_user():
             if not self.is_nurse_admin():
-                self.show_error("Permission Required", "Only nurse admins can create users.")
+                self.show_error("Permission Required", "Only admins can create users.")
                 return
             auth = AuthService()
             try:
@@ -3834,6 +3883,11 @@ class DashboardWindow(QWidget):
         self.txt_uid.setText(row["resident_uid"] or "")
         self.txt_name.setText(row["full_name"] or "")
         self.txt_room.setText(row.get("room") or "")
+        status_alert = row.get("status_alert") or row.get("status") or "Stable"
+        alert_index = self.cmb_alert.findText(str(status_alert), Qt.MatchFlag.MatchFixedString)
+        if alert_index < 0:
+            alert_index = self.cmb_alert.findText(str(status_alert).title(), Qt.MatchFlag.MatchFixedString)
+        self.cmb_alert.setCurrentIndex(alert_index if alert_index >= 0 else 0)
         self.txt_diet.setText(row.get("diet") or "")
         self.txt_allergies.setText(row.get("allergies") or "")
         self.txt_note.setPlainText(row.get("note") or "")
@@ -3866,7 +3920,7 @@ class DashboardWindow(QWidget):
 
     def save_resident(self):
         if not self.can_edit_residents():
-            self.show_error("Permission Required", "Only a nurse admin can save approved resident information.")
+            self.show_error("Permission Required", "Only an admin can save approved resident information.")
             return
         payload = self.collect_resident_payload()
 
@@ -3919,7 +3973,7 @@ class DashboardWindow(QWidget):
 
     def submit_resident_review_request(self):
         if not self.is_nurse():
-            self.show_error("Permission Required", "Only nurse users submit resident review requests from this view.")
+            self.show_error("Permission Required", "Only staff users submit resident review requests from this view.")
             return
         if self.selected_resident_id is None:
             self.show_error("No resident", "Select a resident before sending a review note.")
@@ -3965,13 +4019,13 @@ class DashboardWindow(QWidget):
             self.load_resident_audit()
             self.load_recent_logs()
             self.refresh_dashboard_summary()
-            self.show_info("Submitted", "Review request sent to the nurse admin queue.")
+            self.show_info("Submitted", "Review request sent to the admin queue.")
         except Exception as e:
             self.show_error("Submit failed", str(e))
 
     def delete_selected_resident(self):
         if not self.can_edit_residents():
-            self.show_error("Permission Required", "Only a nurse admin can delete resident information.")
+            self.show_error("Permission Required", "Only an admin can delete resident information.")
             return
         if self.selected_resident_id is None:
             self.show_error("No resident", "Select a resident to delete.")

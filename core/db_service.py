@@ -33,10 +33,7 @@ class DatabaseService:
             self.backend = "sqlite"
             return
 
-        config = dict(DB_CONFIG)
-        config.setdefault("connect_timeout", 2)
-        self.conn = psycopg2.connect(**config)
-        self.backend = "postgres"
+        raise RuntimeError("Direct PostgreSQL access is disabled. Use Server Mode through the Raspberry Pi Control Service.")
 
     def close(self):
         if self.conn and (self.backend == "sqlite" or not self.conn.closed):
@@ -365,21 +362,6 @@ class DatabaseService:
         for name, definition in columns.items():
             if name not in existing:
                 cur.execute(f"ALTER TABLE residents ADD COLUMN {name} {definition}")
-
-    def wipe_operational_data(self):
-        self.connect()
-        cur = self.conn.cursor()
-        if self.backend == "postgres":
-            cur.execute("TRUNCATE TABLE verification_checks, resident_change_requests, display_updates, device_registry, residents RESTART IDENTITY CASCADE;")
-        else:
-            cur.execute("DELETE FROM verification_checks")
-            cur.execute("DELETE FROM resident_change_requests")
-            cur.execute("DELETE FROM display_updates")
-            cur.execute("DELETE FROM device_registry")
-            cur.execute("DELETE FROM residents")
-            cur.execute("DELETE FROM sqlite_sequence WHERE name IN ('verification_checks', 'resident_change_requests', 'display_updates', 'device_registry', 'residents')")
-        self.conn.commit()
-        cur.close()
 
     def create_resident(self, data):
         cur = self._cursor()

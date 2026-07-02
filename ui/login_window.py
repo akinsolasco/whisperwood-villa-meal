@@ -2,6 +2,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from config import APP_NAME, ASSETS_DIR
 from auth.auth_service import AuthService
+from core.app_settings import APP_MODE_DEMO, APP_MODE_SERVER, AppSettingsStore
+from core.control_service_client import ControlServiceClient
 
 
 class LoginWorker(QtCore.QObject):
@@ -41,6 +43,7 @@ class LoginWindow(QtWidgets.QWidget):
         self.login_loading_timer = QtCore.QTimer(self)
         self.login_loading_timer.setInterval(220)
         self.login_loading_timer.timeout.connect(self._tick_login_loading)
+        self.settings = AppSettingsStore()
 
         self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
         self.photo_path = ASSETS_DIR / "senior-woman-talking-with-her-doctor.jpg"
@@ -170,8 +173,43 @@ class LoginWindow(QtWidgets.QWidget):
             }
         """)
 
+        self.connection_status = QtWidgets.QLabel("", self.right_panel)
+        self.connection_status.setGeometry(75, 442, 320, 22)
+        self.connection_status.setStyleSheet("color:#c9c9c9;font-size:12px;")
+
+        self.connection_btn = QtWidgets.QPushButton("Server Connection", self.right_panel)
+        self.connection_btn.setGeometry(75, 470, 155, 36)
+        self.connection_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1b1b1b;
+                color: white;
+                border: 1px solid #333333;
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                border: 1px solid #d4a629;
+            }
+        """)
+        self.connection_btn.clicked.connect(self.show_connection_settings)
+
+        self.mode_label = QtWidgets.QLabel("", self.right_panel)
+        self.mode_label.setGeometry(242, 470, 153, 36)
+        self.mode_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.mode_label.setStyleSheet("""
+            QLabel {
+                background-color: #101010;
+                color: #d4a629;
+                border: 1px solid #333333;
+                border-radius: 10px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+        """)
+
         self.login_btn = QtWidgets.QPushButton("Login", self.right_panel)
-        self.login_btn.setGeometry(75, 500, 320, 50)
+        self.login_btn.setGeometry(75, 545, 320, 50)
         self.login_btn.setStyleSheet("""
             QPushButton {
                 background-color: #e2ab09;
@@ -208,9 +246,11 @@ class LoginWindow(QtWidgets.QWidget):
             }
         """)
         self.close_btn.clicked.connect(self.close)
+        self.refresh_connection_status()
 
     def prepare_for_show(self, clear_username: bool = False):
         self._stop_login_loading()
+        self.refresh_connection_status()
         if clear_username:
             self.username_input.clear()
         self.password_input.clear()
@@ -220,6 +260,170 @@ class LoginWindow(QtWidgets.QWidget):
         self.login_btn.setText("Login")
         self.raise_()
         self.activateWindow()
+
+    def active_profile(self):
+        return self.settings.get_active_profile()
+
+    def refresh_connection_status(self):
+        mode = self.settings.get_mode()
+        if mode == APP_MODE_DEMO:
+            self.mode_label.setText("Offline Demo")
+            self.connection_status.setText("Offline Demo Mode: local demo users only")
+            return
+        profile = self.active_profile()
+        host = profile.get("host") or "not configured"
+        self.mode_label.setText("Server Mode")
+        self.connection_status.setText(f"Control Service: {host}:{profile.get('port') or 7000}")
+
+    def show_connection_settings(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Raspberry Pi Connection")
+        dialog.resize(560, 430)
+        dialog.setStyleSheet("QDialog { background-color: #101010; color: white; }")
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        title = QtWidgets.QLabel("Raspberry Pi Connection", dialog)
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: white;")
+        layout.addWidget(title)
+
+        guidance = QtWidgets.QLabel(
+            "Server Mode uses the Raspberry Pi Control Service. Offline Demo Mode keeps the local demo database separate.",
+            dialog,
+        )
+        guidance.setWordWrap(True)
+        guidance.setStyleSheet("font-size: 12px; color: #c9c9c9;")
+        layout.addWidget(guidance)
+
+        mode_combo = QtWidgets.QComboBox(dialog)
+        mode_combo.addItem("Server Mode", APP_MODE_SERVER)
+        mode_combo.addItem("Offline Demo Mode", APP_MODE_DEMO)
+        mode_combo.setCurrentIndex(0 if self.settings.get_mode() == APP_MODE_SERVER else 1)
+        mode_combo.setStyleSheet(self.dark_input_style())
+        layout.addWidget(mode_combo)
+
+        profile_combo = QtWidgets.QComboBox(dialog)
+        profiles = self.settings.list_profiles()
+        for profile in profiles:
+            label = f"{profile.get('profile_name')} {'(active)' if profile.get('is_active') else ''}".strip()
+            profile_combo.addItem(label, profile)
+        profile_combo.setStyleSheet(self.dark_input_style())
+        layout.addWidget(profile_combo)
+
+        host_edit = QtWidgets.QLineEdit(dialog)
+        host_edit.setPlaceholderText("Raspberry Pi host, LAN IP, or Tailscale IP")
+        host_edit.setStyleSheet(self.dark_input_style())
+        layout.addWidget(host_edit)
+
+        port_edit = QtWidgets.QLineEdit(dialog)
+        port_edit.setPlaceholderText("Port, usually 7000")
+        port_edit.setStyleSheet(self.dark_input_style())
+        layout.addWidget(port_edit)
+
+        api_key_edit = QtWidgets.QLineEdit(dialog)
+        api_key_edit.setPlaceholderText("Control Service API key")
+        api_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        api_key_edit.setStyleSheet(self.dark_input_style())
+        layout.addWidget(api_key_edit)
+
+        description_edit = QtWidgets.QLineEdit(dialog)
+        description_edit.setPlaceholderText("Description")
+        description_edit.setStyleSheet(self.dark_input_style())
+        layout.addWidget(description_edit)
+
+        status = QtWidgets.QLabel("", dialog)
+        status.setWordWrap(True)
+        status.setStyleSheet("font-size: 12px; color: #c9c9c9;")
+        layout.addWidget(status)
+
+        def fill_profile():
+            profile = profile_combo.currentData() or {}
+            host_edit.setText(profile.get("host") or "")
+            port_edit.setText(str(profile.get("port") or 7000))
+            api_key_edit.setText(profile.get("api_key") or "")
+            description_edit.setText(profile.get("description") or "")
+
+        def save_profile(show_status=True):
+            profile = profile_combo.currentData() or {}
+            try:
+                saved_id = self.settings.save_profile(
+                    profile.get("id"),
+                    profile.get("profile_name") or profile_combo.currentText().replace("(active)", "").strip() or "Raspberry Pi",
+                    host_edit.text(),
+                    port_edit.text(),
+                    api_key_edit.text(),
+                    description_edit.text(),
+                    True,
+                )
+                self.settings.set_mode(mode_combo.currentData())
+            except Exception as exc:
+                status.setStyleSheet("font-size: 12px; color: #fca5a5;")
+                status.setText(str(exc))
+                return None
+            if show_status:
+                status.setStyleSheet("font-size: 12px; color: #86efac;")
+                status.setText("Connection profile saved.")
+            return saved_id
+
+        def test_connection():
+            self.settings.set_mode(mode_combo.currentData())
+            client = ControlServiceClient(host_edit.text(), port_edit.text(), api_key_edit.text(), timeout=4.0)
+            health = client.health()
+            if not health.get("ok"):
+                status.setStyleSheet("font-size: 12px; color: #fca5a5;")
+                status.setText(f"Health check failed: {health.get('error')}")
+                return
+            network = client.network_status()
+            if not network.get("ok"):
+                status.setStyleSheet("font-size: 12px; color: #fca5a5;")
+                status.setText(f"Health OK, protected network check failed: {network.get('error')}")
+                return
+            save_profile(show_status=False)
+            data = network.get("data") or {}
+            status.setStyleSheet("font-size: 12px; color: #86efac;")
+            status.setText(f"Connected. Hostname: {data.get('hostname') or 'pending'} | LAN: {data.get('lan_ip') or data.get('ip') or 'pending'}")
+            self.refresh_connection_status()
+
+        profile_combo.currentIndexChanged.connect(fill_profile)
+        fill_profile()
+
+        buttons = QtWidgets.QHBoxLayout()
+        save_btn = QtWidgets.QPushButton("Save", dialog)
+        save_btn.setStyleSheet(self.dark_primary_btn_style())
+        test_btn = QtWidgets.QPushButton("Test Connection", dialog)
+        test_btn.setStyleSheet(self.dark_secondary_btn_style())
+        close_btn = QtWidgets.QPushButton("Close", dialog)
+        close_btn.setStyleSheet(self.dark_secondary_btn_style())
+        buttons.addWidget(save_btn)
+        buttons.addWidget(test_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        save_btn.clicked.connect(lambda: (save_profile(), self.refresh_connection_status()))
+        test_btn.clicked.connect(test_connection)
+        close_btn.clicked.connect(dialog.accept)
+        dialog.exec()
+        self.refresh_connection_status()
+
+    def dark_input_style(self):
+        return """
+            QLineEdit, QComboBox {
+                background-color: #1b1b1b;
+                color: white;
+                border: 1px solid #333333;
+                border-radius: 8px;
+                padding: 8px 10px;
+                font-size: 13px;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #d4a629;
+            }
+        """
+
+    def dark_primary_btn_style(self):
+        return "QPushButton { background-color: #e2ab09; color: #101010; border: none; border-radius: 8px; padding: 9px; font-weight: 800; }"
+
+    def dark_secondary_btn_style(self):
+        return "QPushButton { background-color: #1b1b1b; color: white; border: 1px solid #333333; border-radius: 8px; padding: 9px; font-weight: 700; }"
 
     def handle_login(self):
         username = self.username_input.text().strip()

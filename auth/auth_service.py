@@ -4,6 +4,8 @@ import bcrypt
 import psycopg2
 
 from config import DATABASE_MODE, LOCAL_DB_PATH, DEMO_USERS
+from core.app_settings import APP_MODE_SERVER, AppSettingsStore
+from core.control_service_client import ControlServiceClient
 from db_config import DB_CONFIG
 
 
@@ -11,6 +13,41 @@ class AuthService:
     def __init__(self):
         self.conn = None
         self.backend = None
+        self.settings = AppSettingsStore()
+
+    def server_mode(self):
+        return self.settings.get_mode() == APP_MODE_SERVER
+
+    def server_client(self, timeout=6.0):
+        profile = self.settings.get_active_profile()
+        return ControlServiceClient(
+            profile.get("host") or "",
+            profile.get("port") or 7000,
+            profile.get("api_key") or "",
+            timeout=timeout,
+        )
+
+    def normalize_backend_role(self, role: str) -> str:
+        role_key = (role or "staff").strip().lower()
+        if role_key in {"admin", "nurse_admin", "nurseadmin"}:
+            return "NURSE_ADMIN"
+        if role_key in {"staff", "nurse", "user"}:
+            return "NURSE"
+        if role_key in {"it_admin", "itadmin", "it"}:
+            return "IT_ADMIN"
+        if role_key in {"verifier", "display_verifier"}:
+            return "VERIFIER"
+        return role.upper()
+
+    def to_backend_role(self, role: str) -> str:
+        role_key = (role or "staff").strip().upper()
+        if role_key in {"ADMIN", "NURSE_ADMIN"}:
+            return "admin"
+        if role_key in {"STAFF", "NURSE"}:
+            return "staff"
+        if role_key == "IT_ADMIN":
+            return "it_admin"
+        return role_key.lower()
 
     def connect(self):
         if self.conn is not None:
@@ -27,11 +64,7 @@ class AuthService:
             self.ensure_local_users()
             return
 
-        config = dict(DB_CONFIG)
-        config.setdefault("connect_timeout", 2)
-        self.conn = psycopg2.connect(**config)
-        self.backend = "postgres"
-        self.ensure_user_columns()
+        raise RuntimeError("Direct PostgreSQL authentication is disabled. Use Server Mode through the Raspberry Pi Control Service.")
 
     def close(self):
         if self.conn:
@@ -82,6 +115,29 @@ class AuthService:
                 cur.close()
 
     def list_users(self):
+        if self.server_mode():
+            result = self.server_client().get_users()
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "Control Service offline or unreachable")
+            data = result.get("data")
+            if isinstance(data, list):
+                rows = data
+            elif isinstance(data, dict):
+                rows = data.get("users") or data.get("items") or data.get("data") or []
+            else:
+                rows = []
+            return [
+                {
+                    "id": row.get("id") or row.get("user_id"),
+                    "username": row.get("username") or "",
+                    "role": self.normalize_backend_role(row.get("role")),
+                    "active": bool(row.get("active", True)),
+                    "password_must_change": bool(row.get("force_password_change") or row.get("password_must_change")),
+                    "created_at": row.get("created_at") or "",
+                }
+                for row in rows
+            ]
+
         self.connect()
         cur = self.conn.cursor()
         if self.backend == "sqlite":
@@ -112,6 +168,12 @@ class AuthService:
         return rows
 
     def create_user(self, username: str, password: str, role: str, must_change_password: bool = True):
+        if self.server_mode():
+            result = self.server_client(timeout=8.0).create_user(username.strip(), password, self.to_backend_role(role))
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "Create user failed through Control Service.")
+            return
+
         self.connect()
         username = username.strip()
         role = role.strip().upper()
@@ -136,6 +198,9 @@ class AuthService:
             cur.close()
 
     def change_password(self, user_id: int, current_password: str, new_password: str):
+        if self.server_mode():
+            raise RuntimeError("Server password change is pending Control Service backend support. Ask IT Admin for the current backend recovery process.")
+
         self.connect()
         if not current_password or not new_password:
             raise ValueError("Current and new password are required.")
@@ -167,6 +232,9 @@ class AuthService:
             cur.close()
 
     def set_temporary_password(self, user_id: int, temporary_password: str):
+        if self.server_mode():
+            raise RuntimeError("Temporary password generation is pending Control Service backend support.")
+
         self.connect()
         if not temporary_password or len(temporary_password) < 8:
             raise ValueError("Temporary password must be at least 8 characters.")
@@ -196,6 +264,35 @@ class AuthService:
             cur.close()
 
     def login(self, username: str, password: str) -> dict:
+        if self.server_mode():
+            client = self.server_client(timeout=8.0)
+            result = client.login(username, password)
+            if not result.get("ok"):
+                return {
+                    "success": False,
+                    "message": result.get("error") or "Control Service offline or unreachable",
+                    "user": None,
+                }
+            data = result.get("data") or {}
+            if "user" in data and isinstance(data.get("user"), dict):
+                data = data["user"]
+            force_password_change = bool(data.get("force_password_change") or data.get("password_must_change"))
+            return {
+                "success": True,
+                "message": "Login successful",
+                "user": {
+                    "id": data.get("id") or data.get("user_id"),
+                    "username": data.get("username") or username,
+                    "full_name": data.get("full_name") or "",
+                    "role": self.normalize_backend_role(data.get("role")),
+                    "backend_role": data.get("role"),
+                    "password_must_change": False,
+                    "force_password_change": force_password_change,
+                    "force_password_change_warning": force_password_change,
+                    "data_source": "server",
+                }
+            }
+
         try:
             self.connect()
             cur = self.conn.cursor()
@@ -237,6 +334,7 @@ class AuthService:
                     "username": db_username,
                     "role": role,
                     "password_must_change": bool(password_must_change),
+                    "data_source": "offline_demo",
                 }
             }
 
