@@ -10,7 +10,7 @@ else:
 ASSETS_DIR = BASE_DIR / "assets"
 
 APP_NAME = "Whisperwood Villa Demo"
-APP_VERSION = "2.0.5.11"
+APP_VERSION = "2.0.5.12"
 APP_CHANNEL = "demo"
 RELEASE_TAG_PREFIX = "demo-v"
 DEFAULT_PI_BASE_URL = "http://localhost:8080"
@@ -42,9 +42,5 @@ ROLE_LABELS = {
 
 DEMO_USERS = [
     ("admin", "admin123", "NURSE_ADMIN"),
-    ("nurseadmin", "admin123", "NURSE_ADMIN"),
-    ("nurse", "admin123", "NURSE"),
-    ("staff", "admin123", "NURSE"),
-    ("verifier", "admin123", "VERIFIER"),
     ("itadmin", "itadmin123", "IT_ADMIN"),
 ]

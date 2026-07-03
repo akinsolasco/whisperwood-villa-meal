@@ -411,12 +411,16 @@ class DashboardWindow(QWidget):
             }
         """)
 
+        self.btn_account_profile = QPushButton("Profile", self.sidebar)
+        self.btn_account_profile.setGeometry(18, 705, 208, 42)
+        self.btn_account_profile.setStyleSheet(self.secondary_btn_style())
+
         self.btn_profile_settings = QPushButton("Settings", self.sidebar)
-        self.btn_profile_settings.setGeometry(18, 705, 208, 42)
+        self.btn_profile_settings.setGeometry(18, 755, 208, 42)
         self.btn_profile_settings.setStyleSheet(self.secondary_btn_style())
 
         self.btn_logout = QPushButton("Logout", self.sidebar)
-        self.btn_logout.setGeometry(18, 755, 208, 42)
+        self.btn_logout.setGeometry(18, 805, 208, 42)
         self.btn_logout.setStyleSheet(self.secondary_btn_style())
 
         # Title area
@@ -556,6 +560,7 @@ class DashboardWindow(QWidget):
         if self.auto_refresh.isVisible():
             controls.append((self.auto_refresh, 24, 10))
         controls.append((self.connection_badge, 28, 10))
+        controls.append((self.btn_account_profile, 42, 10))
         if self.btn_profile_settings.isVisible():
             controls.append((self.btn_profile_settings, 42, 10))
         controls.append((self.btn_logout, 42, 0))
@@ -2349,6 +2354,7 @@ class DashboardWindow(QWidget):
         self.btn_menu_verification.clicked.connect(lambda: self.switch_page(self.page_verification, self.btn_menu_verification))
         self.btn_menu_it_health.clicked.connect(self.show_it_control_sidebar_menu)
         self.btn_menu_logs.clicked.connect(lambda: self.switch_page(self.page_logs, self.btn_menu_logs))
+        self.btn_account_profile.clicked.connect(self.show_account_profile)
         self.btn_profile_settings.clicked.connect(self.show_profile_settings)
         self.btn_logout.clicked.connect(self.handle_logout)
         self.btn_overview_new_resident.clicked.connect(lambda: self.switch_page(self.page_dashboard, self.btn_menu_dashboard))
@@ -2688,6 +2694,15 @@ class DashboardWindow(QWidget):
         self.show_error("Network Required", f"{action_name} requires an active Raspberry Pi Control Service connection.")
         return False
 
+    def safe_get_devices(self) -> List[Dict[str, Any]]:
+        try:
+            try:
+                return self.db.get_devices(suppress_errors=True)
+            except TypeError:
+                return self.db.get_devices()
+        except Exception:
+            return []
+
     def attach_source_document(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -2807,7 +2822,7 @@ class DashboardWindow(QWidget):
             self.load_overview_devices()
 
     def load_overview_devices(self):
-        devices = self.db.get_devices()
+        devices = self.safe_get_devices()
         self.overview_device_table.setRowCount(len(devices))
         for r, d in enumerate(devices):
             values = [
@@ -2825,7 +2840,7 @@ class DashboardWindow(QWidget):
             return
         self.schedule_resident.blockSignals(True)
         self.schedule_resident.clear()
-        devices = self.db.get_devices()
+        devices = self.safe_get_devices()
         self.schedule_resident.addItem(f"All LCD devices ({len(devices)})", "all")
         self.schedule_resident.setCurrentIndex(0)
         self.schedule_resident.blockSignals(False)
@@ -3561,7 +3576,7 @@ class DashboardWindow(QWidget):
     def load_control_devices(self):
         if not hasattr(self, "it_device_table"):
             return
-        devices = self.db.get_devices()
+        devices = self.safe_get_devices()
         offline = sum(1 for d in devices if not d.get("is_online"))
         low_battery = sum(1 for d in devices if d.get("battery_level") is not None and int(d.get("battery_level")) < 20)
         if hasattr(self, "control_device_summary"):
@@ -3628,10 +3643,7 @@ class DashboardWindow(QWidget):
             users = auth.list_users()
         finally:
             auth.close()
-        users = [
-            user for user in users
-            if user.get("username") and self.normalize_role(user.get("role")) in {"NURSE_ADMIN", "IT_ADMIN"}
-        ]
+        users = [user for user in users if user.get("username")]
         for user in users:
             active = bool(user.get("active"))
             must_change = "must change" if user.get("password_must_change") else "password ok"
@@ -3699,7 +3711,7 @@ class DashboardWindow(QWidget):
     def generate_debug_brief(self):
         self.refresh_control_dashboard()
         profile = self.current_control_profile()
-        devices = self.db.get_devices()
+        devices = self.safe_get_devices()
         audit_logs = self.db.get_it_audit_logs(limit=10)
         offline = [d for d in devices if not d.get("is_online")]
         health = self.control_last_results.get("health", {})
@@ -3889,6 +3901,54 @@ class DashboardWindow(QWidget):
         dialog.exec()
         return changed["ok"]
 
+    def show_account_profile(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Profile")
+        dialog.resize(520, 360)
+        dialog.setStyleSheet("QDialog { background-color: #f3f7fb; color: #0f172a; }")
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel("Profile", dialog)
+        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+        layout.addWidget(title)
+
+        guidance = QLabel(
+            "Manage your own account password. Username changes require a Control Service username-change endpoint before they can be safely enabled.",
+            dialog,
+        )
+        guidance.setWordWrap(True)
+        guidance.setStyleSheet("font-size: 12px; color: #64748b;")
+        layout.addWidget(guidance)
+
+        username_edit = QLineEdit(dialog)
+        username_edit.setText(self.current_user.get("username") or "")
+        username_edit.setPlaceholderText("Username")
+        username_edit.setReadOnly(True)
+        username_edit.setStyleSheet(self.input_style())
+        layout.addWidget(username_edit)
+
+        role_label = QLabel(f"Role: {self.role_label()}", dialog)
+        role_label.setStyleSheet("font-size: 13px; color: #334155;")
+        layout.addWidget(role_label)
+
+        username_note = QLabel("Username editing is disabled until backend username-change support is available.", dialog)
+        username_note.setWordWrap(True)
+        username_note.setStyleSheet("font-size: 12px; color: #b45309;")
+        layout.addWidget(username_note)
+
+        buttons = QHBoxLayout()
+        change_password_btn = QPushButton("Change Password", dialog)
+        change_password_btn.setStyleSheet(self.primary_btn_style())
+        close_btn = QPushButton("Close", dialog)
+        close_btn.setStyleSheet(self.secondary_btn_style())
+        buttons.addWidget(change_password_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        change_password_btn.clicked.connect(lambda: self.show_change_password_dialog(force=False))
+        close_btn.clicked.connect(dialog.accept)
+        dialog.exec()
+
     def show_profile_settings(self):
         if not self.is_it_admin():
             self.show_error("Permission Required", "Only IT admins can open Settings.")
@@ -3951,10 +4011,7 @@ class DashboardWindow(QWidget):
                 rows = auth.list_users()
             finally:
                 auth.close()
-            rows = [
-                row for row in rows
-                if row.get("username") and self.normalize_role(row.get("role")) in {"NURSE_ADMIN", "IT_ADMIN"}
-            ]
+            rows = [row for row in rows if row.get("username")]
             users_table.setRowCount(len(rows))
             for r, row in enumerate(rows):
                 values = [
@@ -4020,7 +4077,7 @@ class DashboardWindow(QWidget):
         create_layout.addWidget(password_edit)
 
         role_combo = QComboBox(create_panel)
-        for role in ["NURSE_ADMIN", "IT_ADMIN"]:
+        for role in ["NURSE_ADMIN", "IT_ADMIN", "NURSE", "VERIFIER"]:
             role_combo.addItem(self.role_label(role), role)
         role_combo.setStyleSheet(self.input_style())
         create_layout.addWidget(role_combo)
@@ -4342,7 +4399,7 @@ class DashboardWindow(QWidget):
         current_device = self.selected_device_id()
         self.upd_target.blockSignals(True)
         self.upd_target.clear()
-        for d in self.db.get_devices():
+        for d in self.safe_get_devices():
             label = str(d["device_id"])
             if d.get("resident_name"):
                 label += f" | {d['resident_name']}"
@@ -4362,7 +4419,7 @@ class DashboardWindow(QWidget):
             device_id = self.available_devices_list.currentItem().data(Qt.ItemDataRole.UserRole)
 
         self.available_devices_list.clear()
-        devices = self.db.get_devices()
+        devices = self.safe_get_devices()
 
         self.pair_table.setRowCount(len(devices))
         for r, d in enumerate(devices):
@@ -4816,7 +4873,7 @@ class DashboardWindow(QWidget):
     def save_lcd_schedule(self):
         if not self.require_network_for_write("Saving LCD schedule"):
             return
-        devices = [d for d in self.db.get_devices() if d.get("device_id")]
+        devices = [d for d in self.safe_get_devices() if d.get("device_id")]
         if not devices:
             self.show_error("No devices", "No LCD devices are available to apply the schedule.")
             return
