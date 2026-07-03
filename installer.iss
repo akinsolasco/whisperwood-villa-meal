@@ -1,27 +1,27 @@
 [Setup]
-AppId={{A4C5B8D4-7E5E-4E41-9D1B-1D3F5C1A9A11}
-AppName=Whisperwood Villa
-AppVersion=2.0.6
+AppId={{B74D9E5F-6D74-4F7A-8A2B-5EC6B1C29E44}
+AppName=Whisperwood Villa Live Demo
+AppVersion=2.0.6.1
 AppPublisher=Whisperwood Villa
-DefaultDirName={autopf}\Whisperwood Villa
-DefaultGroupName=Whisperwood Villa
+DefaultDirName={autopf}\Whisperwood Villa Live Demo
+DefaultGroupName=Whisperwood Villa Live Demo
 OutputDir=dist_installer
-OutputBaseFilename=WhisperwoodVillaSetup
+OutputBaseFilename=WhisperwoodVillaLiveDemoSetup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=assets\app_icon.ico
-UninstallDisplayIcon={app}\WhisperwoodVilla.exe
+UninstallDisplayIcon={app}\WhisperwoodVillaLiveDemo.exe
 
 [Files]
-Source: "dist\WhisperwoodVilla\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "dist\WhisperwoodVillaLiveDemo\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{group}\Whisperwood Villa"; Filename: "{app}\WhisperwoodVilla.exe"; IconFilename: "{app}\WhisperwoodVilla.exe"
-Name: "{autodesktop}\Whisperwood Villa"; Filename: "{app}\WhisperwoodVilla.exe"; Tasks: desktopicon
+Name: "{group}\Whisperwood Villa Live Demo"; Filename: "{app}\WhisperwoodVillaLiveDemo.exe"; IconFilename: "{app}\WhisperwoodVillaLiveDemo.exe"
+Name: "{autodesktop}\Whisperwood Villa Live Demo"; Filename: "{app}\WhisperwoodVillaLiveDemo.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Run]
-Filename: "{app}\WhisperwoodVilla.exe"; Description: "Launch Whisperwood Villa"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\WhisperwoodVillaLiveDemo.exe"; Description: "Launch Whisperwood Villa Live Demo"; Flags: nowait postinstall skipifsilent

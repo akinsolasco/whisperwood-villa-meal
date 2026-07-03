@@ -1,8 +1,18 @@
 import sys
 from PyQt6.QtWidgets import QApplication
+from config import APP_CHANNEL
 from ui.splash_screen import SplashScreen
 from ui.login_window import LoginWindow
 from ui.dashboard_window import DashboardWindow
+
+
+LIVE_DEMO_USER = {
+    "id": 0,
+    "username": "ui-review",
+    "role": "NURSE_ADMIN",
+    "data_source": "offline_demo",
+    "password_must_change": False,
+}
 
 
 class AppController:
@@ -11,8 +21,11 @@ class AppController:
         self.login = None
         self.dashboard = None
 
-        self.splash.finished.connect(self.show_login)
-        self._create_login_window()
+        if APP_CHANNEL == "live-demo":
+            self.splash.finished.connect(lambda: self.show_dashboard(dict(LIVE_DEMO_USER)))
+        else:
+            self.splash.finished.connect(self.show_login)
+            self._create_login_window()
 
     def _create_login_window(self):
         if self.login is not None:
@@ -27,6 +40,9 @@ class AppController:
         self.splash.show()
 
     def show_login(self):
+        if APP_CHANNEL == "live-demo":
+            self.show_dashboard(dict(LIVE_DEMO_USER))
+            return
         if self.dashboard is not None:
             try:
                 self.dashboard.close()

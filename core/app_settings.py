@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from config import (
+    APP_CHANNEL,
     APP_DATA_DIR,
     DEFAULT_CONTROL_SERVICE_API_KEY,
     DEFAULT_CONTROL_SERVICE_HOST,
@@ -113,7 +114,7 @@ class AppSettingsStore:
         ]
         profiles[0]["is_active"] = True
         return {
-            "app_mode": APP_MODE_SERVER,
+            "app_mode": APP_MODE_DEMO if APP_CHANNEL == "live-demo" else APP_MODE_SERVER,
             "active_profile_id": profiles[0]["id"],
             "profiles": profiles,
         }
