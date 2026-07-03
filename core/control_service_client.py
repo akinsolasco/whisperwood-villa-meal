@@ -124,21 +124,13 @@ class ControlServiceClient:
 
     def change_password(self, user_id: int, current_password: str, new_password: str, username: str = "") -> Dict[str, Any]:
         return self._request("POST", "/auth/change-password", {
-            "user_id": user_id,
             "username": username,
-            "current_password": current_password,
+            "old_password": current_password,
             "new_password": new_password,
         })
 
     def set_temporary_password(self, user_id: int, temporary_password: str, username: str = "") -> Dict[str, Any]:
-        return self._request("POST", "/auth/temp-password", {
-            "user_id": user_id,
-            "username": username,
-            "temporary_password": temporary_password,
-            "password": temporary_password,
-            "password_must_change": True,
-            "force_password_change": True,
-        })
+        return self._request("POST", "/auth/temp-password", {"username": username})
 
     def get_users(self) -> Dict[str, Any]:
         return self._request("GET", "/users")
@@ -155,7 +147,7 @@ class ControlServiceClient:
             "username": username,
             "password": password,
             "role": role,
-            "password_must_change": bool(must_change_password),
+            "is_active": True,
             "force_password_change": bool(must_change_password),
         }
         if full_name:
@@ -163,7 +155,7 @@ class ControlServiceClient:
         return self._request("POST", "/users", payload)
 
     def set_user_status(self, username: str, active: bool) -> Dict[str, Any]:
-        return self._request("PUT", f"/users/{username}/status", {"active": bool(active)})
+        return self._request("PUT", f"/users/{username}/status", {"is_active": bool(active)})
 
     def get_residents(self) -> Dict[str, Any]:
         return self._request("GET", "/residents")

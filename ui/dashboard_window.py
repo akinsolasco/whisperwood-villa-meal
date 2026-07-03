@@ -3534,7 +3534,7 @@ class DashboardWindow(QWidget):
         temporary_password = self.generate_temporary_password()
         auth = AuthService()
         try:
-            auth.set_temporary_password(user.get("id"), temporary_password, user.get("username"))
+            temporary_password = auth.set_temporary_password(user.get("id"), temporary_password, user.get("username"))
         except Exception as e:
             self.it_recovery_status.setStyleSheet("font-size: 12px; color: #b91c1c;")
             self.it_recovery_status.setText(str(e))

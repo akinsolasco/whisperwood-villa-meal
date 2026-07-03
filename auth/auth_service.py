@@ -274,10 +274,17 @@ class AuthService:
         if self.server_mode():
             if not temporary_password or len(temporary_password) < 8:
                 raise ValueError("Temporary password must be at least 8 characters.")
+            if not username:
+                raise ValueError("Username is required for server temporary password generation.")
             result = self.server_client(timeout=8.0).set_temporary_password(user_id, temporary_password, username)
             if not result.get("ok"):
                 raise RuntimeError(result.get("error") or "Temporary password generation failed through Control Service.")
-            return
+            data = result.get("data") or {}
+            if isinstance(data, dict):
+                generated = data.get("temporary_password") or data.get("temp_password") or data.get("password")
+                if generated:
+                    return generated
+            return temporary_password
 
         self.connect()
         if not temporary_password or len(temporary_password) < 8:
@@ -304,6 +311,7 @@ class AuthService:
                 WHERE id = {marker}
             """, (password_hash, True if self.backend == "postgres" else 1, user_id))
             self.conn.commit()
+            return temporary_password
         finally:
             cur.close()
 
