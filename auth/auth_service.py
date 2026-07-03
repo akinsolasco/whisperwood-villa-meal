@@ -169,7 +169,12 @@ class AuthService:
 
     def create_user(self, username: str, password: str, role: str, must_change_password: bool = True):
         if self.server_mode():
-            result = self.server_client(timeout=8.0).create_user(username.strip(), password, self.to_backend_role(role))
+            result = self.server_client(timeout=8.0).create_user(
+                username.strip(),
+                password,
+                self.to_backend_role(role),
+                must_change_password=must_change_password,
+            )
             if not result.get("ok"):
                 raise RuntimeError(result.get("error") or "Create user failed through Control Service.")
             return
@@ -197,9 +202,43 @@ class AuthService:
         finally:
             cur.close()
 
-    def change_password(self, user_id: int, current_password: str, new_password: str):
+    def set_user_status(self, username: str, active: bool):
+        username = (username or "").strip()
+        if not username:
+            raise ValueError("Username is required.")
         if self.server_mode():
-            raise RuntimeError("Server password change is pending Control Service backend support. Ask IT Admin for the current backend recovery process.")
+            result = self.server_client(timeout=8.0).set_user_status(username, active)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "User status update failed through Control Service.")
+            return
+
+        self.connect()
+        cur = self.conn.cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        try:
+            cur.execute(f"""
+                UPDATE users
+                SET active = {marker},
+                    updated_at = {timestamp}
+                WHERE username = {marker}
+            """, (bool(active) if self.backend == "postgres" else int(bool(active)), username))
+            self.conn.commit()
+            if cur.rowcount == 0:
+                raise ValueError("User account was not found.")
+        finally:
+            cur.close()
+
+    def change_password(self, user_id: int, current_password: str, new_password: str, username: str = ""):
+        if self.server_mode():
+            if not current_password or not new_password:
+                raise ValueError("Current and new password are required.")
+            if len(new_password) < 8:
+                raise ValueError("New password must be at least 8 characters.")
+            result = self.server_client(timeout=8.0).change_password(user_id, current_password, new_password, username)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "Password change failed through Control Service.")
+            return
 
         self.connect()
         if not current_password or not new_password:
@@ -231,9 +270,14 @@ class AuthService:
         finally:
             cur.close()
 
-    def set_temporary_password(self, user_id: int, temporary_password: str):
+    def set_temporary_password(self, user_id: int, temporary_password: str, username: str = ""):
         if self.server_mode():
-            raise RuntimeError("Temporary password generation is pending Control Service backend support.")
+            if not temporary_password or len(temporary_password) < 8:
+                raise ValueError("Temporary password must be at least 8 characters.")
+            result = self.server_client(timeout=8.0).set_temporary_password(user_id, temporary_password, username)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "Temporary password generation failed through Control Service.")
+            return
 
         self.connect()
         if not temporary_password or len(temporary_password) < 8:
@@ -286,9 +330,9 @@ class AuthService:
                     "full_name": data.get("full_name") or "",
                     "role": self.normalize_backend_role(data.get("role")),
                     "backend_role": data.get("role"),
-                    "password_must_change": False,
+                    "password_must_change": force_password_change,
                     "force_password_change": force_password_change,
-                    "force_password_change_warning": force_password_change,
+                    "force_password_change_warning": False,
                     "data_source": "server",
                 }
             }

@@ -74,6 +74,7 @@ class ControlServiceClient:
         json_body: Optional[Dict[str, Any]] = None,
         files: Optional[Dict[str, Any]] = None,
         data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
         require_key: bool = True,
     ) -> Dict[str, Any]:
         if not self.host:
@@ -91,6 +92,7 @@ class ControlServiceClient:
                 json=json_body,
                 files=files,
                 data=data,
+                params=params,
                 timeout=self.timeout,
             )
         except requests.Timeout:
@@ -120,18 +122,48 @@ class ControlServiceClient:
     def login(self, username: str, password: str) -> Dict[str, Any]:
         return self._request("POST", "/auth/login", {"username": username, "password": password})
 
+    def change_password(self, user_id: int, current_password: str, new_password: str, username: str = "") -> Dict[str, Any]:
+        return self._request("POST", "/auth/change-password", {
+            "user_id": user_id,
+            "username": username,
+            "current_password": current_password,
+            "new_password": new_password,
+        })
+
+    def set_temporary_password(self, user_id: int, temporary_password: str, username: str = "") -> Dict[str, Any]:
+        return self._request("POST", "/auth/temp-password", {
+            "user_id": user_id,
+            "username": username,
+            "temporary_password": temporary_password,
+            "password": temporary_password,
+            "password_must_change": True,
+            "force_password_change": True,
+        })
+
     def get_users(self) -> Dict[str, Any]:
         return self._request("GET", "/users")
 
-    def create_user(self, username: str, password: str, role: str, full_name: str = "") -> Dict[str, Any]:
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        role: str,
+        full_name: str = "",
+        must_change_password: bool = True,
+    ) -> Dict[str, Any]:
         payload = {
             "username": username,
             "password": password,
             "role": role,
+            "password_must_change": bool(must_change_password),
+            "force_password_change": bool(must_change_password),
         }
         if full_name:
             payload["full_name"] = full_name
         return self._request("POST", "/users", payload)
+
+    def set_user_status(self, username: str, active: bool) -> Dict[str, Any]:
+        return self._request("PUT", f"/users/{username}/status", {"active": bool(active)})
 
     def get_residents(self) -> Dict[str, Any]:
         return self._request("GET", "/residents")
@@ -142,6 +174,9 @@ class ControlServiceClient:
     def update_resident(self, resident_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("PUT", f"/residents/{resident_id}", payload)
 
+    def archive_resident(self, resident_id: int) -> Dict[str, Any]:
+        return self._request("PUT", f"/residents/{resident_id}/archive", {"archived": True, "active": False})
+
     def upload_document(self, resident_id: int, document_path: str) -> Dict[str, Any]:
         if not document_path or not os.path.isfile(document_path):
             return self._result(False, f"/residents/{resident_id}/document", error="Document file was not found.")
@@ -149,12 +184,18 @@ class ControlServiceClient:
             files = {"document": (os.path.basename(document_path), fh, "application/octet-stream")}
             return self._request("POST", f"/residents/{resident_id}/document", files=files)
 
+    def get_document(self, resident_id: int) -> Dict[str, Any]:
+        return self._request("GET", f"/residents/{resident_id}/document")
+
     def upload_image(self, resident_id: int, image_path: str) -> Dict[str, Any]:
         if not image_path or not os.path.isfile(image_path):
             return self._result(False, f"/residents/{resident_id}/image", error="Image file was not found.")
         with open(image_path, "rb") as fh:
             files = {"image": (os.path.basename(image_path), fh, "application/octet-stream")}
             return self._request("POST", f"/residents/{resident_id}/image", files=files)
+
+    def get_image(self, resident_id: int) -> Dict[str, Any]:
+        return self._request("GET", f"/residents/{resident_id}/image")
 
     def get_devices(self) -> Dict[str, Any]:
         return self._request("GET", "/devices")
@@ -165,14 +206,53 @@ class ControlServiceClient:
     def pair_device(self, resident_id: int, device_id: str) -> Dict[str, Any]:
         return self._request("POST", "/devices/pair", {"resident_id": resident_id, "device_id": device_id})
 
+    def unpair_device(self, device_id: str) -> Dict[str, Any]:
+        return self._request("POST", "/devices/unpair", {"device_id": device_id})
+
     def get_schedules(self) -> Dict[str, Any]:
         return self._request("GET", "/schedules")
 
     def save_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/schedules", payload)
 
-    def get_logs(self) -> Dict[str, Any]:
-        return self._request("GET", "/logs")
+    def get_dashboard_summary(self) -> Dict[str, Any]:
+        return self._request("GET", "/dashboard/summary")
+
+    def create_change_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/resident-change-requests", payload)
+
+    def get_change_requests(self, status: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        return self._request("GET", "/resident-change-requests", params=params)
+
+    def decide_change_request(self, request_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("PUT", f"/resident-change-requests/{request_id}/decision", payload)
+
+    def get_resident_audit(self, limit: int = 200) -> Dict[str, Any]:
+        return self._request("GET", "/resident-audit", params={"limit": limit})
+
+    def get_resident_audit_for_resident(self, resident_id: int, limit: int = 200) -> Dict[str, Any]:
+        return self._request("GET", f"/residents/{resident_id}/audit", params={"limit": limit})
+
+    def create_verification_check(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/verification-checks", payload)
+
+    def get_verification_checks(self, limit: int = 100) -> Dict[str, Any]:
+        return self._request("GET", "/verification-checks", params={"limit": limit})
+
+    def get_logs(self, limit: Optional[int] = None) -> Dict[str, Any]:
+        return self._request("GET", "/logs", params={"limit": limit} if limit else None)
+
+    def get_log(self, log_id: int) -> Dict[str, Any]:
+        return self._request("GET", f"/logs/{log_id}")
+
+    def get_it_audit_logs(self, limit: int = 100) -> Dict[str, Any]:
+        return self._request("GET", "/it-audit-logs", params={"limit": limit})
+
+    def create_it_audit_log(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/it-audit-logs", payload)
 
     def system_status(self) -> Dict[str, Any]:
         return self._request("GET", "/system")

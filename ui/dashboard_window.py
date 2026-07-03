@@ -3018,6 +3018,9 @@ class DashboardWindow(QWidget):
         if not document_path:
             self.show_error("No document", "No source document is attached to this audit entry.")
             return
+        if str(document_path).lower().startswith(("http://", "https://")):
+            QDesktopServices.openUrl(QUrl(str(document_path)))
+            return
         if not os.path.exists(document_path):
             self.show_error("Document not found", f"The source document was not found:\n{document_path}")
             return
@@ -3531,7 +3534,7 @@ class DashboardWindow(QWidget):
         temporary_password = self.generate_temporary_password()
         auth = AuthService()
         try:
-            auth.set_temporary_password(user.get("id"), temporary_password)
+            auth.set_temporary_password(user.get("id"), temporary_password, user.get("username"))
         except Exception as e:
             self.it_recovery_status.setStyleSheet("font-size: 12px; color: #b91c1c;")
             self.it_recovery_status.setText(str(e))
@@ -3606,14 +3609,14 @@ class DashboardWindow(QWidget):
             fixes = [
                 "Confirm this deployment build includes the site Raspberry Pi address.",
                 "Confirm the Control Service port is 7000.",
-                "Use the login Server Connection test if a support technician needs to verify connectivity.",
+                "Ask IT to verify the Control Service is listening on the configured host and port.",
             ]
         elif not profile.get("api_key"):
             summary = "Control Service profile is missing an API key."
             cause = "Protected requests require X-Whisperwood-Key."
             fixes = [
                 "Confirm this deployment build includes the Control Service API key.",
-                "Use the login Server Connection test if a support technician needs to verify connectivity.",
+                "Ask IT to verify the deployed API key matches the Control Service configuration.",
             ]
         elif health.get("ok"):
             op_status = self.control_value(operation.get("data") or {}, "status", default="operation status pending")
@@ -3684,7 +3687,7 @@ class DashboardWindow(QWidget):
     def show_force_password_change_warning(self):
         self.show_info(
             "Temporary password",
-            "The Control Service marked this account for password change. Server password-change support is pending, so contact IT Admin for the approved recovery process.",
+            "The Control Service marked this account for password change. Create a new password before continuing.",
         )
 
     def show_change_password_dialog(self, force=False):
@@ -3744,7 +3747,12 @@ class DashboardWindow(QWidget):
                 return
             auth = AuthService()
             try:
-                auth.change_password(self.current_user.get("id"), current_password.text(), new_password.text())
+                auth.change_password(
+                    self.current_user.get("id"),
+                    current_password.text(),
+                    new_password.text(),
+                    self.current_user.get("username"),
+                )
             except Exception as e:
                 status.setText(str(e))
                 return
@@ -3799,6 +3807,22 @@ class DashboardWindow(QWidget):
         users_table.setStyleSheet(self.table_style())
         layout.addWidget(users_table)
 
+        status_panel = QFrame(dialog)
+        status_panel.setStyleSheet("QFrame { background-color: #ffffff; border: 1px solid #d8e1ea; border-radius: 8px; }")
+        status_layout = QHBoxLayout(status_panel)
+        status_layout.setContentsMargins(12, 12, 12, 12)
+        status_text = QLabel("Select a user to activate or deactivate access.", status_panel)
+        status_text.setWordWrap(True)
+        status_text.setStyleSheet("font-size: 12px; color: #334155;")
+        status_layout.addWidget(status_text)
+        activate_btn = QPushButton("Activate User", status_panel)
+        activate_btn.setStyleSheet(self.secondary_btn_style())
+        deactivate_btn = QPushButton("Deactivate User", status_panel)
+        deactivate_btn.setStyleSheet(self.secondary_btn_style())
+        status_layout.addWidget(activate_btn)
+        status_layout.addWidget(deactivate_btn)
+        layout.addWidget(status_panel)
+
         def load_users():
             auth = AuthService()
             try:
@@ -3815,9 +3839,33 @@ class DashboardWindow(QWidget):
                     self.db.format_timestamp(row.get("created_at")),
                 ]
                 for c, value in enumerate(values):
-                    users_table.setItem(r, c, QTableWidgetItem(str(value)))
+                    item = QTableWidgetItem(str(value))
+                    item.setData(Qt.ItemDataRole.UserRole, row)
+                    users_table.setItem(r, c, item)
 
         load_users()
+
+        def selected_settings_user():
+            item = users_table.item(users_table.currentRow(), 0)
+            return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+        def set_selected_user_status(active):
+            user = selected_settings_user()
+            if not user:
+                self.show_error("No user selected", "Select a user account first.")
+                return
+            username = user.get("username")
+            if username == self.current_user.get("username") and not active:
+                self.show_error("Not allowed", "You cannot deactivate the account you are currently using.")
+                return
+            auth = AuthService()
+            try:
+                auth.set_user_status(username, active)
+            except Exception as e:
+                self.show_error("User status failed", str(e))
+            finally:
+                auth.close()
+            load_users()
 
         create_panel = QFrame(dialog)
         create_panel.setStyleSheet("QFrame { background-color: #ffffff; border: 1px solid #d8e1ea; border-radius: 8px; }")
@@ -3863,6 +3911,9 @@ class DashboardWindow(QWidget):
 
         create_btn.clicked.connect(create_user)
         create_panel.setVisible(self.is_nurse_admin())
+        status_panel.setVisible(self.is_nurse_admin())
+        activate_btn.clicked.connect(lambda: set_selected_user_status(True))
+        deactivate_btn.clicked.connect(lambda: set_selected_user_status(False))
         change_password_btn.clicked.connect(lambda: self.show_change_password_dialog(force=False))
 
         close_btn = QPushButton("Close", dialog)

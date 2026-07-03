@@ -123,6 +123,15 @@ class ServerDataService:
             "allergies": data.get("allergies"),
             "note": data.get("note"),
             "drinks": data.get("drinks"),
+            "schedule": data.get("schedule"),
+            "source_document": data.get("source_document"),
+            "safety_review_note": data.get("safety_review_note"),
+            "needs_safety_review": bool(data.get("needs_safety_review", False)),
+            "lcd_image_path": data.get("lcd_image_path"),
+            "lcd_schedule_enabled": bool(data.get("lcd_schedule_enabled", False)),
+            "lcd_on_time": data.get("lcd_on_time"),
+            "lcd_off_time": data.get("lcd_off_time"),
+            "sleep_if_no_image": bool(data.get("sleep_if_no_image", False)),
             "active": bool(data.get("active", True)),
         }
 
@@ -166,8 +175,8 @@ class ServerDataService:
             if not result.get("ok"):
                 raise RuntimeError(result.get("error") or "Resident image upload failed.")
 
-    def delete_resident(self, _resident_id):
-        raise RuntimeError("Resident delete is not available in Server Mode because the Control Service does not expose a delete endpoint.")
+    def delete_resident(self, resident_id):
+        self._require_ok(self.client(timeout=8.0).archive_resident(resident_id))
 
     def _normalize_device(self, row: Dict[str, Any], residents: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         row = dict(row or {})
@@ -204,8 +213,8 @@ class ServerDataService:
     def pair_resident_to_device(self, resident_id, device_id):
         self._require_ok(self.client(timeout=8.0).pair_device(resident_id, device_id))
 
-    def unpair_device(self, _device_id):
-        raise RuntimeError("Unpairing is pending Control Service backend support.")
+    def unpair_device(self, device_id):
+        self._require_ok(self.client(timeout=8.0).unpair_device(device_id))
 
     def save_resident_schedule(self, resident_id, enabled, on_time, off_time, sleep_if_no_image):
         row = self.get_resident(resident_id) or {}
@@ -247,17 +256,24 @@ class ServerDataService:
 
     def get_recent_logs(self, limit=50):
         try:
-            rows = self._items(self.client().get_logs(), "logs", "items")[:limit]
+            rows = self._items(self.client().get_logs(limit=limit), "logs", "items")[:limit]
             return [self._normalize_log(row) for row in rows]
         except Exception:
             return []
 
     def get_log(self, log_id):
-        return next((row for row in self.get_recent_logs(limit=500) if str(row.get("id")) == str(log_id)), None)
+        try:
+            return self._normalize_log(self._row(self.client().get_log(log_id), "log"))
+        except Exception:
+            return next((row for row in self.get_recent_logs(limit=500) if str(row.get("id")) == str(log_id)), None)
 
     def get_resident_audit_logs(self, limit=200):
-        logs = self.get_recent_logs(limit=limit)
-        return [row for row in logs if "resident" in (row.get("action_type") or "").lower()]
+        try:
+            rows = self._items(self.client().get_resident_audit(limit=limit), "audit", "logs", "items")[:limit]
+            return [self._normalize_log(row) for row in rows]
+        except Exception:
+            logs = self.get_recent_logs(limit=limit)
+            return [row for row in logs if "resident" in (row.get("action_type") or "").lower()]
 
     def _normalize_log(self, row: Dict[str, Any]) -> Dict[str, Any]:
         row = dict(row or {})
@@ -279,28 +295,130 @@ class ServerDataService:
             "response_json": row.get("response_json") or row.get("response"),
         }
 
-    def create_change_request(self, *_args, **_kwargs):
-        raise RuntimeError("Staff review requests are pending Control Service backend support.")
+    def _normalize_change_request(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        row = dict(row or {})
+        proposed = row.get("proposed_payload") or row.get("payload") or row.get("proposed")
+        return {
+            **row,
+            "id": row.get("id") or row.get("request_id"),
+            "resident_id": row.get("resident_id"),
+            "resident_uid": row.get("resident_uid") or row.get("uid") or "",
+            "proposed_payload": self._parse_json_field(proposed),
+            "comment": row.get("comment") or row.get("note") or "",
+            "status": row.get("status") or "PENDING",
+            "requested_by_user_id": row.get("requested_by_user_id") or row.get("requested_by_id"),
+            "requested_by_username": row.get("requested_by_username") or row.get("requested_by") or row.get("username") or "",
+            "reviewed_by_user_id": row.get("reviewed_by_user_id") or row.get("reviewed_by_id"),
+            "reviewed_by_username": row.get("reviewed_by_username") or row.get("reviewed_by") or "",
+            "review_note": row.get("review_note") or row.get("decision_note") or "",
+            "full_name": row.get("full_name") or row.get("resident_name") or "",
+            "room": row.get("room") or "",
+            "created_at": row.get("created_at") or row.get("timestamp") or "",
+            "reviewed_at": row.get("reviewed_at") or "",
+        }
 
-    def get_change_requests(self, *_args, **_kwargs):
-        return []
+    def create_change_request(self, resident_id, resident_uid, proposed_payload, comment, requested_by_user_id, requested_by_username):
+        payload = {
+            "resident_id": resident_id,
+            "resident_uid": resident_uid,
+            "proposed_payload": proposed_payload,
+            "comment": comment,
+            "requested_by_user_id": requested_by_user_id,
+            "requested_by_username": requested_by_username,
+        }
+        self._require_ok(self.client(timeout=8.0).create_change_request(payload))
 
-    def update_change_request_status(self, *_args, **_kwargs):
-        raise RuntimeError("Review approval queue is pending Control Service backend support.")
+    def get_change_requests(self, status=None, limit=100):
+        try:
+            rows = self._items(self.client().get_change_requests(status=status, limit=limit), "requests", "items")
+            return [self._normalize_change_request(row) for row in rows]
+        except Exception:
+            return []
 
-    def create_verification_check(self, *_args, **_kwargs):
-        raise RuntimeError("Display verification history is pending Control Service backend support.")
+    def update_change_request_status(self, request_id, status, reviewed_by_user_id, reviewed_by_username, review_note=""):
+        payload = {
+            "status": status,
+            "reviewed_by_user_id": reviewed_by_user_id,
+            "reviewed_by_username": reviewed_by_username,
+            "review_note": review_note,
+        }
+        self._require_ok(self.client(timeout=8.0).decide_change_request(request_id, payload))
 
-    def get_verification_checks(self, *_args, **_kwargs):
-        return []
+    def create_verification_check(self, resident_id, resident_uid, device_id, status, note, checked_by_user_id, checked_by_username):
+        payload = {
+            "resident_id": resident_id,
+            "resident_uid": resident_uid,
+            "device_id": device_id,
+            "status": status,
+            "note": note,
+            "checked_by_user_id": checked_by_user_id,
+            "checked_by_username": checked_by_username,
+        }
+        self._require_ok(self.client(timeout=8.0).create_verification_check(payload))
 
-    def log_it_audit(self, *_args, **_kwargs):
-        return None
+    def _normalize_verification_check(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        row = dict(row or {})
+        return {
+            **row,
+            "id": row.get("id") or row.get("verification_id"),
+            "resident_id": row.get("resident_id"),
+            "resident_uid": row.get("resident_uid") or row.get("uid") or "",
+            "device_id": row.get("device_id") or row.get("device") or "",
+            "status": row.get("status") or "",
+            "note": row.get("note") or "",
+            "checked_by_user_id": row.get("checked_by_user_id") or row.get("checked_by_id"),
+            "checked_by_username": row.get("checked_by_username") or row.get("checked_by") or row.get("username") or "",
+            "full_name": row.get("full_name") or row.get("resident_name") or "",
+            "room": row.get("room") or "",
+            "created_at": row.get("created_at") or row.get("timestamp") or "",
+        }
+
+    def get_verification_checks(self, limit=100):
+        try:
+            rows = self._items(self.client().get_verification_checks(limit=limit), "checks", "verification_checks", "items")
+            return [self._normalize_verification_check(row) for row in rows]
+        except Exception:
+            return []
+
+    def log_it_audit(self, username, action, target, result, message):
+        payload = {
+            "username": username,
+            "action": action,
+            "target": target,
+            "result": result,
+            "message": message,
+        }
+        self.client(timeout=6.0).create_it_audit_log(payload)
 
     def get_it_audit_logs(self, limit=100):
-        return self.get_recent_logs(limit=limit)
+        try:
+            rows = self._items(self.client().get_it_audit_logs(limit=limit), "logs", "items")
+        except Exception:
+            return []
+        return [self._normalize_it_audit_log(row) for row in rows]
+
+    def _normalize_it_audit_log(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        row = dict(row or {})
+        return {
+            **row,
+            "id": row.get("id") or row.get("log_id"),
+            "created_at": row.get("created_at") or row.get("timestamp") or row.get("time") or "",
+            "username": row.get("username") or row.get("user") or "",
+            "action": row.get("action") or row.get("action_type") or "",
+            "target": row.get("target") or row.get("device_id") or row.get("resident_uid") or "",
+            "result": row.get("result") or ("Success" if row.get("success") else "Failed" if "success" in row else ""),
+            "message": row.get("message") or "",
+        }
 
     def get_dashboard_summary(self):
+        try:
+            summary = self._row(self.client().get_dashboard_summary(), "summary")
+            if summary:
+                summary.setdefault("database_mode", "server")
+                summary.setdefault("recent_activity", summary.get("recent_activity_today", summary.get("recent_activity", 0)))
+                return summary
+        except Exception:
+            pass
         residents = self.get_residents()
         devices = self.get_devices(suppress_errors=True)
         logs = self.get_recent_logs(limit=500)
