@@ -6,14 +6,14 @@ import string
 import time
 from typing import Optional, List, Dict, Any
 
-from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, pyqtSignal, QEvent, QPoint, QSize
 from PyQt6.QtGui import QCursor, QPixmap, QGuiApplication, QTextDocument, QPageSize, QDesktopServices
 from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu
 )
 
 from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
@@ -353,6 +353,7 @@ class DashboardWindow(QWidget):
         ]
 
         for b in self.nav_buttons:
+            b.setIconSize(QSize(18, 18))
             b.setStyleSheet("""
                 QPushButton {
                     text-align: left;
@@ -369,6 +370,7 @@ class DashboardWindow(QWidget):
                     color: #0f172a;
                 }
             """)
+        self.apply_sidebar_icons()
 
         self.btn_refresh_devices = QPushButton("Refresh", self.sidebar)
         self.btn_refresh_devices.setGeometry(18, 590, 208, 42)
@@ -516,6 +518,7 @@ class DashboardWindow(QWidget):
 
         self.pages.setCurrentWidget(self.page_overview)
         self.set_active_menu(self.btn_menu_overview)
+        self.build_sidebar_it_control_menu()
         self.strip_text_only_label_frames()
         self.min_btn.setText("-")
         self.max_btn.setText("[]")
@@ -575,6 +578,75 @@ class DashboardWindow(QWidget):
         pages_width = min(self.page_base_width, available_width)
         pages_x = 280 + max(0, (available_width - pages_width) // 2)
         self.pages.setGeometry(pages_x, 95, pages_width, max(500, self.container.height() - 115))
+
+    def apply_sidebar_icons(self):
+        icon_map = {
+            self.btn_menu_overview: QStyle.StandardPixmap.SP_DesktopIcon,
+            self.btn_menu_dashboard: QStyle.StandardPixmap.SP_FileDialogInfoView,
+            self.btn_menu_approvals: QStyle.StandardPixmap.SP_DialogApplyButton,
+            self.btn_menu_resident_audit: QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            self.btn_menu_pairing: QStyle.StandardPixmap.SP_DriveNetIcon,
+            self.btn_menu_updates: QStyle.StandardPixmap.SP_MediaPlay,
+            self.btn_menu_verification: QStyle.StandardPixmap.SP_DialogYesButton,
+            self.btn_menu_it_health: QStyle.StandardPixmap.SP_ComputerIcon,
+            self.btn_menu_logs: QStyle.StandardPixmap.SP_FileDialogContentsView,
+        }
+        for button, icon_key in icon_map.items():
+            button.setIcon(self.style().standardIcon(icon_key))
+            button.setIconSize(QSize(18, 18))
+
+    def build_sidebar_it_control_menu(self):
+        self.it_control_sidebar_menu = QMenu(self)
+        self.it_control_sidebar_menu.setStyleSheet("""
+            QMenu {
+                background-color: #ffffff;
+                color: #0f172a;
+                border: 1px solid #d8e1ea;
+                border-radius: 8px;
+                padding: 6px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QMenu::item {
+                padding: 8px 28px 8px 10px;
+                border-radius: 6px;
+            }
+            QMenu::item:selected {
+                background-color: #eef4f8;
+                color: #0f172a;
+            }
+        """)
+        sections = [
+            (0, "Dashboard", "dashboard"),
+            (1, "Services", "services"),
+            (2, "Devices", "devices"),
+            (3, "OTA", "ota"),
+            (4, "Backups", "backups"),
+            (5, "Logs", "logs"),
+            (6, "AI Debug", "ai"),
+        ]
+        for index, label, icon_key in sections:
+            action = self.it_control_sidebar_menu.addAction(self.control_section_icon(icon_key), label)
+            action.triggered.connect(lambda _checked=False, idx=index: self.open_it_control_section(idx))
+        self.btn_menu_it_health.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "btn_menu_it_health", None) and event.type() == QEvent.Type.Enter:
+            self.show_it_control_sidebar_menu()
+        return super().eventFilter(watched, event)
+
+    def show_it_control_sidebar_menu(self):
+        if not getattr(self, "it_control_sidebar_menu", None) or not self.btn_menu_it_health.isVisible():
+            return
+        pos = self.btn_menu_it_health.mapToGlobal(QPoint(0, self.btn_menu_it_health.height() + 2))
+        self.it_control_sidebar_menu.popup(pos)
+
+    def open_it_control_section(self, index):
+        if self.pages.currentWidget() != self.page_it_health:
+            self.switch_page(self.page_it_health, self.btn_menu_it_health)
+        else:
+            self.set_active_menu(self.btn_menu_it_health)
+        self.set_it_control_section(index)
 
     def card_style(self):
         return "background-color: #ffffff; border-radius: 8px; border: 1px solid #d8e1ea;"
@@ -1366,7 +1438,7 @@ class DashboardWindow(QWidget):
         title.setGeometry(24, 18, 360, 32)
         title.setStyleSheet("font-size: 24px; font-weight: 800; color: #0f172a;")
 
-        subtitle = QLabel("Raspberry Pi Control Service, network diagnostics, service control, future OTA, backups, logs, and AI guidance.", header)
+        subtitle = QLabel("Use the IT Control Center menu on the left to open dashboard, services, devices, logs, and diagnostics.", header)
         subtitle.setGeometry(24, 56, 760, 22)
         subtitle.setStyleSheet("font-size: 13px; color: #475569;")
 
@@ -1378,9 +1450,11 @@ class DashboardWindow(QWidget):
         section_label = QLabel("Control Section", header)
         section_label.setGeometry(24, 84, 130, 20)
         section_label.setStyleSheet(self.label_style())
+        section_label.setVisible(False)
 
         self.it_control_section_combo = QComboBox(header)
         self.it_control_section_combo.setGeometry(160, 78, 300, 34)
+        self.it_control_section_combo.setVisible(False)
         self.it_control_section_combo.setStyleSheet("""
             QComboBox {
                 background-color: #ffffff;
@@ -2273,7 +2347,7 @@ class DashboardWindow(QWidget):
         self.btn_menu_pairing.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_menu_updates.clicked.connect(lambda: self.switch_page(self.page_updates, self.btn_menu_updates))
         self.btn_menu_verification.clicked.connect(lambda: self.switch_page(self.page_verification, self.btn_menu_verification))
-        self.btn_menu_it_health.clicked.connect(lambda: self.switch_page(self.page_it_health, self.btn_menu_it_health))
+        self.btn_menu_it_health.clicked.connect(self.show_it_control_sidebar_menu)
         self.btn_menu_logs.clicked.connect(lambda: self.switch_page(self.page_logs, self.btn_menu_logs))
         self.btn_profile_settings.clicked.connect(self.show_profile_settings)
         self.btn_logout.clicked.connect(self.handle_logout)
@@ -2554,7 +2628,7 @@ class DashboardWindow(QWidget):
         self.base_url_edit.setEnabled(False)
         self.btn_refresh_devices.setVisible(self.can_view_technical() or self.is_nurse_admin())
         self.auto_refresh.setVisible(self.can_view_technical() or self.is_nurse_admin())
-        self.btn_profile_settings.setVisible(self.is_nurse_admin())
+        self.btn_profile_settings.setVisible(self.is_it_admin())
         self.position_window_controls()
 
         field_widgets = [
@@ -3170,6 +3244,41 @@ class DashboardWindow(QWidget):
             return default
         return str(current)
 
+    def control_any_value(self, data, *keys, default="Pending backend support"):
+        for key in keys:
+            value = self.control_value(data, key, default=None)
+            if value not in (None, ""):
+                return value
+        return default
+
+    def control_percent_value(self, data, *keys, default="Pending backend support"):
+        for key in keys:
+            if not isinstance(data, dict) or key not in data:
+                continue
+            value = data.get(key)
+            if value in (None, ""):
+                continue
+            if isinstance(value, str) and value.strip().endswith("%"):
+                return value.strip()
+            try:
+                return f"{float(value):.1f}%"
+            except (TypeError, ValueError):
+                return str(value)
+        return default
+
+    def control_ip_value(self, data, *keys, default="Pending backend support"):
+        for key in keys:
+            if not isinstance(data, dict) or key not in data:
+                continue
+            value = data.get(key)
+            if isinstance(value, list):
+                values = [str(item).strip() for item in value if str(item).strip()]
+                if values:
+                    return ", ".join(values)
+            if value not in (None, ""):
+                return str(value)
+        return default
+
     def control_status_text(self, result):
         if result.get("ok"):
             return "Connected"
@@ -3177,6 +3286,9 @@ class DashboardWindow(QWidget):
 
     def load_it_health(self):
         if not hasattr(self, "it_control_stack"):
+            return
+        if self.it_control_stack.currentIndex() == 0:
+            self.refresh_control_dashboard()
             return
         if hasattr(self, "control_profile_combo"):
             self.load_control_profiles()
@@ -3285,7 +3397,7 @@ class DashboardWindow(QWidget):
             self.control_value(health_data, "hostname", default=self.control_value(network_data, "hostname"))
         )
         self.control_network_labels["lan_ip"].setText(
-            self.control_value(network_data, "lan_ip", default=self.control_value(network_data, "ip"))
+            self.control_ip_value(network_data, "lan_ips", "lan_ip", "ip")
         )
         self.control_network_labels["tailscale_ip"].setText(
             self.control_value(network_data, "tailscale_ip")
@@ -3415,11 +3527,11 @@ class DashboardWindow(QWidget):
         self.control_dashboard_labels["hostname"].setText(
             self.control_value(health.get("data") or {}, "hostname", default=self.control_value(network, "hostname"))
         )
-        self.control_dashboard_labels["lan_ip"].setText(self.control_value(network, "lan_ip", default=self.control_value(network, "ip")))
+        self.control_dashboard_labels["lan_ip"].setText(self.control_ip_value(network, "lan_ips", "lan_ip", "ip"))
         self.control_dashboard_labels["tailscale_ip"].setText(self.control_value(tailscale, "ip", default=self.control_value(network, "tailscale_ip")))
-        self.control_dashboard_labels["cpu"].setText(self.control_value(system, "cpu_usage", default=self.control_value(system, "cpu")))
-        self.control_dashboard_labels["memory"].setText(self.control_value(system, "memory_usage", default=self.control_value(system, "memory")))
-        self.control_dashboard_labels["disk"].setText(self.control_value(system, "disk_usage", default=self.control_value(system, "disk")))
+        self.control_dashboard_labels["cpu"].setText(self.control_percent_value(system, "cpu_percent", "cpu_usage", "cpu"))
+        self.control_dashboard_labels["memory"].setText(self.control_percent_value(system, "memory_percent", "memory_usage", "memory"))
+        self.control_dashboard_labels["disk"].setText(self.control_percent_value(system, "disk_percent", "disk_usage", "disk"))
         self.control_dashboard_labels["operation"].setText(self.control_value(operation, "status", default=self.control_status_text(results["operation"])))
         self.control_dashboard_labels["refreshed"].setText(time.strftime("%Y-%m-%d %H:%M:%S"))
         self.update_control_network_labels(health)
@@ -3438,7 +3550,13 @@ class DashboardWindow(QWidget):
         )
         self.control_service_labels["version"].setText(self.control_value(health.get("data") or {}, "version"))
         self.control_service_labels["uptime"].setText(self.control_value(health.get("data") or {}, "uptime"))
-        self.control_service_labels["last_restart"].setText("Pending backend support")
+        self.control_service_labels["last_restart"].setText(
+            self.control_value(
+                health.get("data") or {},
+                "last_restart",
+                default=self.control_value(operation.get("data") or {}, "last_restart", default="Not reported"),
+            )
+        )
 
     def load_control_devices(self):
         if not hasattr(self, "it_device_table"):
@@ -3510,6 +3628,10 @@ class DashboardWindow(QWidget):
             users = auth.list_users()
         finally:
             auth.close()
+        users = [
+            user for user in users
+            if user.get("username") and self.normalize_role(user.get("role")) in {"NURSE_ADMIN", "IT_ADMIN"}
+        ]
         for user in users:
             active = bool(user.get("active"))
             must_change = "must change" if user.get("password_must_change") else "password ok"
@@ -3768,8 +3890,8 @@ class DashboardWindow(QWidget):
         return changed["ok"]
 
     def show_profile_settings(self):
-        if not self.is_nurse_admin():
-            self.show_error("Permission Required", "Only admins can open Settings.")
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can open Settings.")
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
@@ -3779,7 +3901,7 @@ class DashboardWindow(QWidget):
 
         header = QLabel(
             f"Signed in as {self.current_user.get('username', 'admin')} | {self.role_label()}\n"
-            "Admin settings manage staff access and your own password. Forgotten-password recovery is handled by IT Admin."
+            "IT settings manage system users and your own password."
         )
         header.setWordWrap(True)
         header.setStyleSheet("font-size: 13px; color: #334155; background: transparent; border: none;")
@@ -3789,7 +3911,7 @@ class DashboardWindow(QWidget):
         password_panel.setStyleSheet("QFrame { background-color: #ffffff; border: 1px solid #d8e1ea; border-radius: 8px; }")
         password_layout = QHBoxLayout(password_panel)
         password_layout.setContentsMargins(12, 12, 12, 12)
-        password_text = QLabel("Account security: change your password here. Temporary password requests go to IT Admin.", password_panel)
+        password_text = QLabel("Account security: change your password here. Temporary password recovery is handled from this IT area.", password_panel)
         password_text.setWordWrap(True)
         password_text.setStyleSheet("font-size: 12px; color: #334155;")
         password_layout.addWidget(password_text)
@@ -3829,6 +3951,10 @@ class DashboardWindow(QWidget):
                 rows = auth.list_users()
             finally:
                 auth.close()
+            rows = [
+                row for row in rows
+                if row.get("username") and self.normalize_role(row.get("role")) in {"NURSE_ADMIN", "IT_ADMIN"}
+            ]
             users_table.setRowCount(len(rows))
             for r, row in enumerate(rows):
                 values = [
@@ -3858,6 +3984,16 @@ class DashboardWindow(QWidget):
             if username == self.current_user.get("username") and not active:
                 self.show_error("Not allowed", "You cannot deactivate the account you are currently using.")
                 return
+            if not active:
+                answer = QMessageBox.question(
+                    self,
+                    "Deactivate user",
+                    f"Deactivate {username}? This removes login access but keeps audit history.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
             auth = AuthService()
             try:
                 auth.set_user_status(username, active)
@@ -3884,7 +4020,7 @@ class DashboardWindow(QWidget):
         create_layout.addWidget(password_edit)
 
         role_combo = QComboBox(create_panel)
-        for role in ["NURSE", "NURSE_ADMIN", "VERIFIER"]:
+        for role in ["NURSE_ADMIN", "IT_ADMIN"]:
             role_combo.addItem(self.role_label(role), role)
         role_combo.setStyleSheet(self.input_style())
         create_layout.addWidget(role_combo)
@@ -3895,8 +4031,8 @@ class DashboardWindow(QWidget):
         layout.addWidget(create_panel)
 
         def create_user():
-            if not self.is_nurse_admin():
-                self.show_error("Permission Required", "Only admins can create users.")
+            if not self.is_it_admin():
+                self.show_error("Permission Required", "Only IT admins can create users.")
                 return
             auth = AuthService()
             try:
@@ -3910,8 +4046,9 @@ class DashboardWindow(QWidget):
             load_users()
 
         create_btn.clicked.connect(create_user)
-        create_panel.setVisible(self.is_nurse_admin())
-        status_panel.setVisible(self.is_nurse_admin())
+        deactivate_btn.setText("Delete / Deactivate User")
+        create_panel.setVisible(self.is_it_admin())
+        status_panel.setVisible(self.is_it_admin())
         activate_btn.clicked.connect(lambda: set_selected_user_status(True))
         deactivate_btn.clicked.connect(lambda: set_selected_user_status(False))
         change_password_btn.clicked.connect(lambda: self.show_change_password_dialog(force=False))

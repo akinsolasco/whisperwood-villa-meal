@@ -131,7 +131,7 @@ class AuthService:
                     "id": row.get("id") or row.get("user_id"),
                     "username": row.get("username") or "",
                     "role": self.normalize_backend_role(row.get("role")),
-                    "active": bool(row.get("active", True)),
+                    "active": bool(row.get("active", row.get("is_active", True))),
                     "password_must_change": bool(row.get("force_password_change") or row.get("password_must_change")),
                     "created_at": row.get("created_at") or "",
                 }
