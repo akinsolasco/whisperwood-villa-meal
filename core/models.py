@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 PALETTE = ["WHITE", "BLACK", "RED", "YELLOW", "BLUE", "GREEN"]
-SECTIONS = ["NAME", "ROOM", "DIET", "ALLERGIES", "NOTE", "DRINKS"]
+SECTIONS = ["NAME", "ROOM", "DIET", "TEXTURE", "FLUIDS", "NOTE", "DRINKS"]
 
 
 def auto_fg_for_bg(bg: str) -> str:

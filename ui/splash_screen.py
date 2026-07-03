@@ -41,7 +41,7 @@ class SplashScreen(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
 
-        self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
+        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo.jpg"
         self.progress_value = 0
         self.message_index = 0
         self.update_checked = False
@@ -72,7 +72,7 @@ class SplashScreen(QtWidgets.QWidget):
         """)
 
         self.logo_card = QtWidgets.QFrame(self.container)
-        self.logo_card.setGeometry(220, 34, 320, 110)
+        self.logo_card.setGeometry(150, 34, 460, 118)
         self.logo_card.setStyleSheet("""
             QFrame {
                 background-color: #0f0f0f;
@@ -82,12 +82,12 @@ class SplashScreen(QtWidgets.QWidget):
         """)
 
         self.logo = QtWidgets.QLabel(self.logo_card)
-        self.logo.setGeometry(20, 10, 280, 90)
+        self.logo.setGeometry(20, 10, 420, 98)
         self.logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
         if self.logo_path.exists():
             pix = QtGui.QPixmap(str(self.logo_path)).scaled(
-                230, 90,
+                410, 96,
                 QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation
             )

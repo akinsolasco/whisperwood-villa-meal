@@ -1,4 +1,4 @@
-name: Build and Release Windows Live Demo App
+name: Build and Release Enhanced Living Live Demo App
 
 on:
   push:
@@ -29,13 +29,13 @@ jobs:
       - name: Verify icon exists
         shell: powershell
         run: |
-          if (!(Test-Path "assets/app_icon.ico")) {
-            Write-Error "Missing assets/app_icon.ico"
+          if (!(Test-Path "assets/enhanced_living_whisperwood_icon.ico")) {
+            Write-Error "Missing assets/enhanced_living_whisperwood_icon.ico"
           }
 
       - name: Build app with PyInstaller
         run: |
-          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVillaLiveDemo --icon assets/app_icon.ico --add-data "assets;assets" main.py
+          pyinstaller --noconfirm --windowed --onedir --name EnhancedLivingWhisperwoodLiveDemo --icon assets/enhanced_living_whisperwood_icon.ico --add-data "assets;assets" main.py
 
       - name: Install Inno Setup
         shell: powershell
@@ -50,13 +50,13 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WhisperwoodVillaLiveDemo-installer
-          path: dist_installer/WhisperwoodVillaLiveDemoSetup.exe
+          name: EnhancedLivingWhisperwoodLiveDemo-installer
+          path: dist_installer/EnhancedLivingWhisperwoodLiveDemoSetup.exe
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/live-demo-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist_installer/WhisperwoodVillaLiveDemoSetup.exe
+          files: dist_installer/EnhancedLivingWhisperwoodLiveDemoSetup.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

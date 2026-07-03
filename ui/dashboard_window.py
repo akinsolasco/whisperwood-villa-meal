@@ -59,7 +59,7 @@ class DashboardWindow(QWidget):
         self.global_schedule_on = "07:00"
         self.global_schedule_off = "20:00"
         self.global_schedule_sleep_if_no_image = False
-        self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
+        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo.jpg"
         self.page_base_width = 1218
 
         self.setWindowTitle(f"{APP_NAME} Dashboard")
@@ -217,6 +217,42 @@ class DashboardWindow(QWidget):
     def label_style(self):
         return "font-size: 13px; font-weight: 700; color: #334155; background: transparent; border: none;"
 
+    def editable_dropdown(self, parent, options, placeholder="Select or type custom"):
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        combo.addItems(options)
+        combo.setCurrentIndex(-1)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.InsertAtBottom)
+        if combo.lineEdit():
+            combo.lineEdit().setPlaceholderText(placeholder)
+        combo.setStyleSheet(self.input_style())
+        return combo
+
+    def field_text(self, widget) -> str:
+        if isinstance(widget, QComboBox):
+            return widget.currentText().strip()
+        if isinstance(widget, QLineEdit):
+            return widget.text().strip()
+        return ""
+
+    def set_field_text(self, widget, value):
+        value = str(value or "")
+        if isinstance(widget, QComboBox):
+            idx = widget.findText(value, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                widget.setCurrentIndex(idx)
+            else:
+                widget.setEditText(value)
+            return
+        widget.setText(value)
+
+    def clear_field_text(self, widget):
+        if isinstance(widget, QComboBox):
+            widget.setCurrentIndex(-1)
+            widget.setEditText("")
+            return
+        widget.clear()
+
     # ---------------------------- window helpers ----------------------------
 
     def available_geometry_for_window(self):
@@ -259,12 +295,12 @@ class DashboardWindow(QWidget):
         self.apply_frame_style(self.sidebar, "background-color: #ffffff; border-radius: 10px; border: 1px solid #d8e1ea;")
 
         self.logo = QLabel(self.sidebar)
-        self.logo.setGeometry(22, 20, 200, 82)
+        self.logo.setGeometry(14, 18, 216, 86)
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if self.logo_path.exists():
             self.logo.setPixmap(
                 QPixmap(str(self.logo_path)).scaled(
-                    175, 78,
+                    206, 78,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
@@ -743,6 +779,8 @@ class DashboardWindow(QWidget):
         # Render text labels as plain text (no visible container box).
         protected_labels = {
             getattr(self, "user_avatar", None),
+            getattr(self, "lcd_empty_state", None),
+            getattr(self, "upd_lcd_empty_state", None),
         }
         for label in self.findChildren(QLabel):
             if label in protected_labels:
@@ -1001,33 +1039,36 @@ class DashboardWindow(QWidget):
         self.lbl_room.setStyleSheet(self.label_style())
 
         self.txt_room = QLineEdit(self.form_panel)
-        self.txt_room.setGeometry(22, 227, 120, 42)
+        self.txt_room.setGeometry(22, 227, 180, 42)
         self.txt_room.setStyleSheet(self.input_style())
 
-        self.lbl_alert = QLabel("Alert / Status", self.form_panel)
-        self.lbl_alert.setGeometry(160, 205, 90, 18)
-        self.lbl_alert.setStyleSheet(self.label_style())
-
         self.cmb_alert = QComboBox(self.form_panel)
-        self.cmb_alert.setGeometry(160, 227, 160, 42)
+        self.cmb_alert.setGeometry(-1000, -1000, 1, 1)
         self.cmb_alert.addItems(["Stable", "Needs Attention", "Fall Risk", "Emergency"])
         self.cmb_alert.setStyleSheet(self.input_style())
+        self.cmb_alert.hide()
 
-        self.lbl_diet = QLabel("Diet (comma list)", self.form_panel)
+        self.lbl_diet = QLabel("Diet", self.form_panel)
         self.lbl_diet.setGeometry(22, 280, 120, 18)
         self.lbl_diet.setStyleSheet(self.label_style())
 
-        self.txt_diet = QLineEdit(self.form_panel)
+        self.txt_diet = self.editable_dropdown(
+            self.form_panel,
+            ["Regular", "Diabetic", "Low sodium", "Vegetarian", "High protein", "Texture modified", "Nil by mouth", "Custom"],
+            "Select diet or type custom",
+        )
         self.txt_diet.setGeometry(22, 302, 376, 42)
-        self.txt_diet.setStyleSheet(self.input_style())
 
-        self.lbl_allergies = QLabel("Allergies (comma list)", self.form_panel)
+        self.lbl_allergies = QLabel("Texture", self.form_panel)
         self.lbl_allergies.setGeometry(22, 355, 140, 18)
         self.lbl_allergies.setStyleSheet(self.label_style())
 
-        self.txt_allergies = QLineEdit(self.form_panel)
+        self.txt_allergies = self.editable_dropdown(
+            self.form_panel,
+            ["Regular", "Easy to chew", "Soft and bite-sized", "Minced and moist", "Pureed", "Liquidised", "Thickened", "Custom"],
+            "Select texture or type custom",
+        )
         self.txt_allergies.setGeometry(22, 377, 376, 42)
-        self.txt_allergies.setStyleSheet(self.input_style())
 
         self.lbl_note = QLabel("Note", self.form_panel)
         self.lbl_note.setGeometry(22, 430, 60, 18)
@@ -1045,14 +1086,16 @@ class DashboardWindow(QWidget):
         self.txt_drinks.setGeometry(22, 542, 180, 42)
         self.txt_drinks.setStyleSheet(self.input_style())
 
-        self.lbl_schedule = QLabel("Schedule", self.form_panel)
+        self.lbl_schedule = QLabel("Fluids", self.form_panel)
         self.lbl_schedule.setGeometry(218, 520, 80, 18)
         self.lbl_schedule.setStyleSheet(self.label_style())
 
-        self.txt_schedule = QLineEdit(self.form_panel)
+        self.txt_schedule = self.editable_dropdown(
+            self.form_panel,
+            ["Regular fluids", "Encourage fluids", "Fluid restriction", "Thickened fluids", "Slightly thick", "Mildly thick", "Moderately thick", "Custom"],
+            "Select fluids or type custom",
+        )
         self.txt_schedule.setGeometry(218, 542, 180, 42)
-        self.txt_schedule.setPlaceholderText("Meals, care, reminders")
-        self.txt_schedule.setStyleSheet(self.input_style())
 
         self.lbl_source = QLabel("Source document", self.form_panel)
         self.lbl_source.setGeometry(22, 586, 120, 18)
@@ -1144,7 +1187,7 @@ class DashboardWindow(QWidget):
         self.ep_diet.setGeometry(16, 98, 300, 22)
         self.ep_diet.setStyleSheet("color: #111111; font-size: 14px;")
 
-        self.ep_allergies = QLabel("Allergies: ---", self.epaper_card)
+        self.ep_allergies = QLabel("Texture: ---", self.epaper_card)
         self.ep_allergies.setGeometry(16, 124, 350, 22)
         self.ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
@@ -1171,6 +1214,22 @@ class DashboardWindow(QWidget):
             }
         """)
         self.lcd_image.hide()
+
+        self.lcd_empty_state = QLabel("Add a resident image to preview the LCD display.", self.lcd_card)
+        self.lcd_empty_state.setGeometry(28, 54, 338, 112)
+        self.lcd_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lcd_empty_state.setWordWrap(True)
+        self.lcd_empty_state.setStyleSheet("""
+            QLabel {
+                background-color: #f8fafc;
+                color: #0f766e;
+                border: 1px dashed #7dd3fc;
+                border-radius: 8px;
+                padding: 16px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+        """)
 
         self.lcd_name = QLabel("Resident Name", self.lcd_card)
         self.lcd_name.setGeometry(20, 42, 354, 28)
@@ -2185,7 +2244,7 @@ class DashboardWindow(QWidget):
         self.upd_ep_diet.setGeometry(18, 112, 400, 24)
         self.upd_ep_diet.setStyleSheet("color: #111111; font-size: 14px;")
 
-        self.upd_ep_allergies = QLabel("Allergies: ---", self.upd_epaper_card)
+        self.upd_ep_allergies = QLabel("Texture: ---", self.upd_epaper_card)
         self.upd_ep_allergies.setGeometry(18, 144, 500, 24)
         self.upd_ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
@@ -2212,6 +2271,22 @@ class DashboardWindow(QWidget):
             }
         """)
         self.upd_lcd_image.hide()
+
+        self.upd_lcd_empty_state = QLabel("No LCD image selected. Choose a resident image to preview the exact screen artwork.", self.upd_lcd_card)
+        self.upd_lcd_empty_state.setGeometry(38, 58, 538, 112)
+        self.upd_lcd_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.upd_lcd_empty_state.setWordWrap(True)
+        self.upd_lcd_empty_state.setStyleSheet("""
+            QLabel {
+                background-color: #f8fafc;
+                color: #0f766e;
+                border: 1px dashed #7dd3fc;
+                border-radius: 8px;
+                padding: 18px;
+                font-size: 14px;
+                font-weight: 700;
+            }
+        """)
 
         self.upd_lcd_name = QLabel("Resident Name", self.upd_lcd_card)
         self.upd_lcd_name.setGeometry(20, 48, 574, 30)
@@ -2412,10 +2487,15 @@ class DashboardWindow(QWidget):
         self.btn_view_log.clicked.connect(self.show_selected_log_detail)
         self.btn_export_logs_pdf.clicked.connect(self.export_logs_pdf)
 
-        for w in [self.txt_name, self.txt_room, self.txt_diet, self.txt_allergies, self.txt_drinks, self.txt_schedule]:
+        for w in [self.txt_name, self.txt_room, self.txt_drinks]:
             w.textChanged.connect(self.refresh_token_list)
+            w.textChanged.connect(lambda _text: self.update_preview())
+        for combo in [self.txt_diet, self.txt_allergies, self.txt_schedule]:
+            combo.currentTextChanged.connect(lambda _text: self.refresh_token_list())
+            combo.currentTextChanged.connect(lambda _text: self.update_preview())
 
         self.txt_note.textChanged.connect(self.refresh_token_list)
+        self.txt_note.textChanged.connect(self.update_preview)
 
     # ---------------------------- page switching ----------------------------
 
@@ -2501,12 +2581,12 @@ class DashboardWindow(QWidget):
             "resident_uid": self.txt_uid.text().strip(),
             "full_name": self.txt_name.text().strip(),
             "room": self.txt_room.text().strip(),
-            "status_alert": self.cmb_alert.currentText(),
-            "diet": self.txt_diet.text().strip(),
-            "allergies": self.txt_allergies.text().strip(),
+            "status_alert": "Stable",
+            "diet": self.field_text(self.txt_diet),
+            "allergies": self.field_text(self.txt_allergies),
             "note": self.txt_note.toPlainText().strip(),
             "drinks": self.txt_drinks.text().strip(),
-            "schedule": self.txt_schedule.text().strip(),
+            "schedule": self.field_text(self.txt_schedule),
             "source_document": self.selected_source_document,
             "safety_review_note": "Pending safety review" if self.chk_safety_review.isChecked() else "",
             "needs_safety_review": self.chk_safety_review.isChecked(),
@@ -2728,11 +2808,11 @@ class DashboardWindow(QWidget):
         self.txt_uid.clear()
         self.txt_name.clear()
         self.txt_room.clear()
-        self.txt_diet.clear()
-        self.txt_allergies.clear()
+        self.clear_field_text(self.txt_diet)
+        self.clear_field_text(self.txt_allergies)
         self.txt_note.clear()
         self.txt_drinks.clear()
-        self.txt_schedule.clear()
+        self.clear_field_text(self.txt_schedule)
 
         self.chk_active.setChecked(True)
         self.chk_safety_review.setChecked(False)
@@ -3146,9 +3226,9 @@ class DashboardWindow(QWidget):
             f"Device Status: {'Online' if row.get('paired_device_online') else 'Offline'}",
             "",
             f"Diet: {row.get('diet') or ''}",
-            f"Allergies: {row.get('allergies') or ''}",
+            f"Texture: {row.get('allergies') or ''}",
             f"Drinks: {row.get('drinks') or ''}",
-            f"Schedule: {row.get('schedule') or ''}",
+            f"Fluids: {row.get('schedule') or ''}",
             "",
             "Display Note:",
             row.get("note") or "",
@@ -4131,11 +4211,11 @@ class DashboardWindow(QWidget):
         if alert_index < 0:
             alert_index = self.cmb_alert.findText(str(status_alert).title(), Qt.MatchFlag.MatchFixedString)
         self.cmb_alert.setCurrentIndex(alert_index if alert_index >= 0 else 0)
-        self.txt_diet.setText(row.get("diet") or "")
-        self.txt_allergies.setText(row.get("allergies") or "")
+        self.set_field_text(self.txt_diet, row.get("diet") or "")
+        self.set_field_text(self.txt_allergies, row.get("allergies") or "")
         self.txt_note.setPlainText(row.get("note") or "")
         self.txt_drinks.setText(row.get("drinks") or "")
-        self.txt_schedule.setText(row.get("schedule") or "")
+        self.set_field_text(self.txt_schedule, row.get("schedule") or "")
         self.selected_source_document = row.get("source_document") or None
         self.source_doc_label.setText(os.path.basename(self.selected_source_document) if self.selected_source_document else "No source document attached")
         self.chk_safety_review.setChecked(bool(row.get("needs_safety_review", False)))
@@ -4563,9 +4643,11 @@ class DashboardWindow(QWidget):
         if section == "ROOM":
             return self.txt_room.text().strip()
         if section == "DIET":
-            return self.txt_diet.text().strip()
-        if section == "ALLERGIES":
-            return self.txt_allergies.text().strip()
+            return self.field_text(self.txt_diet)
+        if section in {"TEXTURE", "ALLERGIES"}:
+            return self.field_text(self.txt_allergies)
+        if section == "FLUIDS":
+            return self.field_text(self.txt_schedule)
         if section == "NOTE":
             return self.txt_note.toPlainText().strip()
         if section == "DRINKS":
@@ -4664,6 +4746,8 @@ class DashboardWindow(QWidget):
                 )
                 self.upd_lcd_image.setPixmap(big_pix)
                 self.upd_lcd_image.show()
+                if hasattr(self, "upd_lcd_empty_state"):
+                    self.upd_lcd_empty_state.hide()
 
                 small_pix = pix.scaled(
                     self.lcd_image.size(),
@@ -4672,6 +4756,8 @@ class DashboardWindow(QWidget):
                 )
                 self.lcd_image.setPixmap(small_pix)
                 self.lcd_image.show()
+                if hasattr(self, "lcd_empty_state"):
+                    self.lcd_empty_state.hide()
 
                 self.upd_lcd_name.hide()
                 self.upd_lcd_room.hide()
@@ -4686,29 +4772,32 @@ class DashboardWindow(QWidget):
 
         self.upd_lcd_image.hide()
         self.lcd_image.hide()
+        if hasattr(self, "upd_lcd_empty_state"):
+            self.upd_lcd_empty_state.show()
+        if hasattr(self, "lcd_empty_state"):
+            self.lcd_empty_state.show()
 
-        self.upd_lcd_name.show()
-        self.upd_lcd_room.show()
-        self.upd_lcd_alert.show()
-        self.upd_lcd_note.show()
+        self.upd_lcd_name.hide()
+        self.upd_lcd_room.hide()
+        self.upd_lcd_alert.hide()
+        self.upd_lcd_note.hide()
 
-        self.lcd_name.show()
-        self.lcd_room.show()
-        self.lcd_alert_banner.show()
-        self.lcd_note.show()
+        self.lcd_name.hide()
+        self.lcd_room.hide()
+        self.lcd_alert_banner.hide()
+        self.lcd_note.hide()
 
     def update_preview(self):
         name = self.txt_name.text().strip() or "Resident Name"
         room = self.txt_room.text().strip() or "---"
-        diet = self.txt_diet.text().strip() or "---"
-        allergies = self.txt_allergies.text().strip() or "---"
+        diet = self.field_text(self.txt_diet) or "---"
+        texture = self.field_text(self.txt_allergies) or "---"
         note = self.txt_note.toPlainText().strip() or "---"
-        alert = self.cmb_alert.currentText().upper()
 
         self.ep_name.setText(name)
         self.ep_room.setText(f"Room {room}")
         self.ep_diet.setText(f"Diet: {diet}")
-        self.ep_allergies.setText(f"Allergies: {allergies}")
+        self.ep_allergies.setText(f"Texture: {texture}")
         self.ep_note.setText(f"Note: {note[:80]}")
 
         self.lcd_name.setText(name)
@@ -4718,28 +4807,12 @@ class DashboardWindow(QWidget):
         self.upd_ep_name.setText(name)
         self.upd_ep_room.setText(f"Room {room}")
         self.upd_ep_diet.setText(f"Diet: {diet}")
-        self.upd_ep_allergies.setText(f"Allergies: {allergies}")
+        self.upd_ep_allergies.setText(f"Texture: {texture}")
         self.upd_ep_note.setText(f"Note: {note[:120]}")
 
         self.upd_lcd_name.setText(name)
         self.upd_lcd_room.setText(f"Room {room}")
         self.upd_lcd_note.setText(note[:120])
-
-        color = "#146c2e"
-        if alert in ("NEEDS ATTENTION", "FALL RISK"):
-            color = "#b45309"
-        if alert == "EMERGENCY":
-            color = "#b91c1c"
-
-        self.lcd_alert_banner.setText(alert)
-        self.lcd_alert_banner.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 16px; font-weight: 700; }}"
-        )
-
-        self.upd_lcd_alert.setText(alert)
-        self.upd_lcd_alert.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 18px; font-weight: 700; }}"
-        )
 
         self.update_lcd_image_preview()
 
@@ -4752,7 +4825,7 @@ class DashboardWindow(QWidget):
         room = self.txt_room.text().strip()
         note = self.txt_note.toPlainText().strip()
         drinks = self.txt_drinks.text().strip()
-        schedule = self.txt_schedule.text().strip()
+        schedule = self.field_text(self.txt_schedule)
 
         if name:
             payload["name"] = name
@@ -4765,8 +4838,8 @@ class DashboardWindow(QWidget):
         if schedule:
             payload["schedule"] = schedule
 
-        diet = self.txt_diet.text().strip()
-        allergies = self.txt_allergies.text().strip()
+        diet = self.field_text(self.txt_diet)
+        allergies = self.field_text(self.txt_allergies)
 
         if diet:
             payload["diet"] = [x.strip() for x in diet.split(",") if x.strip()]

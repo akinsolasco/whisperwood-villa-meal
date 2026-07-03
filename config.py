@@ -9,8 +9,8 @@ else:
 
 ASSETS_DIR = BASE_DIR / "assets"
 
-APP_NAME = "Whisperwood Villa Live Demo"
-APP_VERSION = "2.0.6.1"
+APP_NAME = "Enhanced Living Whisperwood Live Demo"
+APP_VERSION = "2.0.6.2"
 APP_CHANNEL = "live-demo"
 RELEASE_TAG_PREFIX = "live-demo-v"
 DEFAULT_PI_BASE_URL = "http://localhost:8080"
@@ -20,9 +20,9 @@ DEFAULT_CONTROL_SERVICE_API_KEY = "c6149ae5af0ace91b7fd0fbcfa064b9682dc0ff737ba9
 
 GITHUB_OWNER = "akinsolasco"
 GITHUB_REPO = "whisperwood-villa-meal"
-INSTALLER_NAME = "WhisperwoodVillaLiveDemoSetup.exe"
+INSTALLER_NAME = "EnhancedLivingWhisperwoodLiveDemoSetup.exe"
 
-APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WhisperwoodVillaLiveDemo"
+APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "EnhancedLivingWhisperwoodLiveDemo"
 UPDATE_DOWNLOAD_DIR = APP_DATA_DIR / "updates"
 
 DATABASE_MODE = "sqlite"
