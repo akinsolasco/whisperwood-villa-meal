@@ -1,9 +1,12 @@
+import json
+import sqlite3
 import uuid
 from datetime import datetime
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
+from config import DATABASE_MODE, LOCAL_DB_PATH
 from db_config import DB_CONFIG
 
 
@@ -17,38 +20,65 @@ class DatabaseService:
         self.backend = None
 
     def connect(self):
-        if self.conn is not None and not self.conn.closed:
+        if self.conn is not None:
+            if self.backend == "sqlite":
+                return
+            if not self.conn.closed:
+                return
+
+        if DATABASE_MODE.lower() in {"sqlite", "local", "demo"}:
+            LOCAL_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(str(LOCAL_DB_PATH))
+            self.conn.row_factory = sqlite3.Row
+            self.backend = "sqlite"
             return
 
-        config = dict(DB_CONFIG)
-        config.setdefault("connect_timeout", 2)
-        self.conn = psycopg2.connect(**config)
-        self.backend = "postgres"
+        raise RuntimeError("Direct PostgreSQL access is disabled. Use Server Mode through the Raspberry Pi Control Service.")
 
     def close(self):
-        if self.conn and not self.conn.closed:
+        if self.conn and (self.backend == "sqlite" or not self.conn.closed):
             self.conn.close()
         self.conn = None
         self.backend = None
 
     def _cursor(self, dict_rows=False):
         self.connect()
+        if self.backend == "sqlite":
+            return self.conn.cursor()
         if dict_rows:
             return self.conn.cursor(cursor_factory=RealDictCursor)
         return self.conn.cursor()
 
     def _rows(self, rows):
+        if self.backend == "sqlite":
+            return [dict(row) for row in rows]
         return rows
 
     def _row(self, row):
         if row is None:
             return None
+        if self.backend == "sqlite":
+            return dict(row)
         return row
 
     def _json_value(self, value):
         if value is None:
             return None
+        if self.backend == "sqlite":
+            return json.dumps(value)
         return Json(value)
+
+    def _parse_json_field(self, value):
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return value
+        return value
 
     def ensure_tables(self):
         self.connect()
@@ -123,6 +153,36 @@ class DatabaseService:
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             );
             """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_change_requests (
+                id SERIAL PRIMARY KEY,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid VARCHAR(32),
+                proposed_payload JSONB,
+                comment TEXT NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                requested_by_user_id INTEGER,
+                requested_by_username VARCHAR(255),
+                reviewed_by_user_id INTEGER,
+                reviewed_by_username VARCHAR(255),
+                review_note TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                reviewed_at TIMESTAMP
+            );
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS verification_checks (
+                id SERIAL PRIMARY KEY,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid VARCHAR(32),
+                device_id VARCHAR(128),
+                status VARCHAR(32) NOT NULL,
+                note TEXT,
+                checked_by_user_id INTEGER,
+                checked_by_username VARCHAR(255),
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """)
             cur.execute("ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_level INTEGER")
         else:
             cur.execute("""
@@ -185,16 +245,123 @@ class DatabaseService:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid TEXT,
+                proposed_payload TEXT,
+                comment TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                requested_by_user_id INTEGER,
+                requested_by_username TEXT,
+                reviewed_by_user_id INTEGER,
+                reviewed_by_username TEXT,
+                review_note TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TEXT
+            );
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS verification_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resident_id INTEGER NULL REFERENCES residents(id) ON DELETE SET NULL,
+                resident_uid TEXT,
+                device_id TEXT,
+                status TEXT NOT NULL,
+                note TEXT,
+                checked_by_user_id INTEGER,
+                checked_by_username TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
 
+        self._ensure_it_control_tables(cur)
         self.conn.commit()
         cur.close()
 
-    def wipe_operational_data(self):
-        self.connect()
-        cur = self.conn.cursor()
-        cur.execute("TRUNCATE TABLE display_updates, device_registry, residents RESTART IDENTITY CASCADE;")
-        self.conn.commit()
-        cur.close()
+    def _ensure_it_control_tables(self, cur):
+        if self.backend == "postgres":
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS control_service_profiles (
+                id SERIAL PRIMARY KEY,
+                profile_name VARCHAR(128) UNIQUE NOT NULL,
+                host VARCHAR(255) NOT NULL DEFAULT '',
+                port INTEGER NOT NULL DEFAULT 7000,
+                api_key TEXT,
+                description TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS it_audit_logs (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(255),
+                action VARCHAR(128) NOT NULL,
+                target VARCHAR(255),
+                result VARCHAR(64) NOT NULL,
+                message TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """)
+            cur.execute("SELECT COUNT(*) FROM control_service_profiles")
+            count = cur.fetchone()[0]
+            if count == 0:
+                cur.execute("""
+                    INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
+                    VALUES (%s, %s, %s, %s, %s, TRUE)
+                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection.",))
+        else:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS control_service_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_name TEXT UNIQUE NOT NULL,
+                host TEXT NOT NULL DEFAULT '',
+                port INTEGER NOT NULL DEFAULT 7000,
+                api_key TEXT,
+                description TEXT,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS it_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                action TEXT NOT NULL,
+                target TEXT,
+                result TEXT NOT NULL,
+                message TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cur.execute("SELECT COUNT(*) AS count FROM control_service_profiles")
+            count = cur.fetchone()["count"]
+            if count == 0:
+                cur.execute("""
+                    INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+
+    def _add_resident_columns(self, cur):
+        existing = {row["name"] for row in cur.execute("PRAGMA table_info(residents)").fetchall()}
+        columns = {
+            "schedule": "TEXT",
+            "source_document": "TEXT",
+            "safety_review_note": "TEXT",
+            "needs_safety_review": "INTEGER NOT NULL DEFAULT 0",
+            "lcd_image_path": "TEXT",
+            "lcd_schedule_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "lcd_on_time": "TEXT",
+            "lcd_off_time": "TEXT",
+            "sleep_if_no_image": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                cur.execute(f"ALTER TABLE residents ADD COLUMN {name} {definition}")
 
     def create_resident(self, data):
         cur = self._cursor()
@@ -468,6 +635,103 @@ class DatabaseService:
         self.conn.commit()
         cur.close()
 
+    def create_change_request(self, resident_id, resident_uid, proposed_payload, comment, requested_by_user_id, requested_by_username):
+        cur = self._cursor()
+        payload_value = self._json_value(proposed_payload)
+        if self.backend == "postgres":
+            cur.execute("""
+                INSERT INTO resident_change_requests (
+                    resident_id, resident_uid, proposed_payload, comment,
+                    requested_by_user_id, requested_by_username
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (resident_id, resident_uid, payload_value, comment, requested_by_user_id, requested_by_username))
+        else:
+            cur.execute("""
+                INSERT INTO resident_change_requests (
+                    resident_id, resident_uid, proposed_payload, comment,
+                    requested_by_user_id, requested_by_username
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (resident_id, resident_uid, payload_value, comment, requested_by_user_id, requested_by_username))
+        self.conn.commit()
+        cur.close()
+
+    def get_change_requests(self, status=None, limit=100):
+        cur = self._cursor(dict_rows=True)
+        marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "cr.created_at DESC, cr.id DESC" if self.backend == "postgres" else "datetime(cr.created_at) DESC, cr.id DESC"
+        if status:
+            cur.execute(f"""
+                SELECT cr.*,
+                       r.full_name,
+                       r.room
+                FROM resident_change_requests cr
+                LEFT JOIN residents r ON r.id = cr.resident_id
+                WHERE cr.status = {marker}
+                ORDER BY {order_clause}
+                LIMIT {marker}
+            """, (status, limit))
+        else:
+            cur.execute(f"""
+                SELECT cr.*,
+                       r.full_name,
+                       r.room
+                FROM resident_change_requests cr
+                LEFT JOIN residents r ON r.id = cr.resident_id
+                ORDER BY {order_clause}
+                LIMIT {marker}
+            """, (limit,))
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        return rows
+
+    def update_change_request_status(self, request_id, status, reviewed_by_user_id, reviewed_by_username, review_note=""):
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        cur.execute(f"""
+            UPDATE resident_change_requests
+            SET status = {marker},
+                reviewed_by_user_id = {marker},
+                reviewed_by_username = {marker},
+                review_note = {marker},
+                reviewed_at = {timestamp}
+            WHERE id = {marker}
+        """, (status, reviewed_by_user_id, reviewed_by_username, review_note, request_id))
+        self.conn.commit()
+        cur.close()
+
+    def create_verification_check(self, resident_id, resident_uid, device_id, status, note, checked_by_user_id, checked_by_username):
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        cur.execute(f"""
+            INSERT INTO verification_checks (
+                resident_id, resident_uid, device_id, status, note,
+                checked_by_user_id, checked_by_username
+            )
+            VALUES ({", ".join([marker] * 7)})
+        """, (resident_id, resident_uid, device_id, status, note, checked_by_user_id, checked_by_username))
+        self.conn.commit()
+        cur.close()
+
+    def get_verification_checks(self, limit=50):
+        cur = self._cursor(dict_rows=True)
+        marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "vc.created_at DESC, vc.id DESC" if self.backend == "postgres" else "datetime(vc.created_at) DESC, vc.id DESC"
+        cur.execute(f"""
+            SELECT vc.*,
+                   r.full_name,
+                   r.room
+            FROM verification_checks vc
+            LEFT JOIN residents r ON r.id = vc.resident_id
+            ORDER BY {order_clause}
+            LIMIT {marker}
+        """, (limit,))
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        return rows
+
     def get_recent_logs(self, limit=50):
         cur = self._cursor(dict_rows=True)
         marker = "%s" if self.backend == "postgres" else "?"
@@ -481,6 +745,45 @@ class DatabaseService:
         """, (limit,))
         rows = self._rows(cur.fetchall())
         cur.close()
+        return rows
+
+    def get_resident_audit_logs(self, limit=200):
+        cur = self._cursor(dict_rows=True)
+        marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "du.created_at DESC, du.id DESC" if self.backend == "postgres" else "datetime(du.created_at) DESC, du.id DESC"
+        resident_actions = [
+            "resident_create",
+            "resident_update",
+            "resident_delete",
+            "resident_review_request",
+            "resident_review_decision",
+        ]
+        placeholders = ", ".join([marker] * len(resident_actions))
+        cur.execute(f"""
+            SELECT du.id,
+                   du.created_at,
+                   du.action_type,
+                   du.resident_id,
+                   du.resident_uid,
+                   du.pushed_by_username,
+                   du.payload_json,
+                   du.response_json,
+                   du.success,
+                   du.message,
+                   r.full_name,
+                   r.room,
+                   r.source_document AS current_source_document
+            FROM display_updates du
+            LEFT JOIN residents r ON r.id = du.resident_id
+            WHERE du.action_type IN ({placeholders})
+            ORDER BY {order_clause}
+            LIMIT {marker}
+        """, (*resident_actions, limit))
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        for row in rows:
+            row["payload_json"] = self._parse_json_field(row.get("payload_json"))
+            row["response_json"] = self._parse_json_field(row.get("response_json"))
         return rows
 
     def get_log(self, log_id):
@@ -559,6 +862,12 @@ class DatabaseService:
         recent_activity_total = self._row(cur.fetchone())["count"]
         cur.execute(f"SELECT COUNT(*) AS count FROM residents WHERE {review_filter}")
         safety_reviews = self._row(cur.fetchone())["count"]
+        cur.execute("SELECT COUNT(*) AS count FROM resident_change_requests WHERE status = 'PENDING'")
+        pending_requests = self._row(cur.fetchone())["count"]
+        cur.execute("SELECT COUNT(*) AS count FROM verification_checks")
+        verification_checks = self._row(cur.fetchone())["count"]
+        cur.execute("SELECT COUNT(*) AS count FROM verification_checks WHERE status = 'MISMATCH'")
+        verification_mismatches = self._row(cur.fetchone())["count"]
         cur.close()
         return {
             "active_residents": active,
@@ -571,8 +880,132 @@ class DatabaseService:
             "recent_activity_today": recent_activity_today,
             "recent_activity_total": recent_activity_total,
             "safety_reviews": safety_reviews,
+            "pending_requests": pending_requests,
+            "verification_checks": verification_checks,
+            "verification_mismatches": verification_mismatches,
             "database_mode": self.backend or "unknown",
         }
+
+    def list_control_profiles(self):
+        cur = self._cursor(dict_rows=True)
+        order_clause = "is_active DESC, profile_name ASC"
+        cur.execute(f"""
+            SELECT id, profile_name, host, port, api_key, description, is_active, created_at, updated_at
+            FROM control_service_profiles
+            ORDER BY {order_clause}
+        """)
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        return rows
+
+    def get_active_control_profile(self):
+        rows = self.list_control_profiles()
+        if not rows:
+            cur = self._cursor()
+            if self.backend == "postgres":
+                cur.execute("""
+                    INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
+                    VALUES (%s, %s, %s, %s, %s, TRUE)
+                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+            else:
+                cur.execute("""
+                    INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+            self.conn.commit()
+            cur.close()
+            rows = self.list_control_profiles()
+        for row in rows:
+            if row.get("is_active"):
+                return row
+        return rows[0] if rows else None
+
+    def save_control_profile(self, profile_id, profile_name, host, port, api_key, description, is_active=True):
+        profile_name = (profile_name or "").strip()
+        host = (host or "").strip()
+        api_key = api_key or ""
+        description = (description or "").strip()
+        if not profile_name:
+            raise ValueError("Connection profile name is required.")
+        try:
+            port = int(port or 7000)
+        except ValueError:
+            raise ValueError("Control Service port must be a number.")
+        if port <= 0 or port > 65535:
+            raise ValueError("Control Service port must be between 1 and 65535.")
+
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        active_value = bool(is_active) if self.backend == "postgres" else int(bool(is_active))
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        if is_active:
+            cur.execute(f"UPDATE control_service_profiles SET is_active = {marker}, updated_at = {timestamp}", (False if self.backend == "postgres" else 0,))
+
+        if profile_id:
+            cur.execute(f"""
+                UPDATE control_service_profiles
+                SET profile_name = {marker},
+                    host = {marker},
+                    port = {marker},
+                    api_key = {marker},
+                    description = {marker},
+                    is_active = {marker},
+                    updated_at = {timestamp}
+                WHERE id = {marker}
+            """, (profile_name, host, port, api_key, description, active_value, profile_id))
+            saved_id = profile_id
+        else:
+            cur.execute(f"""
+                INSERT INTO control_service_profiles (
+                    profile_name, host, port, api_key, description, is_active
+                )
+                VALUES ({", ".join([marker] * 6)})
+            """, (profile_name, host, port, api_key, description, active_value))
+            if self.backend == "postgres":
+                cur.execute("SELECT LASTVAL()")
+                saved_id = cur.fetchone()[0]
+            else:
+                saved_id = cur.lastrowid
+        self.conn.commit()
+        cur.close()
+        return saved_id
+
+    def set_active_control_profile(self, profile_id):
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        cur.execute(f"UPDATE control_service_profiles SET is_active = {marker}, updated_at = {timestamp}", (False if self.backend == "postgres" else 0,))
+        cur.execute(f"""
+            UPDATE control_service_profiles
+            SET is_active = {marker}, updated_at = {timestamp}
+            WHERE id = {marker}
+        """, (True if self.backend == "postgres" else 1, profile_id))
+        self.conn.commit()
+        cur.close()
+
+    def log_it_audit(self, username, action, target, result, message):
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        cur.execute(f"""
+            INSERT INTO it_audit_logs (username, action, target, result, message)
+            VALUES ({", ".join([marker] * 5)})
+        """, (username, action, target, result, message))
+        self.conn.commit()
+        cur.close()
+
+    def get_it_audit_logs(self, limit=100):
+        cur = self._cursor(dict_rows=True)
+        marker = "%s" if self.backend == "postgres" else "?"
+        order_clause = "created_at DESC, id DESC" if self.backend == "postgres" else "datetime(created_at) DESC, id DESC"
+        cur.execute(f"""
+            SELECT id, created_at, username, action, target, result, message
+            FROM it_audit_logs
+            ORDER BY {order_clause}
+            LIMIT {marker}
+        """, (limit,))
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        return rows
 
     @staticmethod
     def format_timestamp(value):
