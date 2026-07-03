@@ -9,24 +9,24 @@ else:
 
 ASSETS_DIR = BASE_DIR / "assets"
 
-APP_NAME = "Whisperwood Villa Demo"
-APP_VERSION = "2.0.5.12"
-APP_CHANNEL = "demo"
-RELEASE_TAG_PREFIX = "demo-v"
+APP_NAME = "Whisperwood Villa"
+APP_VERSION = "2.0.6"
+APP_CHANNEL = "main"
+RELEASE_TAG_PREFIX = "v"
 DEFAULT_PI_BASE_URL = "http://localhost:8080"
-DEFAULT_CONTROL_SERVICE_HOST = "10.123.218.132"
+DEFAULT_CONTROL_SERVICE_HOST = "172.20.0.240"
 DEFAULT_CONTROL_SERVICE_PORT = 7000
-DEFAULT_CONTROL_SERVICE_API_KEY = "bacd746e11a8e94ba9fb428f5b261ca51d3cf484c5975a811534ea28811c8d52"
+DEFAULT_CONTROL_SERVICE_API_KEY = "c6149ae5af0ace91b7fd0fbcfa064b9682dc0ff737ba972eb0aa6baab74c039c"
 
 GITHUB_OWNER = "akinsolasco"
 GITHUB_REPO = "whisperwood-villa-meal"
-INSTALLER_NAME = "WhisperwoodVillaDemoSetup.exe"
+INSTALLER_NAME = "WhisperwoodVillaSetup.exe"
 
-APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WhisperwoodVillaDemo"
+APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "WhisperwoodVilla"
 UPDATE_DOWNLOAD_DIR = APP_DATA_DIR / "updates"
 
 DATABASE_MODE = "sqlite"
-LOCAL_DB_PATH = APP_DATA_DIR / "whisperwood_demo.sqlite3"
+LOCAL_DB_PATH = APP_DATA_DIR / "whisperwood.sqlite3"
 DEMO_DEFAULT_USERNAME = "admin"
 DEMO_DEFAULT_PASSWORD = "admin123"
 

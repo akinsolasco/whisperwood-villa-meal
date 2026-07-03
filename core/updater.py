@@ -59,7 +59,7 @@ class UpdaterService:
                     "enabled": True,
                     "has_update": False,
                     "latest_version": APP_VERSION,
-                    "message": "No demo release found",
+                    "message": "No release found",
                 }
 
             latest_tag = data.get("tag_name", f"{RELEASE_TAG_PREFIX}{APP_VERSION}")
