@@ -13,10 +13,11 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu,
+    QInputDialog
 )
 
-from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
+from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS, APP_DATA_DIR
 from auth.auth_service import AuthService
 from core.app_settings import APP_MODE_DEMO, APP_MODE_SERVER, AppSettingsStore
 from core.control_service_client import ControlServiceClient
@@ -34,6 +35,13 @@ class DashboardWindow(QWidget):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
         self.current_role = self.normalize_role(self.current_user.get("role", "NURSE_ADMIN"))
+        self.dropdown_option_defaults = {
+            "diet": ["Regular", "Diabetic", "Low sodium", "Vegetarian", "High protein", "Texture modified", "Nil by mouth", "Custom"],
+            "texture": ["Regular", "Easy to chew", "Soft and bite-sized", "Minced and moist", "Pureed", "Liquidised", "Thickened", "Custom"],
+            "fluids": ["Regular fluids", "Encourage fluids", "Fluid restriction", "Thickened fluids", "Slightly thick", "Mildly thick", "Moderately thick", "Custom"],
+        }
+        self.dropdown_options = self.load_dropdown_options()
+        self.dropdown_option_buttons = []
         self.settings = AppSettingsStore()
         self.server_mode = self.current_user.get("data_source") == "server" or self.settings.get_mode() == APP_MODE_SERVER
         self.db = ServerDataService() if self.server_mode else DatabaseService()
@@ -59,7 +67,7 @@ class DashboardWindow(QWidget):
         self.global_schedule_on = "07:00"
         self.global_schedule_off = "20:00"
         self.global_schedule_sleep_if_no_image = False
-        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo.jpg"
+        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo_transparent.png"
         self.page_base_width = 1218
 
         self.setWindowTitle(f"{APP_NAME} Dashboard")
@@ -217,6 +225,41 @@ class DashboardWindow(QWidget):
     def label_style(self):
         return "font-size: 13px; font-weight: 700; color: #334155; background: transparent; border: none;"
 
+    def dropdown_options_file(self):
+        return APP_DATA_DIR / "resident_dropdown_options.json"
+
+    def normalize_option_list(self, values):
+        seen = set()
+        out = []
+        for value in values or []:
+            text = str(value or "").strip()
+            key = text.lower()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
+
+    def load_dropdown_options(self):
+        stored = {}
+        path = self.dropdown_options_file()
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    stored = json.load(fh)
+            except Exception:
+                stored = {}
+        return {
+            key: self.normalize_option_list(list(defaults) + list(stored.get(key, [])))
+            for key, defaults in self.dropdown_option_defaults.items()
+        }
+
+    def save_dropdown_options(self):
+        path = self.dropdown_options_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(self.dropdown_options, fh, indent=2)
+
     def editable_dropdown(self, parent, options, placeholder="Select or type custom"):
         combo = QComboBox(parent)
         combo.setEditable(True)
@@ -227,6 +270,71 @@ class DashboardWindow(QWidget):
             combo.lineEdit().setPlaceholderText(placeholder)
         combo.setStyleSheet(self.input_style())
         return combo
+
+    def create_dropdown_option_buttons(self, parent, combo, add_x, y, delete_x):
+        add_btn = QPushButton("+", parent)
+        add_btn.setGeometry(add_x, y, 38, 42)
+        add_btn.setToolTip("Add the typed value to this dropdown")
+        add_btn.setStyleSheet(self.secondary_btn_style())
+        add_btn.clicked.connect(lambda: self.add_dropdown_option(combo))
+
+        delete_btn = QPushButton("Del", parent)
+        delete_btn.setGeometry(delete_x, y, 50, 42)
+        delete_btn.setToolTip("Delete the selected option from this dropdown")
+        delete_btn.setStyleSheet(self.secondary_btn_style())
+        delete_btn.clicked.connect(lambda: self.delete_dropdown_option(combo))
+
+        self.dropdown_option_buttons.extend([add_btn, delete_btn])
+        return add_btn, delete_btn
+
+    def add_dropdown_option(self, combo):
+        option_key = combo.property("option_key")
+        text = combo.currentText().strip()
+        if not text:
+            text, ok = QInputDialog.getText(self, "Add dropdown option", "Option name:")
+            text = text.strip()
+            if not ok or not text:
+                return
+        if combo.findText(text, Qt.MatchFlag.MatchFixedString) < 0:
+            combo.addItem(text)
+        combo.setCurrentText(text)
+        if option_key:
+            self.dropdown_options[option_key] = self.normalize_option_list(
+                [combo.itemText(i) for i in range(combo.count())]
+            )
+            self.save_dropdown_options()
+        self.refresh_token_list()
+        self.update_preview()
+
+    def delete_dropdown_option(self, combo):
+        option_key = combo.property("option_key")
+        text = combo.currentText().strip()
+        idx = combo.findText(text, Qt.MatchFlag.MatchFixedString)
+        if idx < 0:
+            self.show_error("Delete option", "Select an existing dropdown option to delete.")
+            return
+        if combo.count() <= 1:
+            self.show_error("Delete option", "At least one option must remain in the dropdown.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete dropdown option",
+            f"Delete '{text}' from this dropdown?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        combo.removeItem(idx)
+        combo.setCurrentIndex(-1)
+        combo.setEditText("")
+        if option_key:
+            self.dropdown_options[option_key] = self.normalize_option_list(
+                [combo.itemText(i) for i in range(combo.count())]
+            )
+            self.save_dropdown_options()
+        self.refresh_token_list()
+        self.update_preview()
 
     def field_text(self, widget) -> str:
         if isinstance(widget, QComboBox):
@@ -295,12 +403,12 @@ class DashboardWindow(QWidget):
         self.apply_frame_style(self.sidebar, "background-color: #ffffff; border-radius: 10px; border: 1px solid #d8e1ea;")
 
         self.logo = QLabel(self.sidebar)
-        self.logo.setGeometry(14, 18, 216, 86)
+        self.logo.setGeometry(10, 12, 224, 98)
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if self.logo_path.exists():
             self.logo.setPixmap(
                 QPixmap(str(self.logo_path)).scaled(
-                    206, 78,
+                    216, 92,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
@@ -947,7 +1055,7 @@ class DashboardWindow(QWidget):
         page.setStyleSheet("background: transparent;")
 
         self.residents_panel = QFrame(page)
-        self.residents_panel.setGeometry(0, 0, 330, 940)
+        self.residents_panel.setGeometry(0, 0, 330, 1030)
         self.apply_frame_style(self.residents_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Residents", self.residents_panel)
@@ -960,7 +1068,7 @@ class DashboardWindow(QWidget):
         self.search_resident.setStyleSheet(self.input_style())
 
         self.resident_list = QListWidget(self.residents_panel)
-        self.resident_list.setGeometry(18, 110, 294, 812)
+        self.resident_list.setGeometry(18, 110, 294, 902)
         self.resident_list.setStyleSheet("""
             QListWidget {
                 background-color: transparent;
@@ -988,7 +1096,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.form_panel = QFrame(page)
-        self.form_panel.setGeometry(345, 0, 420, 940)
+        self.form_panel.setGeometry(345, 0, 420, 1030)
         self.apply_frame_style(self.form_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.form_heading = QLabel("Resident Information", self.form_panel)
@@ -1054,10 +1162,12 @@ class DashboardWindow(QWidget):
 
         self.txt_diet = self.editable_dropdown(
             self.form_panel,
-            ["Regular", "Diabetic", "Low sodium", "Vegetarian", "High protein", "Texture modified", "Nil by mouth", "Custom"],
+            self.dropdown_options["diet"],
             "Select diet or type custom",
         )
-        self.txt_diet.setGeometry(22, 302, 376, 42)
+        self.txt_diet.setProperty("option_key", "diet")
+        self.txt_diet.setGeometry(22, 302, 266, 42)
+        self.btn_add_diet_option, self.btn_delete_diet_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_diet, 298, 302, 348)
 
         self.lbl_allergies = QLabel("Texture", self.form_panel)
         self.lbl_allergies.setGeometry(22, 355, 140, 18)
@@ -1065,10 +1175,12 @@ class DashboardWindow(QWidget):
 
         self.txt_allergies = self.editable_dropdown(
             self.form_panel,
-            ["Regular", "Easy to chew", "Soft and bite-sized", "Minced and moist", "Pureed", "Liquidised", "Thickened", "Custom"],
+            self.dropdown_options["texture"],
             "Select texture or type custom",
         )
-        self.txt_allergies.setGeometry(22, 377, 376, 42)
+        self.txt_allergies.setProperty("option_key", "texture")
+        self.txt_allergies.setGeometry(22, 377, 266, 42)
+        self.btn_add_texture_option, self.btn_delete_texture_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_allergies, 298, 377, 348)
 
         self.lbl_note = QLabel("Note", self.form_panel)
         self.lbl_note.setGeometry(22, 430, 60, 18)
@@ -1083,51 +1195,53 @@ class DashboardWindow(QWidget):
         self.lbl_drinks.setStyleSheet(self.label_style())
 
         self.txt_drinks = QLineEdit(self.form_panel)
-        self.txt_drinks.setGeometry(22, 542, 180, 42)
+        self.txt_drinks.setGeometry(22, 542, 376, 42)
         self.txt_drinks.setStyleSheet(self.input_style())
 
         self.lbl_schedule = QLabel("Fluids", self.form_panel)
-        self.lbl_schedule.setGeometry(218, 520, 80, 18)
+        self.lbl_schedule.setGeometry(22, 595, 80, 18)
         self.lbl_schedule.setStyleSheet(self.label_style())
 
         self.txt_schedule = self.editable_dropdown(
             self.form_panel,
-            ["Regular fluids", "Encourage fluids", "Fluid restriction", "Thickened fluids", "Slightly thick", "Mildly thick", "Moderately thick", "Custom"],
+            self.dropdown_options["fluids"],
             "Select fluids or type custom",
         )
-        self.txt_schedule.setGeometry(218, 542, 180, 42)
+        self.txt_schedule.setProperty("option_key", "fluids")
+        self.txt_schedule.setGeometry(22, 617, 266, 42)
+        self.btn_add_fluids_option, self.btn_delete_fluids_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_schedule, 298, 617, 348)
 
         self.lbl_source = QLabel("Source document", self.form_panel)
-        self.lbl_source.setGeometry(22, 586, 120, 18)
+        self.lbl_source.setGeometry(22, 670, 120, 18)
         self.lbl_source.setStyleSheet(self.label_style())
 
         self.btn_attach_source = QPushButton("Attach Document", self.form_panel)
-        self.btn_attach_source.setGeometry(22, 608, 150, 36)
+        self.btn_attach_source.setGeometry(22, 692, 150, 36)
         self.btn_attach_source.setStyleSheet(self.secondary_btn_style())
 
         self.source_doc_label = QLabel("No source document attached", self.form_panel)
-        self.source_doc_label.setGeometry(182, 608, 216, 36)
+        self.source_doc_label.setGeometry(182, 692, 216, 36)
         self.source_doc_label.setWordWrap(True)
         self.source_doc_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
 
         self.chk_safety_review = QCheckBox("Needs safety review", self.form_panel)
-        self.chk_safety_review.setGeometry(22, 650, 160, 24)
+        self.chk_safety_review.setGeometry(22, 734, 160, 24)
         self.chk_safety_review.setStyleSheet(self.chk_active.styleSheet())
 
         self.btn_new_resident = QPushButton("New Resident", self.form_panel)
-        self.btn_new_resident.setGeometry(22, 686, 120, 42)
+        self.btn_new_resident.setGeometry(22, 770, 120, 42)
         self.btn_new_resident.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_resident = QPushButton("Save Resident", self.form_panel)
-        self.btn_save_resident.setGeometry(152, 686, 120, 42)
+        self.btn_save_resident.setGeometry(152, 770, 120, 42)
         self.btn_save_resident.setStyleSheet(self.primary_btn_style())
 
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
-        self.btn_clear_fields.setGeometry(282, 686, 116, 42)
+        self.btn_clear_fields.setGeometry(282, 770, 116, 42)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
 
         self.btn_delete_resident = QPushButton("Delete Resident", self.form_panel)
-        self.btn_delete_resident.setGeometry(22, 736, 376, 38)
+        self.btn_delete_resident.setGeometry(22, 820, 376, 38)
         self.btn_delete_resident.setStyleSheet("""
             QPushButton {
                 background-color: #fff1f2;
@@ -1143,16 +1257,16 @@ class DashboardWindow(QWidget):
         """)
 
         review_label = QLabel("Staff review note", self.form_panel)
-        review_label.setGeometry(22, 790, 150, 18)
+        review_label.setGeometry(22, 872, 150, 18)
         review_label.setStyleSheet(self.label_style())
 
         self.nurse_review_comment = QTextEdit(self.form_panel)
-        self.nurse_review_comment.setGeometry(22, 814, 376, 72)
+        self.nurse_review_comment.setGeometry(22, 896, 376, 68)
         self.nurse_review_comment.setPlaceholderText("Write what needs review, the source checked, or the observation to verify.")
         self.nurse_review_comment.setStyleSheet(self.input_style())
 
         self.btn_submit_review_request = QPushButton("Submit for Admin Review", self.form_panel)
-        self.btn_submit_review_request.setGeometry(22, 898, 376, 38)
+        self.btn_submit_review_request.setGeometry(22, 976, 376, 38)
         self.btn_submit_review_request.setStyleSheet(self.primary_btn_style())
 
         self.preview_panel = QFrame(page)
@@ -1287,7 +1401,7 @@ class DashboardWindow(QWidget):
         self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
         self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #2dd4bf;")
 
-        return self.wrap_scroll_page(page, 980)
+        return self.wrap_scroll_page(page, 1080)
 
     # ---------------------------- approvals page ----------------------------
 
@@ -2724,6 +2838,8 @@ class DashboardWindow(QWidget):
             self.btn_choose_image, self.btn_clear_image,
         ]
         for widget in field_widgets:
+            widget.setEnabled(self.can_edit_residents())
+        for widget in getattr(self, "dropdown_option_buttons", []):
             widget.setEnabled(self.can_edit_residents())
 
         if hasattr(self, "nurse_review_comment"):
