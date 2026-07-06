@@ -1055,7 +1055,7 @@ class DashboardWindow(QWidget):
         page.setStyleSheet("background: transparent;")
 
         self.residents_panel = QFrame(page)
-        self.residents_panel.setGeometry(0, 0, 330, 1030)
+        self.residents_panel.setGeometry(0, 0, 330, 1110)
         self.apply_frame_style(self.residents_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Residents", self.residents_panel)
@@ -1068,7 +1068,7 @@ class DashboardWindow(QWidget):
         self.search_resident.setStyleSheet(self.input_style())
 
         self.resident_list = QListWidget(self.residents_panel)
-        self.resident_list.setGeometry(18, 110, 294, 902)
+        self.resident_list.setGeometry(18, 110, 294, 982)
         self.resident_list.setStyleSheet("""
             QListWidget {
                 background-color: transparent;
@@ -1096,7 +1096,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.form_panel = QFrame(page)
-        self.form_panel.setGeometry(345, 0, 420, 1030)
+        self.form_panel.setGeometry(345, 0, 420, 1110)
         self.apply_frame_style(self.form_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.form_heading = QLabel("Resident Information", self.form_panel)
@@ -1224,24 +1224,41 @@ class DashboardWindow(QWidget):
         self.source_doc_label.setWordWrap(True)
         self.source_doc_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
 
+        self.lbl_resident_photo = QLabel("Resident photo for LCD", self.form_panel)
+        self.lbl_resident_photo.setGeometry(22, 734, 180, 18)
+        self.lbl_resident_photo.setStyleSheet(self.label_style())
+
+        self.btn_attach_resident_photo = QPushButton("Attach Photo", self.form_panel)
+        self.btn_attach_resident_photo.setGeometry(22, 756, 128, 36)
+        self.btn_attach_resident_photo.setStyleSheet(self.secondary_btn_style())
+
+        self.btn_clear_resident_photo = QPushButton("Clear Photo", self.form_panel)
+        self.btn_clear_resident_photo.setGeometry(158, 756, 110, 36)
+        self.btn_clear_resident_photo.setStyleSheet(self.secondary_btn_style())
+
+        self.resident_photo_label = QLabel("No resident photo attached", self.form_panel)
+        self.resident_photo_label.setGeometry(278, 756, 120, 36)
+        self.resident_photo_label.setWordWrap(True)
+        self.resident_photo_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
+
         self.chk_safety_review = QCheckBox("Needs safety review", self.form_panel)
-        self.chk_safety_review.setGeometry(22, 734, 160, 24)
+        self.chk_safety_review.setGeometry(22, 812, 160, 24)
         self.chk_safety_review.setStyleSheet(self.chk_active.styleSheet())
 
         self.btn_new_resident = QPushButton("New Resident", self.form_panel)
-        self.btn_new_resident.setGeometry(22, 770, 120, 42)
+        self.btn_new_resident.setGeometry(22, 848, 120, 42)
         self.btn_new_resident.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_resident = QPushButton("Save Resident", self.form_panel)
-        self.btn_save_resident.setGeometry(152, 770, 120, 42)
+        self.btn_save_resident.setGeometry(152, 848, 120, 42)
         self.btn_save_resident.setStyleSheet(self.primary_btn_style())
 
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
-        self.btn_clear_fields.setGeometry(282, 770, 116, 42)
+        self.btn_clear_fields.setGeometry(282, 848, 116, 42)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
 
         self.btn_delete_resident = QPushButton("Delete Resident", self.form_panel)
-        self.btn_delete_resident.setGeometry(22, 820, 376, 38)
+        self.btn_delete_resident.setGeometry(22, 898, 376, 38)
         self.btn_delete_resident.setStyleSheet("""
             QPushButton {
                 background-color: #fff1f2;
@@ -1257,16 +1274,16 @@ class DashboardWindow(QWidget):
         """)
 
         review_label = QLabel("Staff review note", self.form_panel)
-        review_label.setGeometry(22, 872, 150, 18)
+        review_label.setGeometry(22, 950, 150, 18)
         review_label.setStyleSheet(self.label_style())
 
         self.nurse_review_comment = QTextEdit(self.form_panel)
-        self.nurse_review_comment.setGeometry(22, 896, 376, 68)
+        self.nurse_review_comment.setGeometry(22, 974, 376, 68)
         self.nurse_review_comment.setPlaceholderText("Write what needs review, the source checked, or the observation to verify.")
         self.nurse_review_comment.setStyleSheet(self.input_style())
 
         self.btn_submit_review_request = QPushButton("Submit for Admin Review", self.form_panel)
-        self.btn_submit_review_request.setGeometry(22, 976, 376, 38)
+        self.btn_submit_review_request.setGeometry(22, 1054, 376, 38)
         self.btn_submit_review_request.setStyleSheet(self.primary_btn_style())
 
         self.preview_panel = QFrame(page)
@@ -1401,7 +1418,7 @@ class DashboardWindow(QWidget):
         self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
         self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #2dd4bf;")
 
-        return self.wrap_scroll_page(page, 1080)
+        return self.wrap_scroll_page(page, 1160)
 
     # ---------------------------- approvals page ----------------------------
 
@@ -2304,16 +2321,18 @@ class DashboardWindow(QWidget):
         self.btn_choose_image = QPushButton("Choose LCD Image", self.upd_left)
         self.btn_choose_image.setGeometry(22, 488, 150, 42)
         self.btn_choose_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_choose_image.hide()
 
-        self.btn_send_image = QPushButton("Send Image", self.upd_left)
-        self.btn_send_image.setGeometry(182, 488, 120, 42)
+        self.btn_send_image = QPushButton("Send Resident Photo", self.upd_left)
+        self.btn_send_image.setGeometry(22, 488, 170, 42)
         self.btn_send_image.setStyleSheet(self.secondary_btn_style())
 
         self.btn_clear_image = QPushButton("Clear Image", self.upd_left)
         self.btn_clear_image.setGeometry(312, 488, 120, 42)
         self.btn_clear_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_clear_image.hide()
 
-        self.image_path_label = QLabel("No image selected", self.upd_left)
+        self.image_path_label = QLabel("Resident photo is managed in Resident Records.", self.upd_left)
         self.image_path_label.setGeometry(22, 540, 490, 44)
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
@@ -2555,6 +2574,8 @@ class DashboardWindow(QWidget):
         self.btn_delete_resident.clicked.connect(self.delete_selected_resident)
         self.btn_go_pairing_after_save.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_attach_source.clicked.connect(self.attach_source_document)
+        self.btn_attach_resident_photo.clicked.connect(self.attach_resident_photo)
+        self.btn_clear_resident_photo.clicked.connect(self.clear_lcd_image)
         self.btn_submit_review_request.clicked.connect(self.submit_resident_review_request)
 
         self.search_resident.textChanged.connect(self.filter_residents)
@@ -2578,6 +2599,7 @@ class DashboardWindow(QWidget):
         self.btn_choose_image.clicked.connect(self.choose_image)
         self.btn_send_image.clicked.connect(self.send_image)
         self.btn_clear_image.clicked.connect(self.clear_lcd_image)
+        self.upd_target.currentIndexChanged.connect(lambda _index: self.on_update_target_changed())
         self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
         self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
         self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
@@ -2660,6 +2682,7 @@ class DashboardWindow(QWidget):
         elif page == self.page_updates:
             self.load_update_targets()
             self.load_schedule_view()
+            self.on_update_target_changed()
             self.update_preview()
         elif page == self.page_verification:
             self.load_verification_page()
@@ -2689,6 +2712,27 @@ class DashboardWindow(QWidget):
 
     def current_resident_uid(self):
         return self.txt_uid.text().strip() or None
+
+    def display_path_label(self, path, empty_text):
+        if not path:
+            return empty_text
+        return os.path.basename(path) if os.path.isfile(str(path)) else str(path)
+
+    def sync_resident_photo_labels(self):
+        form_text = self.display_path_label(self.selected_image_path, "No resident photo attached")
+        schedule_text = self.display_path_label(
+            self.selected_image_path,
+            "No resident photo attached. Add one in Resident Records.",
+        )
+        if hasattr(self, "resident_photo_label"):
+            self.resident_photo_label.setText(form_text)
+        if hasattr(self, "image_path_label"):
+            self.image_path_label.setText(f"Resident photo: {schedule_text}" if self.selected_image_path else schedule_text)
+
+    def set_resident_photo_path(self, path):
+        self.selected_image_path = path or None
+        self.sync_resident_photo_labels()
+        self.update_lcd_image_preview()
 
     def collect_resident_payload(self):
         return {
@@ -2835,6 +2879,7 @@ class DashboardWindow(QWidget):
             self.txt_name, self.txt_room, self.cmb_alert, self.txt_diet,
             self.txt_allergies, self.txt_note, self.txt_drinks, self.txt_schedule,
             self.chk_active, self.chk_safety_review, self.btn_attach_source,
+            self.btn_attach_resident_photo, self.btn_clear_resident_photo,
             self.btn_choose_image, self.btn_clear_image,
         ]
         for widget in field_widgets:
@@ -2935,7 +2980,7 @@ class DashboardWindow(QWidget):
         self.cmb_alert.setCurrentIndex(0)
 
         self.selected_image_path = None
-        self.image_path_label.setText("No image selected")
+        self.sync_resident_photo_labels()
         self.selected_source_document = None
         self.source_doc_label.setText("No source document attached")
 
@@ -4312,13 +4357,10 @@ class DashboardWindow(QWidget):
         layout.addWidget(close_btn)
         dialog.exec()
 
-    def on_resident_selected(self, item):
-        resident_id = item.data(Qt.ItemDataRole.UserRole)
-        row = self.db.get_resident(resident_id)
+    def apply_resident_row_to_form(self, row):
         if not row:
             return
-
-        self.selected_resident_id = resident_id
+        self.selected_resident_id = row.get("id")
         self.txt_uid.setText(row["resident_uid"] or "")
         self.txt_name.setText(row["full_name"] or "")
         self.txt_room.setText(row.get("room") or "")
@@ -4335,12 +4377,18 @@ class DashboardWindow(QWidget):
         self.selected_source_document = row.get("source_document") or None
         self.source_doc_label.setText(os.path.basename(self.selected_source_document) if self.selected_source_document else "No source document attached")
         self.chk_safety_review.setChecked(bool(row.get("needs_safety_review", False)))
-        self.selected_image_path = row.get("lcd_image_path") or None
-        if self.selected_image_path and hasattr(self, "image_path_label"):
-            self.image_path_label.setText(self.selected_image_path)
+        self.set_resident_photo_path(row.get("lcd_image_path") or None)
         self.chk_active.setChecked(bool(row.get("active", True)))
 
         self.update_preview()
+
+    def on_resident_selected(self, item):
+        resident_id = item.data(Qt.ItemDataRole.UserRole)
+        row = self.db.get_resident(resident_id)
+        if not row:
+            return
+
+        self.apply_resident_row_to_form(row)
         self.load_update_targets()
         if row.get("paired_device_id"):
             idx = self.upd_target.findData(row.get("paired_device_id"))
@@ -4605,6 +4653,43 @@ class DashboardWindow(QWidget):
             if idx >= 0:
                 self.upd_target.setCurrentIndex(idx)
         self.upd_target.blockSignals(False)
+
+    def resident_for_device(self, device_id):
+        if not device_id:
+            return None
+        devices = self.safe_get_devices()
+        device = next((d for d in devices if str(d.get("device_id")) == str(device_id)), None)
+        if not device:
+            return None
+
+        resident_id = device.get("paired_resident_id") or device.get("resident_id")
+        if resident_id:
+            row = self.db.get_resident(resident_id)
+            if row:
+                return row
+
+        residents = self.db.get_residents()
+        resident_uid = device.get("resident_uid")
+        resident_name = device.get("resident_name")
+        return next(
+            (
+                row for row in residents
+                if str(row.get("paired_device_id") or "") == str(device_id)
+                or (resident_uid and str(row.get("resident_uid") or "") == str(resident_uid))
+                or (resident_name and str(row.get("full_name") or "") == str(resident_name))
+            ),
+            None,
+        )
+
+    def on_update_target_changed(self):
+        if not hasattr(self, "upd_target"):
+            return
+        row = self.resident_for_device(self.selected_device_id())
+        if row:
+            self.apply_resident_row_to_form(row)
+        else:
+            self.sync_resident_photo_labels()
+            self.update_lcd_image_preview()
 
     def load_pairing_views(self):
         resident_id = self.selected_pair_resident_id
@@ -5131,23 +5216,20 @@ class DashboardWindow(QWidget):
             self.show_error("Schedule", message)
 
     def choose_image(self):
+        self.attach_resident_photo()
+
+    def attach_resident_photo(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Choose image for LCD",
+            "Attach resident photo for LCD",
             "",
             "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
-        if not path:
-            return
-
-        self.selected_image_path = path
-        self.image_path_label.setText(path)
-        self.update_lcd_image_preview()
+        if path:
+            self.set_resident_photo_path(path)
 
     def clear_lcd_image(self):
-        self.selected_image_path = None
-        self.image_path_label.setText("No image selected")
-        self.update_lcd_image_preview()
+        self.set_resident_photo_path(None)
 
     def send_image(self):
         if not self.require_network_for_write("Sending LCD image"):
