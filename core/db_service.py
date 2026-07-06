@@ -1,4 +1,6 @@
 import json
+import mimetypes
+import os
 import sqlite3
 import uuid
 from datetime import datetime
@@ -6,7 +8,7 @@ from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
-from config import DATABASE_MODE, LOCAL_DB_PATH
+from config import APP_DATA_DIR, DATABASE_MODE, LOCAL_DB_PATH
 from db_config import DB_CONFIG
 
 
@@ -92,14 +94,19 @@ class DatabaseService:
                 full_name VARCHAR(255) NOT NULL,
                 room VARCHAR(64),
                 diet TEXT,
+                texture TEXT,
                 allergies TEXT,
                 note TEXT,
                 drinks TEXT,
+                fluids TEXT,
                 schedule TEXT,
                 source_document TEXT,
                 safety_review_note TEXT,
                 needs_safety_review BOOLEAN NOT NULL DEFAULT FALSE,
                 lcd_image_path TEXT,
+                resident_photo_data BYTEA,
+                resident_photo_mime TEXT,
+                resident_photo_name TEXT,
                 lcd_schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                 lcd_on_time TEXT,
                 lcd_off_time TEXT,
@@ -110,11 +117,16 @@ class DatabaseService:
             );
             """)
             for column_sql in [
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS texture TEXT",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS fluids TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS schedule TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS source_document TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS safety_review_note TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS needs_safety_review BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_image_path TEXT",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS resident_photo_data BYTEA",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS resident_photo_mime TEXT",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS resident_photo_name TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_on_time TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_off_time TEXT",
@@ -192,14 +204,19 @@ class DatabaseService:
                 full_name TEXT NOT NULL,
                 room TEXT,
                 diet TEXT,
+                texture TEXT,
                 allergies TEXT,
                 note TEXT,
                 drinks TEXT,
+                fluids TEXT,
                 schedule TEXT,
                 source_document TEXT,
                 safety_review_note TEXT,
                 needs_safety_review INTEGER NOT NULL DEFAULT 0,
                 lcd_image_path TEXT,
+                resident_photo_data BLOB,
+                resident_photo_mime TEXT,
+                resident_photo_name TEXT,
                 lcd_schedule_enabled INTEGER NOT NULL DEFAULT 0,
                 lcd_on_time TEXT,
                 lcd_off_time TEXT,
@@ -276,6 +293,7 @@ class DatabaseService:
             );
             """)
 
+        self._migrate_resident_alias_columns(cur)
         self._ensure_it_control_tables(cur)
         self.conn.commit()
         cur.close()
@@ -349,11 +367,16 @@ class DatabaseService:
     def _add_resident_columns(self, cur):
         existing = {row["name"] for row in cur.execute("PRAGMA table_info(residents)").fetchall()}
         columns = {
+            "texture": "TEXT",
+            "fluids": "TEXT",
             "schedule": "TEXT",
             "source_document": "TEXT",
             "safety_review_note": "TEXT",
             "needs_safety_review": "INTEGER NOT NULL DEFAULT 0",
             "lcd_image_path": "TEXT",
+            "resident_photo_data": "BLOB",
+            "resident_photo_mime": "TEXT",
+            "resident_photo_name": "TEXT",
             "lcd_schedule_enabled": "INTEGER NOT NULL DEFAULT 0",
             "lcd_on_time": "TEXT",
             "lcd_off_time": "TEXT",
@@ -363,21 +386,105 @@ class DatabaseService:
             if name not in existing:
                 cur.execute(f"ALTER TABLE residents ADD COLUMN {name} {definition}")
 
+    def _migrate_resident_alias_columns(self, cur):
+        if self.backend == "postgres":
+            statements = [
+                "UPDATE residents SET texture = allergies WHERE (texture IS NULL OR texture = '') AND allergies IS NOT NULL AND allergies <> ''",
+                "UPDATE residents SET fluids = schedule WHERE (fluids IS NULL OR fluids = '') AND schedule IS NOT NULL AND schedule <> ''",
+                "UPDATE residents SET allergies = texture WHERE (allergies IS NULL OR allergies = '') AND texture IS NOT NULL AND texture <> ''",
+                "UPDATE residents SET schedule = fluids WHERE (schedule IS NULL OR schedule = '') AND fluids IS NOT NULL AND fluids <> ''",
+            ]
+        else:
+            statements = [
+                "UPDATE residents SET texture = allergies WHERE (texture IS NULL OR texture = '') AND allergies IS NOT NULL AND allergies <> ''",
+                "UPDATE residents SET fluids = schedule WHERE (fluids IS NULL OR fluids = '') AND schedule IS NOT NULL AND schedule <> ''",
+                "UPDATE residents SET allergies = texture WHERE (allergies IS NULL OR allergies = '') AND texture IS NOT NULL AND texture <> ''",
+                "UPDATE residents SET schedule = fluids WHERE (schedule IS NULL OR schedule = '') AND fluids IS NOT NULL AND fluids <> ''",
+            ]
+        for statement in statements:
+            cur.execute(statement)
+
+    def _resident_texture(self, data):
+        return data.get("texture") or data.get("allergies")
+
+    def _resident_fluids(self, data):
+        return data.get("fluids") or data.get("schedule")
+
+    def _resident_photo_values(self, data):
+        photo_data = data.get("resident_photo_data")
+        photo_mime = data.get("resident_photo_mime")
+        photo_name = data.get("resident_photo_name")
+        image_path = data.get("lcd_image_path") or data.get("resident_photo_path")
+
+        if photo_data is None and image_path and os.path.isfile(str(image_path)):
+            with open(image_path, "rb") as fh:
+                photo_data = fh.read()
+            photo_name = photo_name or os.path.basename(str(image_path))
+            photo_mime = photo_mime or mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
+
+        return photo_data, photo_mime, photo_name
+
+    def _normalize_resident_fields(self, row):
+        if not row:
+            return row
+        row = dict(row)
+        texture = row.get("texture") or row.get("allergies") or ""
+        fluids = row.get("fluids") or row.get("schedule") or ""
+        row["texture"] = texture
+        row["allergies"] = texture
+        row["fluids"] = fluids
+        row["schedule"] = fluids
+        return self._materialize_resident_photo(row)
+
+    def _materialize_resident_photo(self, row):
+        photo_data = row.get("resident_photo_data")
+        if not photo_data:
+            return row
+
+        current_path = row.get("lcd_image_path") or ""
+        if current_path and os.path.isfile(str(current_path)):
+            return row
+
+        photo_name = row.get("resident_photo_name") or ""
+        photo_mime = row.get("resident_photo_mime") or ""
+        suffix = os.path.splitext(photo_name)[1] or mimetypes.guess_extension(photo_mime) or ".jpg"
+        base = str(row.get("resident_uid") or row.get("id") or "resident_photo")
+        safe_base = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in base)
+        photo_dir = APP_DATA_DIR / "resident_photos"
+        photo_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = photo_dir / f"{safe_base}{suffix}"
+
+        try:
+            with open(cache_path, "wb") as fh:
+                fh.write(bytes(photo_data))
+            row["lcd_image_path"] = str(cache_path)
+        except Exception:
+            pass
+        return row
+
     def create_resident(self, data):
         cur = self._cursor()
+        texture = self._resident_texture(data)
+        fluids = self._resident_fluids(data)
+        photo_data, photo_mime, photo_name = self._resident_photo_values(data)
         values = (
             data["resident_uid"],
             data["full_name"],
             data.get("room"),
             data.get("diet"),
-            data.get("allergies"),
+            texture,
+            data.get("allergies") or texture,
             data.get("note"),
             data.get("drinks"),
-            data.get("schedule"),
+            fluids,
+            data.get("schedule") or fluids,
             data.get("source_document"),
             data.get("safety_review_note"),
             data.get("needs_safety_review", False),
             data.get("lcd_image_path"),
+            photo_data,
+            photo_mime,
+            photo_name,
             data.get("lcd_schedule_enabled", False),
             data.get("lcd_on_time"),
             data.get("lcd_off_time"),
@@ -387,22 +494,24 @@ class DatabaseService:
         if self.backend == "postgres":
             cur.execute("""
                 INSERT INTO residents (
-                    resident_uid, full_name, room, diet, allergies, note, drinks,
-                    schedule, source_document, safety_review_note, needs_safety_review,
-                    lcd_image_path, lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
+                    resident_uid, full_name, room, diet, texture, allergies, note, drinks,
+                    fluids, schedule, source_document, safety_review_note, needs_safety_review,
+                    lcd_image_path, resident_photo_data, resident_photo_mime, resident_photo_name,
+                    lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, values)
             resident_id = cur.fetchone()[0]
         else:
             cur.execute("""
                 INSERT INTO residents (
-                    resident_uid, full_name, room, diet, allergies, note, drinks,
-                    schedule, source_document, safety_review_note, needs_safety_review,
-                    lcd_image_path, lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
+                    resident_uid, full_name, room, diet, texture, allergies, note, drinks,
+                    fluids, schedule, source_document, safety_review_note, needs_safety_review,
+                    lcd_image_path, resident_photo_data, resident_photo_mime, resident_photo_name,
+                    lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, values)
             resident_id = cur.lastrowid
         self.conn.commit()
@@ -411,18 +520,26 @@ class DatabaseService:
 
     def update_resident(self, resident_id, data):
         cur = self._cursor()
+        texture = self._resident_texture(data)
+        fluids = self._resident_fluids(data)
+        photo_data, photo_mime, photo_name = self._resident_photo_values(data)
         values = (
             data["full_name"],
             data.get("room"),
             data.get("diet"),
-            data.get("allergies"),
+            texture,
+            data.get("allergies") or texture,
             data.get("note"),
             data.get("drinks"),
-            data.get("schedule"),
+            fluids,
+            data.get("schedule") or fluids,
             data.get("source_document"),
             data.get("safety_review_note"),
             data.get("needs_safety_review", False),
             data.get("lcd_image_path"),
+            photo_data,
+            photo_mime,
+            photo_name,
             data.get("lcd_schedule_enabled", False),
             data.get("lcd_on_time"),
             data.get("lcd_off_time"),
@@ -436,14 +553,19 @@ class DatabaseService:
                 SET full_name=%s,
                     room=%s,
                     diet=%s,
+                    texture=%s,
                     allergies=%s,
                     note=%s,
                     drinks=%s,
+                    fluids=%s,
                     schedule=%s,
                     source_document=%s,
                     safety_review_note=%s,
                     needs_safety_review=%s,
                     lcd_image_path=%s,
+                    resident_photo_data=%s,
+                    resident_photo_mime=%s,
+                    resident_photo_name=%s,
                     lcd_schedule_enabled=%s,
                     lcd_on_time=%s,
                     lcd_off_time=%s,
@@ -458,14 +580,19 @@ class DatabaseService:
                 SET full_name=?,
                     room=?,
                     diet=?,
+                    texture=?,
                     allergies=?,
                     note=?,
                     drinks=?,
+                    fluids=?,
                     schedule=?,
                     source_document=?,
                     safety_review_note=?,
                     needs_safety_review=?,
                     lcd_image_path=?,
+                    resident_photo_data=?,
+                    resident_photo_mime=?,
+                    resident_photo_name=?,
                     lcd_schedule_enabled=?,
                     lcd_on_time=?,
                     lcd_off_time=?,
@@ -489,7 +616,7 @@ class DatabaseService:
         """)
         rows = self._rows(cur.fetchall())
         cur.close()
-        return rows
+        return [self._normalize_resident_fields(row) for row in rows]
 
     def get_resident(self, resident_id):
         cur = self._cursor(dict_rows=True)
@@ -504,7 +631,7 @@ class DatabaseService:
         """, (resident_id,))
         row = self._row(cur.fetchone())
         cur.close()
-        return row
+        return self._normalize_resident_fields(row)
 
     def upsert_devices(self, devices):
         cur = self._cursor()
@@ -825,6 +952,9 @@ class DatabaseService:
                    r.lcd_off_time,
                    r.sleep_if_no_image,
                    r.lcd_image_path,
+                   r.resident_photo_data,
+                   r.resident_photo_mime,
+                   r.resident_photo_name,
                    d.device_id,
                    d.is_online
             FROM residents r
@@ -833,7 +963,7 @@ class DatabaseService:
         """)
         rows = self._rows(cur.fetchall())
         cur.close()
-        return rows
+        return [self._normalize_resident_fields(row) for row in rows]
 
     def get_dashboard_summary(self):
         cur = self._cursor(dict_rows=True)

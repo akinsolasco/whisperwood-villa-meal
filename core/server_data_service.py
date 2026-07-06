@@ -88,6 +88,15 @@ class ServerDataService:
         resident_id = row.get("id") or row.get("resident_id")
         paired = next((d for d in devices or [] if str(d.get("paired_resident_id") or d.get("resident_id") or "") == str(resident_id)), {})
         status_alert = row.get("status_alert") or row.get("status") or row.get("alert") or "Stable"
+        texture = row.get("texture") or row.get("allergies") or ""
+        fluids = row.get("fluids") or row.get("schedule") or ""
+        image_path = (
+            row.get("resident_photo_path")
+            or row.get("lcd_image_path")
+            or row.get("image_path")
+            or row.get("image_url")
+            or ""
+        )
         return {
             **row,
             "id": resident_id,
@@ -96,14 +105,16 @@ class ServerDataService:
             "room": row.get("room") or "",
             "status_alert": status_alert,
             "diet": row.get("diet") or "",
-            "allergies": row.get("allergies") or "",
+            "texture": texture,
+            "allergies": texture,
             "note": row.get("note") or "",
             "drinks": row.get("drinks") or "",
-            "schedule": row.get("schedule") or "",
+            "fluids": fluids,
+            "schedule": fluids,
             "source_document": row.get("source_document") or row.get("document_path") or row.get("document_url") or "",
             "safety_review_note": row.get("safety_review_note") or "",
             "needs_safety_review": bool(row.get("needs_safety_review", False)),
-            "lcd_image_path": row.get("lcd_image_path") or row.get("image_path") or row.get("image_url") or "",
+            "lcd_image_path": image_path,
             "lcd_schedule_enabled": bool(row.get("lcd_schedule_enabled", False)),
             "lcd_on_time": row.get("lcd_on_time"),
             "lcd_off_time": row.get("lcd_off_time"),
@@ -114,16 +125,20 @@ class ServerDataService:
         }
 
     def _resident_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        texture = data.get("texture") or data.get("allergies")
+        fluids = data.get("fluids") or data.get("schedule")
         return {
             "resident_uid": data.get("resident_uid"),
             "full_name": data.get("full_name"),
             "room": data.get("room"),
             "status_alert": data.get("status_alert") or data.get("status") or "Stable",
             "diet": data.get("diet"),
-            "allergies": data.get("allergies"),
+            "texture": texture,
+            "allergies": texture,
             "note": data.get("note"),
             "drinks": data.get("drinks"),
-            "schedule": data.get("schedule"),
+            "fluids": fluids,
+            "schedule": fluids,
             "source_document": data.get("source_document"),
             "safety_review_note": data.get("safety_review_note"),
             "needs_safety_review": bool(data.get("needs_safety_review", False)),

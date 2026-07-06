@@ -42,7 +42,7 @@ class LoginWindow(QtWidgets.QWidget):
         self.login_loading_timer.setInterval(220)
         self.login_loading_timer.timeout.connect(self._tick_login_loading)
 
-        self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
+        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo_transparent.png"
         self.photo_path = ASSETS_DIR / "senior-woman-talking-with-her-doctor.jpg"
 
         self.setWindowTitle(f"{APP_NAME} Login")
@@ -107,11 +107,11 @@ class LoginWindow(QtWidgets.QWidget):
         self.right_panel.setStyleSheet("background: transparent;")
 
         self.logo = QtWidgets.QLabel(self.right_panel)
-        self.logo.setGeometry(135, 20, 200, 100)
+        self.logo.setGeometry(50, 8, 370, 118)
         self.logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         if self.logo_path.exists():
             pix = QtGui.QPixmap(str(self.logo_path)).scaled(
-                180, 95,
+                360, 112,
                 QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation
             )

@@ -46,6 +46,10 @@ class UpdaterService:
         for asset in release.get("assets", []):
             if asset.get("name") == INSTALLER_NAME and asset.get("browser_download_url"):
                 return asset["browser_download_url"]
+        for asset in release.get("assets", []):
+            name = str(asset.get("name") or "").lower()
+            if name.endswith(".exe") and asset.get("browser_download_url"):
+                return asset["browser_download_url"]
         tag = release.get("tag_name", f"{RELEASE_TAG_PREFIX}{APP_VERSION}")
         return f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{tag}/{INSTALLER_NAME}"
 

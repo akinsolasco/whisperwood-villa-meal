@@ -13,10 +13,11 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu,
+    QInputDialog
 )
 
-from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
+from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS, APP_DATA_DIR
 from auth.auth_service import AuthService
 from core.app_settings import APP_MODE_DEMO, APP_MODE_SERVER, AppSettingsStore
 from core.control_service_client import ControlServiceClient
@@ -34,6 +35,13 @@ class DashboardWindow(QWidget):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
         self.current_role = self.normalize_role(self.current_user.get("role", "NURSE_ADMIN"))
+        self.dropdown_option_defaults = {
+            "diet": ["Regular", "Diabetic", "Low sodium", "Vegetarian", "High protein", "Texture modified", "Nil by mouth", "Custom"],
+            "texture": ["Regular", "Easy to chew", "Soft and bite-sized", "Minced and moist", "Pureed", "Liquidised", "Thickened", "Custom"],
+            "fluids": ["Regular fluids", "Encourage fluids", "Fluid restriction", "Thickened fluids", "Slightly thick", "Mildly thick", "Moderately thick", "Custom"],
+        }
+        self.dropdown_options = self.load_dropdown_options()
+        self.dropdown_option_buttons = []
         self.settings = AppSettingsStore()
         self.server_mode = self.current_user.get("data_source") == "server" or self.settings.get_mode() == APP_MODE_SERVER
         self.db = ServerDataService() if self.server_mode else DatabaseService()
@@ -59,7 +67,7 @@ class DashboardWindow(QWidget):
         self.global_schedule_on = "07:00"
         self.global_schedule_off = "20:00"
         self.global_schedule_sleep_if_no_image = False
-        self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
+        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo_transparent.png"
         self.page_base_width = 1218
 
         self.setWindowTitle(f"{APP_NAME} Dashboard")
@@ -217,6 +225,142 @@ class DashboardWindow(QWidget):
     def label_style(self):
         return "font-size: 13px; font-weight: 700; color: #334155; background: transparent; border: none;"
 
+    def dropdown_options_file(self):
+        return APP_DATA_DIR / "resident_dropdown_options.json"
+
+    def normalize_option_list(self, values):
+        seen = set()
+        out = []
+        for value in values or []:
+            text = str(value or "").strip()
+            key = text.lower()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
+
+    def load_dropdown_options(self):
+        stored = {}
+        path = self.dropdown_options_file()
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    stored = json.load(fh)
+            except Exception:
+                stored = {}
+        return {
+            key: self.normalize_option_list(list(defaults) + list(stored.get(key, [])))
+            for key, defaults in self.dropdown_option_defaults.items()
+        }
+
+    def save_dropdown_options(self):
+        path = self.dropdown_options_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(self.dropdown_options, fh, indent=2)
+
+    def editable_dropdown(self, parent, options, placeholder="Select or type custom"):
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        combo.addItems(options)
+        combo.setCurrentIndex(-1)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.InsertAtBottom)
+        if combo.lineEdit():
+            combo.lineEdit().setPlaceholderText(placeholder)
+        combo.setStyleSheet(self.input_style())
+        return combo
+
+    def create_dropdown_option_buttons(self, parent, combo, add_x, y, delete_x):
+        add_btn = QPushButton("+", parent)
+        add_btn.setGeometry(add_x, y, 38, 42)
+        add_btn.setToolTip("Add the typed value to this dropdown")
+        add_btn.setStyleSheet(self.secondary_btn_style())
+        add_btn.clicked.connect(lambda: self.add_dropdown_option(combo))
+
+        delete_btn = QPushButton("Del", parent)
+        delete_btn.setGeometry(delete_x, y, 50, 42)
+        delete_btn.setToolTip("Delete the selected option from this dropdown")
+        delete_btn.setStyleSheet(self.secondary_btn_style())
+        delete_btn.clicked.connect(lambda: self.delete_dropdown_option(combo))
+
+        self.dropdown_option_buttons.extend([add_btn, delete_btn])
+        return add_btn, delete_btn
+
+    def add_dropdown_option(self, combo):
+        option_key = combo.property("option_key")
+        text = combo.currentText().strip()
+        if not text:
+            text, ok = QInputDialog.getText(self, "Add dropdown option", "Option name:")
+            text = text.strip()
+            if not ok or not text:
+                return
+        if combo.findText(text, Qt.MatchFlag.MatchFixedString) < 0:
+            combo.addItem(text)
+        combo.setCurrentText(text)
+        if option_key:
+            self.dropdown_options[option_key] = self.normalize_option_list(
+                [combo.itemText(i) for i in range(combo.count())]
+            )
+            self.save_dropdown_options()
+        self.refresh_token_list()
+        self.update_preview()
+
+    def delete_dropdown_option(self, combo):
+        option_key = combo.property("option_key")
+        text = combo.currentText().strip()
+        idx = combo.findText(text, Qt.MatchFlag.MatchFixedString)
+        if idx < 0:
+            self.show_error("Delete option", "Select an existing dropdown option to delete.")
+            return
+        if combo.count() <= 1:
+            self.show_error("Delete option", "At least one option must remain in the dropdown.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete dropdown option",
+            f"Delete '{text}' from this dropdown?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        combo.removeItem(idx)
+        combo.setCurrentIndex(-1)
+        combo.setEditText("")
+        if option_key:
+            self.dropdown_options[option_key] = self.normalize_option_list(
+                [combo.itemText(i) for i in range(combo.count())]
+            )
+            self.save_dropdown_options()
+        self.refresh_token_list()
+        self.update_preview()
+
+    def field_text(self, widget) -> str:
+        if isinstance(widget, QComboBox):
+            return widget.currentText().strip()
+        if isinstance(widget, QLineEdit):
+            return widget.text().strip()
+        return ""
+
+    def set_field_text(self, widget, value):
+        value = str(value or "")
+        if isinstance(widget, QComboBox):
+            idx = widget.findText(value, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                widget.setCurrentIndex(idx)
+            else:
+                widget.setEditText(value)
+            return
+        widget.setText(value)
+
+    def clear_field_text(self, widget):
+        if isinstance(widget, QComboBox):
+            widget.setCurrentIndex(-1)
+            widget.setEditText("")
+            return
+        widget.clear()
+
     # ---------------------------- window helpers ----------------------------
 
     def available_geometry_for_window(self):
@@ -259,12 +403,12 @@ class DashboardWindow(QWidget):
         self.apply_frame_style(self.sidebar, "background-color: #ffffff; border-radius: 10px; border: 1px solid #d8e1ea;")
 
         self.logo = QLabel(self.sidebar)
-        self.logo.setGeometry(22, 20, 200, 82)
+        self.logo.setGeometry(10, 12, 224, 98)
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if self.logo_path.exists():
             self.logo.setPixmap(
                 QPixmap(str(self.logo_path)).scaled(
-                    175, 78,
+                    216, 92,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
@@ -743,6 +887,8 @@ class DashboardWindow(QWidget):
         # Render text labels as plain text (no visible container box).
         protected_labels = {
             getattr(self, "user_avatar", None),
+            getattr(self, "lcd_empty_state", None),
+            getattr(self, "upd_lcd_empty_state", None),
         }
         for label in self.findChildren(QLabel):
             if label in protected_labels:
@@ -909,7 +1055,7 @@ class DashboardWindow(QWidget):
         page.setStyleSheet("background: transparent;")
 
         self.residents_panel = QFrame(page)
-        self.residents_panel.setGeometry(0, 0, 330, 940)
+        self.residents_panel.setGeometry(0, 0, 330, 1110)
         self.apply_frame_style(self.residents_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Residents", self.residents_panel)
@@ -922,7 +1068,7 @@ class DashboardWindow(QWidget):
         self.search_resident.setStyleSheet(self.input_style())
 
         self.resident_list = QListWidget(self.residents_panel)
-        self.resident_list.setGeometry(18, 110, 294, 812)
+        self.resident_list.setGeometry(18, 110, 294, 982)
         self.resident_list.setStyleSheet("""
             QListWidget {
                 background-color: transparent;
@@ -950,7 +1096,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.form_panel = QFrame(page)
-        self.form_panel.setGeometry(345, 0, 420, 940)
+        self.form_panel.setGeometry(345, 0, 420, 1110)
         self.apply_frame_style(self.form_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.form_heading = QLabel("Resident Information", self.form_panel)
@@ -1001,33 +1147,40 @@ class DashboardWindow(QWidget):
         self.lbl_room.setStyleSheet(self.label_style())
 
         self.txt_room = QLineEdit(self.form_panel)
-        self.txt_room.setGeometry(22, 227, 120, 42)
+        self.txt_room.setGeometry(22, 227, 180, 42)
         self.txt_room.setStyleSheet(self.input_style())
 
-        self.lbl_alert = QLabel("Alert / Status", self.form_panel)
-        self.lbl_alert.setGeometry(160, 205, 90, 18)
-        self.lbl_alert.setStyleSheet(self.label_style())
-
         self.cmb_alert = QComboBox(self.form_panel)
-        self.cmb_alert.setGeometry(160, 227, 160, 42)
+        self.cmb_alert.setGeometry(-1000, -1000, 1, 1)
         self.cmb_alert.addItems(["Stable", "Needs Attention", "Fall Risk", "Emergency"])
         self.cmb_alert.setStyleSheet(self.input_style())
+        self.cmb_alert.hide()
 
-        self.lbl_diet = QLabel("Diet (comma list)", self.form_panel)
+        self.lbl_diet = QLabel("Diet", self.form_panel)
         self.lbl_diet.setGeometry(22, 280, 120, 18)
         self.lbl_diet.setStyleSheet(self.label_style())
 
-        self.txt_diet = QLineEdit(self.form_panel)
-        self.txt_diet.setGeometry(22, 302, 376, 42)
-        self.txt_diet.setStyleSheet(self.input_style())
+        self.txt_diet = self.editable_dropdown(
+            self.form_panel,
+            self.dropdown_options["diet"],
+            "Select diet or type custom",
+        )
+        self.txt_diet.setProperty("option_key", "diet")
+        self.txt_diet.setGeometry(22, 302, 266, 42)
+        self.btn_add_diet_option, self.btn_delete_diet_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_diet, 298, 302, 348)
 
-        self.lbl_allergies = QLabel("Allergies (comma list)", self.form_panel)
+        self.lbl_allergies = QLabel("Texture", self.form_panel)
         self.lbl_allergies.setGeometry(22, 355, 140, 18)
         self.lbl_allergies.setStyleSheet(self.label_style())
 
-        self.txt_allergies = QLineEdit(self.form_panel)
-        self.txt_allergies.setGeometry(22, 377, 376, 42)
-        self.txt_allergies.setStyleSheet(self.input_style())
+        self.txt_allergies = self.editable_dropdown(
+            self.form_panel,
+            self.dropdown_options["texture"],
+            "Select texture or type custom",
+        )
+        self.txt_allergies.setProperty("option_key", "texture")
+        self.txt_allergies.setGeometry(22, 377, 266, 42)
+        self.btn_add_texture_option, self.btn_delete_texture_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_allergies, 298, 377, 348)
 
         self.lbl_note = QLabel("Note", self.form_panel)
         self.lbl_note.setGeometry(22, 430, 60, 18)
@@ -1042,49 +1195,70 @@ class DashboardWindow(QWidget):
         self.lbl_drinks.setStyleSheet(self.label_style())
 
         self.txt_drinks = QLineEdit(self.form_panel)
-        self.txt_drinks.setGeometry(22, 542, 180, 42)
+        self.txt_drinks.setGeometry(22, 542, 376, 42)
         self.txt_drinks.setStyleSheet(self.input_style())
 
-        self.lbl_schedule = QLabel("Schedule", self.form_panel)
-        self.lbl_schedule.setGeometry(218, 520, 80, 18)
+        self.lbl_schedule = QLabel("Fluids", self.form_panel)
+        self.lbl_schedule.setGeometry(22, 595, 80, 18)
         self.lbl_schedule.setStyleSheet(self.label_style())
 
-        self.txt_schedule = QLineEdit(self.form_panel)
-        self.txt_schedule.setGeometry(218, 542, 180, 42)
-        self.txt_schedule.setPlaceholderText("Meals, care, reminders")
-        self.txt_schedule.setStyleSheet(self.input_style())
+        self.txt_schedule = self.editable_dropdown(
+            self.form_panel,
+            self.dropdown_options["fluids"],
+            "Select fluids or type custom",
+        )
+        self.txt_schedule.setProperty("option_key", "fluids")
+        self.txt_schedule.setGeometry(22, 617, 266, 42)
+        self.btn_add_fluids_option, self.btn_delete_fluids_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_schedule, 298, 617, 348)
 
         self.lbl_source = QLabel("Source document", self.form_panel)
-        self.lbl_source.setGeometry(22, 586, 120, 18)
+        self.lbl_source.setGeometry(22, 670, 120, 18)
         self.lbl_source.setStyleSheet(self.label_style())
 
         self.btn_attach_source = QPushButton("Attach Document", self.form_panel)
-        self.btn_attach_source.setGeometry(22, 608, 150, 36)
+        self.btn_attach_source.setGeometry(22, 692, 150, 36)
         self.btn_attach_source.setStyleSheet(self.secondary_btn_style())
 
         self.source_doc_label = QLabel("No source document attached", self.form_panel)
-        self.source_doc_label.setGeometry(182, 608, 216, 36)
+        self.source_doc_label.setGeometry(182, 692, 216, 36)
         self.source_doc_label.setWordWrap(True)
         self.source_doc_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
 
+        self.lbl_resident_photo = QLabel("Resident photo for LCD", self.form_panel)
+        self.lbl_resident_photo.setGeometry(22, 734, 180, 18)
+        self.lbl_resident_photo.setStyleSheet(self.label_style())
+
+        self.btn_attach_resident_photo = QPushButton("Attach Photo", self.form_panel)
+        self.btn_attach_resident_photo.setGeometry(22, 756, 128, 36)
+        self.btn_attach_resident_photo.setStyleSheet(self.secondary_btn_style())
+
+        self.btn_clear_resident_photo = QPushButton("Clear Photo", self.form_panel)
+        self.btn_clear_resident_photo.setGeometry(158, 756, 110, 36)
+        self.btn_clear_resident_photo.setStyleSheet(self.secondary_btn_style())
+
+        self.resident_photo_label = QLabel("No resident photo attached", self.form_panel)
+        self.resident_photo_label.setGeometry(278, 756, 120, 36)
+        self.resident_photo_label.setWordWrap(True)
+        self.resident_photo_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
+
         self.chk_safety_review = QCheckBox("Needs safety review", self.form_panel)
-        self.chk_safety_review.setGeometry(22, 650, 160, 24)
+        self.chk_safety_review.setGeometry(22, 812, 160, 24)
         self.chk_safety_review.setStyleSheet(self.chk_active.styleSheet())
 
         self.btn_new_resident = QPushButton("New Resident", self.form_panel)
-        self.btn_new_resident.setGeometry(22, 686, 120, 42)
+        self.btn_new_resident.setGeometry(22, 848, 120, 42)
         self.btn_new_resident.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_resident = QPushButton("Save Resident", self.form_panel)
-        self.btn_save_resident.setGeometry(152, 686, 120, 42)
+        self.btn_save_resident.setGeometry(152, 848, 120, 42)
         self.btn_save_resident.setStyleSheet(self.primary_btn_style())
 
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
-        self.btn_clear_fields.setGeometry(282, 686, 116, 42)
+        self.btn_clear_fields.setGeometry(282, 848, 116, 42)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
 
         self.btn_delete_resident = QPushButton("Delete Resident", self.form_panel)
-        self.btn_delete_resident.setGeometry(22, 736, 376, 38)
+        self.btn_delete_resident.setGeometry(22, 898, 376, 38)
         self.btn_delete_resident.setStyleSheet("""
             QPushButton {
                 background-color: #fff1f2;
@@ -1100,16 +1274,16 @@ class DashboardWindow(QWidget):
         """)
 
         review_label = QLabel("Staff review note", self.form_panel)
-        review_label.setGeometry(22, 790, 150, 18)
+        review_label.setGeometry(22, 950, 150, 18)
         review_label.setStyleSheet(self.label_style())
 
         self.nurse_review_comment = QTextEdit(self.form_panel)
-        self.nurse_review_comment.setGeometry(22, 814, 376, 72)
+        self.nurse_review_comment.setGeometry(22, 974, 376, 68)
         self.nurse_review_comment.setPlaceholderText("Write what needs review, the source checked, or the observation to verify.")
         self.nurse_review_comment.setStyleSheet(self.input_style())
 
         self.btn_submit_review_request = QPushButton("Submit for Admin Review", self.form_panel)
-        self.btn_submit_review_request.setGeometry(22, 898, 376, 38)
+        self.btn_submit_review_request.setGeometry(22, 1054, 376, 38)
         self.btn_submit_review_request.setStyleSheet(self.primary_btn_style())
 
         self.preview_panel = QFrame(page)
@@ -1125,7 +1299,7 @@ class DashboardWindow(QWidget):
         self.btn_go_pairing_after_save.setStyleSheet(self.secondary_btn_style())
 
         self.epaper_card = QFrame(self.preview_panel)
-        self.epaper_card.setGeometry(22, 60, 394, 185)
+        self.epaper_card.setGeometry(22, 60, 394, 210)
         self.apply_frame_style(self.epaper_card, "background-color: #efefef; border-radius: 18px;")
 
         ep_title = QLabel("E-Paper Preview", self.epaper_card)
@@ -1144,17 +1318,21 @@ class DashboardWindow(QWidget):
         self.ep_diet.setGeometry(16, 98, 300, 22)
         self.ep_diet.setStyleSheet("color: #111111; font-size: 14px;")
 
-        self.ep_allergies = QLabel("Allergies: ---", self.epaper_card)
+        self.ep_allergies = QLabel("Texture: ---", self.epaper_card)
         self.ep_allergies.setGeometry(16, 124, 350, 22)
         self.ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
+        self.ep_fluids = QLabel("Fluids: ---", self.epaper_card)
+        self.ep_fluids.setGeometry(16, 148, 350, 22)
+        self.ep_fluids.setStyleSheet("color: #111111; font-size: 14px;")
+
         self.ep_note = QLabel("Note: ---", self.epaper_card)
-        self.ep_note.setGeometry(16, 148, 350, 30)
+        self.ep_note.setGeometry(16, 172, 350, 30)
         self.ep_note.setWordWrap(True)
         self.ep_note.setStyleSheet("color: #111111; font-size: 13px;")
 
         self.lcd_card = QFrame(self.preview_panel)
-        self.lcd_card.setGeometry(22, 268, 394, 210)
+        self.lcd_card.setGeometry(22, 288, 394, 210)
         self.apply_frame_style(self.lcd_card, "background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
 
         lcd_title = QLabel("LCD Preview", self.lcd_card)
@@ -1171,6 +1349,22 @@ class DashboardWindow(QWidget):
             }
         """)
         self.lcd_image.hide()
+
+        self.lcd_empty_state = QLabel("Add a resident image to preview the LCD display.", self.lcd_card)
+        self.lcd_empty_state.setGeometry(28, 54, 338, 112)
+        self.lcd_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lcd_empty_state.setWordWrap(True)
+        self.lcd_empty_state.setStyleSheet("""
+            QLabel {
+                background-color: #f8fafc;
+                color: #0f766e;
+                border: 1px dashed #7dd3fc;
+                border-radius: 8px;
+                padding: 16px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+        """)
 
         self.lcd_name = QLabel("Resident Name", self.lcd_card)
         self.lcd_name.setGeometry(20, 42, 354, 28)
@@ -1202,7 +1396,7 @@ class DashboardWindow(QWidget):
         self.lcd_note.setStyleSheet("color: #eef2f7; font-size: 13px;")
 
         self.overview_panel = QFrame(self.preview_panel)
-        self.overview_panel.setGeometry(22, 500, 394, 260)
+        self.overview_panel.setGeometry(22, 520, 394, 260)
         self.apply_frame_style(self.overview_panel, "background-color: #1a1a1a; border-radius: 16px; border: 1px solid #262626;")
 
         overview_title = QLabel("Overall Dashboard", self.overview_panel)
@@ -1228,7 +1422,7 @@ class DashboardWindow(QWidget):
         self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
         self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #2dd4bf;")
 
-        return self.wrap_scroll_page(page, 980)
+        return self.wrap_scroll_page(page, 1160)
 
     # ---------------------------- approvals page ----------------------------
 
@@ -2131,16 +2325,19 @@ class DashboardWindow(QWidget):
         self.btn_choose_image = QPushButton("Choose LCD Image", self.upd_left)
         self.btn_choose_image.setGeometry(22, 488, 150, 42)
         self.btn_choose_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_choose_image.hide()
 
-        self.btn_send_image = QPushButton("Send Image", self.upd_left)
-        self.btn_send_image.setGeometry(182, 488, 120, 42)
+        self.btn_send_image = QPushButton("", self.upd_left)
+        self.btn_send_image.setGeometry(22, 488, 170, 42)
         self.btn_send_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_send_image.hide()
 
         self.btn_clear_image = QPushButton("Clear Image", self.upd_left)
         self.btn_clear_image.setGeometry(312, 488, 120, 42)
         self.btn_clear_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_clear_image.hide()
 
-        self.image_path_label = QLabel("No image selected", self.upd_left)
+        self.image_path_label = QLabel("Resident photo is managed in Resident Records and uploaded on Save.", self.upd_left)
         self.image_path_label.setGeometry(22, 540, 490, 44)
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
@@ -2175,22 +2372,26 @@ class DashboardWindow(QWidget):
 
         self.upd_ep_name = QLabel("Resident Name", self.upd_epaper_card)
         self.upd_ep_name.setGeometry(18, 44, 320, 30)
-        self.upd_ep_name.setStyleSheet("color: #111111; font-size: 24px; font-weight: 700;")
+        self.upd_ep_name.setStyleSheet("color: #111111; font-size: 22px; font-weight: 700;")
 
         self.upd_ep_room = QLabel("Room ---", self.upd_epaper_card)
         self.upd_ep_room.setGeometry(18, 80, 250, 24)
-        self.upd_ep_room.setStyleSheet("color: #111111; font-size: 15px;")
+        self.upd_ep_room.setStyleSheet("color: #111111; font-size: 14px;")
 
         self.upd_ep_diet = QLabel("Diet: ---", self.upd_epaper_card)
         self.upd_ep_diet.setGeometry(18, 112, 400, 24)
         self.upd_ep_diet.setStyleSheet("color: #111111; font-size: 14px;")
 
-        self.upd_ep_allergies = QLabel("Allergies: ---", self.upd_epaper_card)
+        self.upd_ep_allergies = QLabel("Texture: ---", self.upd_epaper_card)
         self.upd_ep_allergies.setGeometry(18, 144, 500, 24)
         self.upd_ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
+        self.upd_ep_fluids = QLabel("Fluids: ---", self.upd_epaper_card)
+        self.upd_ep_fluids.setGeometry(18, 172, 500, 24)
+        self.upd_ep_fluids.setStyleSheet("color: #111111; font-size: 14px;")
+
         self.upd_ep_note = QLabel("Note: ---", self.upd_epaper_card)
-        self.upd_ep_note.setGeometry(18, 172, 560, 30)
+        self.upd_ep_note.setGeometry(18, 196, 560, 24)
         self.upd_ep_note.setWordWrap(True)
         self.upd_ep_note.setStyleSheet("color: #111111; font-size: 13px;")
 
@@ -2212,6 +2413,22 @@ class DashboardWindow(QWidget):
             }
         """)
         self.upd_lcd_image.hide()
+
+        self.upd_lcd_empty_state = QLabel("No LCD image selected. Choose a resident image to preview the exact screen artwork.", self.upd_lcd_card)
+        self.upd_lcd_empty_state.setGeometry(38, 58, 538, 112)
+        self.upd_lcd_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.upd_lcd_empty_state.setWordWrap(True)
+        self.upd_lcd_empty_state.setStyleSheet("""
+            QLabel {
+                background-color: #f8fafc;
+                color: #0f766e;
+                border: 1px dashed #7dd3fc;
+                border-radius: 8px;
+                padding: 18px;
+                font-size: 14px;
+                font-weight: 700;
+            }
+        """)
 
         self.upd_lcd_name = QLabel("Resident Name", self.upd_lcd_card)
         self.upd_lcd_name.setGeometry(20, 48, 574, 30)
@@ -2366,6 +2583,8 @@ class DashboardWindow(QWidget):
         self.btn_delete_resident.clicked.connect(self.delete_selected_resident)
         self.btn_go_pairing_after_save.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_attach_source.clicked.connect(self.attach_source_document)
+        self.btn_attach_resident_photo.clicked.connect(self.attach_resident_photo)
+        self.btn_clear_resident_photo.clicked.connect(self.clear_lcd_image)
         self.btn_submit_review_request.clicked.connect(self.submit_resident_review_request)
 
         self.search_resident.textChanged.connect(self.filter_residents)
@@ -2387,8 +2606,8 @@ class DashboardWindow(QWidget):
         self.btn_preview.clicked.connect(self.update_preview)
         self.btn_send_text.clicked.connect(self.send_text_update)
         self.btn_choose_image.clicked.connect(self.choose_image)
-        self.btn_send_image.clicked.connect(self.send_image)
         self.btn_clear_image.clicked.connect(self.clear_lcd_image)
+        self.upd_target.currentIndexChanged.connect(lambda _index: self.on_update_target_changed())
         self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
         self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
         self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
@@ -2412,10 +2631,15 @@ class DashboardWindow(QWidget):
         self.btn_view_log.clicked.connect(self.show_selected_log_detail)
         self.btn_export_logs_pdf.clicked.connect(self.export_logs_pdf)
 
-        for w in [self.txt_name, self.txt_room, self.txt_diet, self.txt_allergies, self.txt_drinks, self.txt_schedule]:
+        for w in [self.txt_name, self.txt_room, self.txt_drinks]:
             w.textChanged.connect(self.refresh_token_list)
+            w.textChanged.connect(lambda _text: self.update_preview())
+        for combo in [self.txt_diet, self.txt_allergies, self.txt_schedule]:
+            combo.currentTextChanged.connect(lambda _text: self.refresh_token_list())
+            combo.currentTextChanged.connect(lambda _text: self.update_preview())
 
         self.txt_note.textChanged.connect(self.refresh_token_list)
+        self.txt_note.textChanged.connect(self.update_preview)
 
     # ---------------------------- page switching ----------------------------
 
@@ -2466,6 +2690,7 @@ class DashboardWindow(QWidget):
         elif page == self.page_updates:
             self.load_update_targets()
             self.load_schedule_view()
+            self.on_update_target_changed()
             self.update_preview()
         elif page == self.page_verification:
             self.load_verification_page()
@@ -2496,17 +2721,45 @@ class DashboardWindow(QWidget):
     def current_resident_uid(self):
         return self.txt_uid.text().strip() or None
 
+    def display_path_label(self, path, empty_text):
+        if not path:
+            return empty_text
+        return os.path.basename(path) if os.path.isfile(str(path)) else str(path)
+
+    def sync_resident_photo_labels(self):
+        form_text = self.display_path_label(self.selected_image_path, "No resident photo attached")
+        schedule_text = self.display_path_label(
+            self.selected_image_path,
+            "No resident photo attached. Add one in Resident Records, then Save.",
+        )
+        if hasattr(self, "resident_photo_label"):
+            self.resident_photo_label.setText(form_text)
+        if hasattr(self, "image_path_label"):
+            if self.selected_image_path:
+                self.image_path_label.setText(f"Resident photo saved with record: {schedule_text}")
+            else:
+                self.image_path_label.setText(schedule_text)
+
+    def set_resident_photo_path(self, path):
+        self.selected_image_path = path or None
+        self.sync_resident_photo_labels()
+        self.update_lcd_image_preview()
+
     def collect_resident_payload(self):
+        texture = self.field_text(self.txt_allergies)
+        fluids = self.field_text(self.txt_schedule)
         return {
             "resident_uid": self.txt_uid.text().strip(),
             "full_name": self.txt_name.text().strip(),
             "room": self.txt_room.text().strip(),
-            "status_alert": self.cmb_alert.currentText(),
-            "diet": self.txt_diet.text().strip(),
-            "allergies": self.txt_allergies.text().strip(),
+            "status_alert": "Stable",
+            "diet": self.field_text(self.txt_diet),
+            "texture": texture,
+            "allergies": texture,
             "note": self.txt_note.toPlainText().strip(),
             "drinks": self.txt_drinks.text().strip(),
-            "schedule": self.txt_schedule.text().strip(),
+            "fluids": fluids,
+            "schedule": fluids,
             "source_document": self.selected_source_document,
             "safety_review_note": "Pending safety review" if self.chk_safety_review.isChecked() else "",
             "needs_safety_review": self.chk_safety_review.isChecked(),
@@ -2521,19 +2774,106 @@ class DashboardWindow(QWidget):
     def resident_audit_snapshot(self, row_or_payload):
         if not row_or_payload:
             return None
+        texture = row_or_payload.get("texture") or row_or_payload.get("allergies")
+        fluids = row_or_payload.get("fluids") or row_or_payload.get("schedule")
         return {
             "resident_uid": row_or_payload.get("resident_uid"),
             "full_name": row_or_payload.get("full_name"),
             "room": row_or_payload.get("room"),
             "diet": row_or_payload.get("diet"),
-            "allergies": row_or_payload.get("allergies"),
+            "texture": texture,
             "note": row_or_payload.get("note"),
             "drinks": row_or_payload.get("drinks"),
-            "schedule": row_or_payload.get("schedule"),
+            "fluids": fluids,
             "source_document": row_or_payload.get("source_document"),
+            "lcd_image_path": row_or_payload.get("lcd_image_path"),
             "needs_safety_review": bool(row_or_payload.get("needs_safety_review", False)),
             "active": bool(row_or_payload.get("active", True)),
         }
+
+    def resident_field_label(self, key):
+        labels = {
+            "resident_uid": "Resident UID",
+            "full_name": "Full Name",
+            "room": "Room",
+            "diet": "Diet",
+            "texture": "Texture",
+            "allergies": "Texture",
+            "note": "Note",
+            "drinks": "Drinks",
+            "fluids": "Fluids",
+            "schedule": "Fluids",
+            "source_document": "Source Document",
+            "lcd_image_path": "Resident Photo",
+            "needs_safety_review": "Needs Safety Review",
+            "active": "Active",
+        }
+        return labels.get(str(key), str(key).replace("_", " ").title())
+
+    def resident_field_value(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item) for item in value if str(item).strip())
+        if isinstance(value, dict):
+            nested = self.format_resident_snapshot(value)
+            if nested:
+                return "\n" + "\n".join(f"  {line}" if line else "" for line in nested.splitlines())
+            return self.pretty_json(value)
+        return str(value)
+
+    def format_resident_snapshot(self, snapshot):
+        if not snapshot:
+            return ""
+        if isinstance(snapshot, str):
+            try:
+                snapshot = json.loads(snapshot)
+            except Exception:
+                return snapshot
+        if not isinstance(snapshot, dict):
+            return self.pretty_json(snapshot)
+        snapshot = dict(snapshot)
+        if "texture" not in snapshot and "allergies" in snapshot:
+            snapshot["texture"] = snapshot.get("allergies")
+        if "fluids" not in snapshot and "schedule" in snapshot:
+            snapshot["fluids"] = snapshot.get("schedule")
+
+        ordered_keys = [
+            "resident_uid",
+            "full_name",
+            "room",
+            "diet",
+            "texture",
+            "fluids",
+            "drinks",
+            "note",
+            "source_document",
+            "lcd_image_path",
+            "needs_safety_review",
+            "active",
+        ]
+        lines = []
+        seen = set()
+        for key in ordered_keys:
+            if key not in snapshot:
+                continue
+            seen.add(key)
+            value = self.resident_field_value(snapshot.get(key))
+            if value != "":
+                lines.append(f"{self.resident_field_label(key)}: {value}")
+        for key, raw_value in snapshot.items():
+            if key in seen:
+                continue
+            if key == "allergies" and "texture" in snapshot:
+                continue
+            if key == "schedule" and "fluids" in snapshot:
+                continue
+            value = self.resident_field_value(raw_value)
+            if value != "":
+                lines.append(f"{self.resident_field_label(key)}: {value}")
+        return "\n".join(lines)
 
     def show_error(self, title, text):
         QMessageBox.critical(self, title, text)
@@ -2641,9 +2981,12 @@ class DashboardWindow(QWidget):
             self.txt_name, self.txt_room, self.cmb_alert, self.txt_diet,
             self.txt_allergies, self.txt_note, self.txt_drinks, self.txt_schedule,
             self.chk_active, self.chk_safety_review, self.btn_attach_source,
+            self.btn_attach_resident_photo, self.btn_clear_resident_photo,
             self.btn_choose_image, self.btn_clear_image,
         ]
         for widget in field_widgets:
+            widget.setEnabled(self.can_edit_residents())
+        for widget in getattr(self, "dropdown_option_buttons", []):
             widget.setEnabled(self.can_edit_residents())
 
         if hasattr(self, "nurse_review_comment"):
@@ -2670,7 +3013,6 @@ class DashboardWindow(QWidget):
             "btn_pair_selected": device_write,
             "btn_unpair_selected": device_write,
             "btn_send_text": device_write,
-            "btn_send_image": device_write,
             "btn_lcd_on": device_write,
             "btn_lcd_off": device_write,
             "btn_save_schedule": device_write,
@@ -2728,18 +3070,18 @@ class DashboardWindow(QWidget):
         self.txt_uid.clear()
         self.txt_name.clear()
         self.txt_room.clear()
-        self.txt_diet.clear()
-        self.txt_allergies.clear()
+        self.clear_field_text(self.txt_diet)
+        self.clear_field_text(self.txt_allergies)
         self.txt_note.clear()
         self.txt_drinks.clear()
-        self.txt_schedule.clear()
+        self.clear_field_text(self.txt_schedule)
 
         self.chk_active.setChecked(True)
         self.chk_safety_review.setChecked(False)
         self.cmb_alert.setCurrentIndex(0)
 
         self.selected_image_path = None
-        self.image_path_label.setText("No image selected")
+        self.sync_resident_photo_labels()
         self.selected_source_document = None
         self.source_doc_label.setText("No source document attached")
 
@@ -2923,9 +3265,8 @@ class DashboardWindow(QWidget):
             "",
             "Resident Snapshot:",
         ]
-        for key in ["full_name", "room", "diet", "allergies", "note", "drinks", "schedule"]:
-            if payload.get(key):
-                fields.append(f"{key.replace('_', ' ').title()}: {payload.get(key)}")
+        snapshot = self.format_resident_snapshot(payload)
+        fields.append(snapshot or "No resident information in request.")
         if request.get("review_note"):
             fields.extend(["", "Admin Decision:", request.get("review_note")])
         self.approval_detail.setPlainText("\n".join(fields))
@@ -3087,15 +3428,15 @@ class DashboardWindow(QWidget):
             f"Message: {audit.get('message') or ''}",
             "",
             "Previous Information:",
-            self.pretty_json(before) or "No previous snapshot recorded.",
+            self.format_resident_snapshot(before) or "No previous snapshot recorded.",
             "",
             "Present / Proposed Information:",
-            self.pretty_json(after) or "No present snapshot recorded.",
+            self.format_resident_snapshot(after) or "No present snapshot recorded.",
         ]
         if audit.get("action_type") in {"resident_review_request", "resident_review_decision"}:
-            lines.extend(["", "Review Payload:", self.pretty_json(payload)])
+            lines.extend(["", "Review Payload:", self.format_resident_snapshot(payload) or self.pretty_json(payload)])
             if response:
-                lines.extend(["", "Review Result:", self.pretty_json(response)])
+                lines.extend(["", "Review Result:", self.format_resident_snapshot(response) or self.pretty_json(response)])
         self.resident_audit_detail.setPlainText("\n".join(lines))
         self.btn_open_audit_document.setEnabled(bool(document_path))
 
@@ -3146,9 +3487,9 @@ class DashboardWindow(QWidget):
             f"Device Status: {'Online' if row.get('paired_device_online') else 'Offline'}",
             "",
             f"Diet: {row.get('diet') or ''}",
-            f"Allergies: {row.get('allergies') or ''}",
+            f"Texture: {row.get('texture') or row.get('allergies') or ''}",
             f"Drinks: {row.get('drinks') or ''}",
-            f"Schedule: {row.get('schedule') or ''}",
+            f"Fluids: {row.get('fluids') or row.get('schedule') or ''}",
             "",
             "Display Note:",
             row.get("note") or "",
@@ -4116,13 +4457,10 @@ class DashboardWindow(QWidget):
         layout.addWidget(close_btn)
         dialog.exec()
 
-    def on_resident_selected(self, item):
-        resident_id = item.data(Qt.ItemDataRole.UserRole)
-        row = self.db.get_resident(resident_id)
+    def apply_resident_row_to_form(self, row):
         if not row:
             return
-
-        self.selected_resident_id = resident_id
+        self.selected_resident_id = row.get("id")
         self.txt_uid.setText(row["resident_uid"] or "")
         self.txt_name.setText(row["full_name"] or "")
         self.txt_room.setText(row.get("room") or "")
@@ -4131,20 +4469,26 @@ class DashboardWindow(QWidget):
         if alert_index < 0:
             alert_index = self.cmb_alert.findText(str(status_alert).title(), Qt.MatchFlag.MatchFixedString)
         self.cmb_alert.setCurrentIndex(alert_index if alert_index >= 0 else 0)
-        self.txt_diet.setText(row.get("diet") or "")
-        self.txt_allergies.setText(row.get("allergies") or "")
+        self.set_field_text(self.txt_diet, row.get("diet") or "")
+        self.set_field_text(self.txt_allergies, row.get("texture") or row.get("allergies") or "")
         self.txt_note.setPlainText(row.get("note") or "")
         self.txt_drinks.setText(row.get("drinks") or "")
-        self.txt_schedule.setText(row.get("schedule") or "")
+        self.set_field_text(self.txt_schedule, row.get("fluids") or row.get("schedule") or "")
         self.selected_source_document = row.get("source_document") or None
         self.source_doc_label.setText(os.path.basename(self.selected_source_document) if self.selected_source_document else "No source document attached")
         self.chk_safety_review.setChecked(bool(row.get("needs_safety_review", False)))
-        self.selected_image_path = row.get("lcd_image_path") or None
-        if self.selected_image_path and hasattr(self, "image_path_label"):
-            self.image_path_label.setText(self.selected_image_path)
+        self.set_resident_photo_path(row.get("lcd_image_path") or None)
         self.chk_active.setChecked(bool(row.get("active", True)))
 
         self.update_preview()
+
+    def on_resident_selected(self, item):
+        resident_id = item.data(Qt.ItemDataRole.UserRole)
+        row = self.db.get_resident(resident_id)
+        if not row:
+            return
+
+        self.apply_resident_row_to_form(row)
         self.load_update_targets()
         if row.get("paired_device_id"):
             idx = self.upd_target.findData(row.get("paired_device_id"))
@@ -4410,6 +4754,43 @@ class DashboardWindow(QWidget):
                 self.upd_target.setCurrentIndex(idx)
         self.upd_target.blockSignals(False)
 
+    def resident_for_device(self, device_id):
+        if not device_id:
+            return None
+        devices = self.safe_get_devices()
+        device = next((d for d in devices if str(d.get("device_id")) == str(device_id)), None)
+        if not device:
+            return None
+
+        resident_id = device.get("paired_resident_id") or device.get("resident_id")
+        if resident_id:
+            row = self.db.get_resident(resident_id)
+            if row:
+                return row
+
+        residents = self.db.get_residents()
+        resident_uid = device.get("resident_uid")
+        resident_name = device.get("resident_name")
+        return next(
+            (
+                row for row in residents
+                if str(row.get("paired_device_id") or "") == str(device_id)
+                or (resident_uid and str(row.get("resident_uid") or "") == str(resident_uid))
+                or (resident_name and str(row.get("full_name") or "") == str(resident_name))
+            ),
+            None,
+        )
+
+    def on_update_target_changed(self):
+        if not hasattr(self, "upd_target"):
+            return
+        row = self.resident_for_device(self.selected_device_id())
+        if row:
+            self.apply_resident_row_to_form(row)
+        else:
+            self.sync_resident_photo_labels()
+            self.update_lcd_image_preview()
+
     def load_pairing_views(self):
         resident_id = self.selected_pair_resident_id
         device_id = self.selected_pair_device_id
@@ -4500,10 +4881,12 @@ class DashboardWindow(QWidget):
         }
         if row.get("diet"):
             payload["diet"] = [x.strip() for x in row.get("diet").split(",") if x.strip()]
-        if row.get("allergies"):
-            payload["allergies"] = [x.strip() for x in row.get("allergies").split(",") if x.strip()]
-        if row.get("schedule"):
-            payload["schedule"] = row.get("schedule")
+        texture = row.get("texture") or row.get("allergies")
+        fluids = row.get("fluids") or row.get("schedule")
+        if texture:
+            payload["allergies"] = [x.strip() for x in texture.split(",") if x.strip()]
+        if fluids:
+            payload["schedule"] = fluids
         try:
             result = self.gateway.send_text(self.base_url(), payload)
             success = result["status_code"] == 200
@@ -4563,9 +4946,11 @@ class DashboardWindow(QWidget):
         if section == "ROOM":
             return self.txt_room.text().strip()
         if section == "DIET":
-            return self.txt_diet.text().strip()
-        if section == "ALLERGIES":
-            return self.txt_allergies.text().strip()
+            return self.field_text(self.txt_diet)
+        if section in {"TEXTURE", "ALLERGIES"}:
+            return self.field_text(self.txt_allergies)
+        if section == "FLUIDS":
+            return self.field_text(self.txt_schedule)
         if section == "NOTE":
             return self.txt_note.toPlainText().strip()
         if section == "DRINKS":
@@ -4664,6 +5049,8 @@ class DashboardWindow(QWidget):
                 )
                 self.upd_lcd_image.setPixmap(big_pix)
                 self.upd_lcd_image.show()
+                if hasattr(self, "upd_lcd_empty_state"):
+                    self.upd_lcd_empty_state.hide()
 
                 small_pix = pix.scaled(
                     self.lcd_image.size(),
@@ -4672,6 +5059,8 @@ class DashboardWindow(QWidget):
                 )
                 self.lcd_image.setPixmap(small_pix)
                 self.lcd_image.show()
+                if hasattr(self, "lcd_empty_state"):
+                    self.lcd_empty_state.hide()
 
                 self.upd_lcd_name.hide()
                 self.upd_lcd_room.hide()
@@ -4686,29 +5075,34 @@ class DashboardWindow(QWidget):
 
         self.upd_lcd_image.hide()
         self.lcd_image.hide()
+        if hasattr(self, "upd_lcd_empty_state"):
+            self.upd_lcd_empty_state.show()
+        if hasattr(self, "lcd_empty_state"):
+            self.lcd_empty_state.show()
 
-        self.upd_lcd_name.show()
-        self.upd_lcd_room.show()
-        self.upd_lcd_alert.show()
-        self.upd_lcd_note.show()
+        self.upd_lcd_name.hide()
+        self.upd_lcd_room.hide()
+        self.upd_lcd_alert.hide()
+        self.upd_lcd_note.hide()
 
-        self.lcd_name.show()
-        self.lcd_room.show()
-        self.lcd_alert_banner.show()
-        self.lcd_note.show()
+        self.lcd_name.hide()
+        self.lcd_room.hide()
+        self.lcd_alert_banner.hide()
+        self.lcd_note.hide()
 
     def update_preview(self):
         name = self.txt_name.text().strip() or "Resident Name"
         room = self.txt_room.text().strip() or "---"
-        diet = self.txt_diet.text().strip() or "---"
-        allergies = self.txt_allergies.text().strip() or "---"
+        diet = self.field_text(self.txt_diet) or "---"
+        texture = self.field_text(self.txt_allergies) or "---"
+        fluids = self.field_text(self.txt_schedule) or "---"
         note = self.txt_note.toPlainText().strip() or "---"
-        alert = self.cmb_alert.currentText().upper()
 
         self.ep_name.setText(name)
         self.ep_room.setText(f"Room {room}")
         self.ep_diet.setText(f"Diet: {diet}")
-        self.ep_allergies.setText(f"Allergies: {allergies}")
+        self.ep_allergies.setText(f"Texture: {texture}")
+        self.ep_fluids.setText(f"Fluids: {fluids}")
         self.ep_note.setText(f"Note: {note[:80]}")
 
         self.lcd_name.setText(name)
@@ -4718,28 +5112,13 @@ class DashboardWindow(QWidget):
         self.upd_ep_name.setText(name)
         self.upd_ep_room.setText(f"Room {room}")
         self.upd_ep_diet.setText(f"Diet: {diet}")
-        self.upd_ep_allergies.setText(f"Allergies: {allergies}")
+        self.upd_ep_allergies.setText(f"Texture: {texture}")
+        self.upd_ep_fluids.setText(f"Fluids: {fluids}")
         self.upd_ep_note.setText(f"Note: {note[:120]}")
 
         self.upd_lcd_name.setText(name)
         self.upd_lcd_room.setText(f"Room {room}")
         self.upd_lcd_note.setText(note[:120])
-
-        color = "#146c2e"
-        if alert in ("NEEDS ATTENTION", "FALL RISK"):
-            color = "#b45309"
-        if alert == "EMERGENCY":
-            color = "#b91c1c"
-
-        self.lcd_alert_banner.setText(alert)
-        self.lcd_alert_banner.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 16px; font-weight: 700; }}"
-        )
-
-        self.upd_lcd_alert.setText(alert)
-        self.upd_lcd_alert.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 18px; font-weight: 700; }}"
-        )
 
         self.update_lcd_image_preview()
 
@@ -4752,7 +5131,7 @@ class DashboardWindow(QWidget):
         room = self.txt_room.text().strip()
         note = self.txt_note.toPlainText().strip()
         drinks = self.txt_drinks.text().strip()
-        schedule = self.txt_schedule.text().strip()
+        schedule = self.field_text(self.txt_schedule)
 
         if name:
             payload["name"] = name
@@ -4765,8 +5144,8 @@ class DashboardWindow(QWidget):
         if schedule:
             payload["schedule"] = schedule
 
-        diet = self.txt_diet.text().strip()
-        allergies = self.txt_allergies.text().strip()
+        diet = self.field_text(self.txt_diet)
+        allergies = self.field_text(self.txt_allergies)
 
         if diet:
             payload["diet"] = [x.strip() for x in diet.split(",") if x.strip()]
@@ -4942,23 +5321,20 @@ class DashboardWindow(QWidget):
             self.show_error("Schedule", message)
 
     def choose_image(self):
+        self.attach_resident_photo()
+
+    def attach_resident_photo(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Choose image for LCD",
+            "Attach resident photo for LCD",
             "",
             "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
-        if not path:
-            return
-
-        self.selected_image_path = path
-        self.image_path_label.setText(path)
-        self.update_lcd_image_preview()
+        if path:
+            self.set_resident_photo_path(path)
 
     def clear_lcd_image(self):
-        self.selected_image_path = None
-        self.image_path_label.setText("No image selected")
-        self.update_lcd_image_preview()
+        self.set_resident_photo_path(None)
 
     def send_image(self):
         if not self.require_network_for_write("Sending LCD image"):

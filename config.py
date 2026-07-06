@@ -9,8 +9,8 @@ else:
 
 ASSETS_DIR = BASE_DIR / "assets"
 
-APP_NAME = "Whisperwood Villa"
-APP_VERSION = "2.0.6"
+APP_NAME = "Enhanced Living Whisperwood"
+APP_VERSION = "2.0.7"
 APP_CHANNEL = "main"
 RELEASE_TAG_PREFIX = "v"
 DEFAULT_PI_BASE_URL = "http://localhost:8080"
