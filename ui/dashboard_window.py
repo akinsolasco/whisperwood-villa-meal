@@ -1299,7 +1299,7 @@ class DashboardWindow(QWidget):
         self.btn_go_pairing_after_save.setStyleSheet(self.secondary_btn_style())
 
         self.epaper_card = QFrame(self.preview_panel)
-        self.epaper_card.setGeometry(22, 60, 394, 185)
+        self.epaper_card.setGeometry(22, 60, 394, 210)
         self.apply_frame_style(self.epaper_card, "background-color: #efefef; border-radius: 18px;")
 
         ep_title = QLabel("E-Paper Preview", self.epaper_card)
@@ -1322,13 +1322,17 @@ class DashboardWindow(QWidget):
         self.ep_allergies.setGeometry(16, 124, 350, 22)
         self.ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
+        self.ep_fluids = QLabel("Fluids: ---", self.epaper_card)
+        self.ep_fluids.setGeometry(16, 148, 350, 22)
+        self.ep_fluids.setStyleSheet("color: #111111; font-size: 14px;")
+
         self.ep_note = QLabel("Note: ---", self.epaper_card)
-        self.ep_note.setGeometry(16, 148, 350, 30)
+        self.ep_note.setGeometry(16, 172, 350, 30)
         self.ep_note.setWordWrap(True)
         self.ep_note.setStyleSheet("color: #111111; font-size: 13px;")
 
         self.lcd_card = QFrame(self.preview_panel)
-        self.lcd_card.setGeometry(22, 268, 394, 210)
+        self.lcd_card.setGeometry(22, 288, 394, 210)
         self.apply_frame_style(self.lcd_card, "background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
 
         lcd_title = QLabel("LCD Preview", self.lcd_card)
@@ -1392,7 +1396,7 @@ class DashboardWindow(QWidget):
         self.lcd_note.setStyleSheet("color: #eef2f7; font-size: 13px;")
 
         self.overview_panel = QFrame(self.preview_panel)
-        self.overview_panel.setGeometry(22, 500, 394, 260)
+        self.overview_panel.setGeometry(22, 520, 394, 260)
         self.apply_frame_style(self.overview_panel, "background-color: #1a1a1a; border-radius: 16px; border: 1px solid #262626;")
 
         overview_title = QLabel("Overall Dashboard", self.overview_panel)
@@ -2323,16 +2327,17 @@ class DashboardWindow(QWidget):
         self.btn_choose_image.setStyleSheet(self.secondary_btn_style())
         self.btn_choose_image.hide()
 
-        self.btn_send_image = QPushButton("Send Resident Photo", self.upd_left)
+        self.btn_send_image = QPushButton("", self.upd_left)
         self.btn_send_image.setGeometry(22, 488, 170, 42)
         self.btn_send_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_send_image.hide()
 
         self.btn_clear_image = QPushButton("Clear Image", self.upd_left)
         self.btn_clear_image.setGeometry(312, 488, 120, 42)
         self.btn_clear_image.setStyleSheet(self.secondary_btn_style())
         self.btn_clear_image.hide()
 
-        self.image_path_label = QLabel("Resident photo is managed in Resident Records.", self.upd_left)
+        self.image_path_label = QLabel("Resident photo is managed in Resident Records and uploaded on Save.", self.upd_left)
         self.image_path_label.setGeometry(22, 540, 490, 44)
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
@@ -2367,11 +2372,11 @@ class DashboardWindow(QWidget):
 
         self.upd_ep_name = QLabel("Resident Name", self.upd_epaper_card)
         self.upd_ep_name.setGeometry(18, 44, 320, 30)
-        self.upd_ep_name.setStyleSheet("color: #111111; font-size: 24px; font-weight: 700;")
+        self.upd_ep_name.setStyleSheet("color: #111111; font-size: 22px; font-weight: 700;")
 
         self.upd_ep_room = QLabel("Room ---", self.upd_epaper_card)
         self.upd_ep_room.setGeometry(18, 80, 250, 24)
-        self.upd_ep_room.setStyleSheet("color: #111111; font-size: 15px;")
+        self.upd_ep_room.setStyleSheet("color: #111111; font-size: 14px;")
 
         self.upd_ep_diet = QLabel("Diet: ---", self.upd_epaper_card)
         self.upd_ep_diet.setGeometry(18, 112, 400, 24)
@@ -2381,8 +2386,12 @@ class DashboardWindow(QWidget):
         self.upd_ep_allergies.setGeometry(18, 144, 500, 24)
         self.upd_ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
+        self.upd_ep_fluids = QLabel("Fluids: ---", self.upd_epaper_card)
+        self.upd_ep_fluids.setGeometry(18, 172, 500, 24)
+        self.upd_ep_fluids.setStyleSheet("color: #111111; font-size: 14px;")
+
         self.upd_ep_note = QLabel("Note: ---", self.upd_epaper_card)
-        self.upd_ep_note.setGeometry(18, 172, 560, 30)
+        self.upd_ep_note.setGeometry(18, 196, 560, 24)
         self.upd_ep_note.setWordWrap(True)
         self.upd_ep_note.setStyleSheet("color: #111111; font-size: 13px;")
 
@@ -2597,7 +2606,6 @@ class DashboardWindow(QWidget):
         self.btn_preview.clicked.connect(self.update_preview)
         self.btn_send_text.clicked.connect(self.send_text_update)
         self.btn_choose_image.clicked.connect(self.choose_image)
-        self.btn_send_image.clicked.connect(self.send_image)
         self.btn_clear_image.clicked.connect(self.clear_lcd_image)
         self.upd_target.currentIndexChanged.connect(lambda _index: self.on_update_target_changed())
         self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
@@ -2722,12 +2730,15 @@ class DashboardWindow(QWidget):
         form_text = self.display_path_label(self.selected_image_path, "No resident photo attached")
         schedule_text = self.display_path_label(
             self.selected_image_path,
-            "No resident photo attached. Add one in Resident Records.",
+            "No resident photo attached. Add one in Resident Records, then Save.",
         )
         if hasattr(self, "resident_photo_label"):
             self.resident_photo_label.setText(form_text)
         if hasattr(self, "image_path_label"):
-            self.image_path_label.setText(f"Resident photo: {schedule_text}" if self.selected_image_path else schedule_text)
+            if self.selected_image_path:
+                self.image_path_label.setText(f"Resident photo saved with record: {schedule_text}")
+            else:
+                self.image_path_label.setText(schedule_text)
 
     def set_resident_photo_path(self, path):
         self.selected_image_path = path or None
@@ -2769,9 +2780,83 @@ class DashboardWindow(QWidget):
             "drinks": row_or_payload.get("drinks"),
             "schedule": row_or_payload.get("schedule"),
             "source_document": row_or_payload.get("source_document"),
+            "lcd_image_path": row_or_payload.get("lcd_image_path"),
             "needs_safety_review": bool(row_or_payload.get("needs_safety_review", False)),
             "active": bool(row_or_payload.get("active", True)),
         }
+
+    def resident_field_label(self, key):
+        labels = {
+            "resident_uid": "Resident UID",
+            "full_name": "Full Name",
+            "room": "Room",
+            "diet": "Diet",
+            "allergies": "Texture",
+            "note": "Note",
+            "drinks": "Drinks",
+            "schedule": "Fluids",
+            "source_document": "Source Document",
+            "lcd_image_path": "Resident Photo",
+            "needs_safety_review": "Needs Safety Review",
+            "active": "Active",
+        }
+        return labels.get(str(key), str(key).replace("_", " ").title())
+
+    def resident_field_value(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item) for item in value if str(item).strip())
+        if isinstance(value, dict):
+            nested = self.format_resident_snapshot(value)
+            if nested:
+                return "\n" + "\n".join(f"  {line}" if line else "" for line in nested.splitlines())
+            return self.pretty_json(value)
+        return str(value)
+
+    def format_resident_snapshot(self, snapshot):
+        if not snapshot:
+            return ""
+        if isinstance(snapshot, str):
+            try:
+                snapshot = json.loads(snapshot)
+            except Exception:
+                return snapshot
+        if not isinstance(snapshot, dict):
+            return self.pretty_json(snapshot)
+
+        ordered_keys = [
+            "resident_uid",
+            "full_name",
+            "room",
+            "diet",
+            "allergies",
+            "schedule",
+            "drinks",
+            "note",
+            "source_document",
+            "lcd_image_path",
+            "needs_safety_review",
+            "active",
+        ]
+        lines = []
+        seen = set()
+        for key in ordered_keys:
+            if key not in snapshot:
+                continue
+            seen.add(key)
+            value = self.resident_field_value(snapshot.get(key))
+            if value != "":
+                lines.append(f"{self.resident_field_label(key)}: {value}")
+        for key, raw_value in snapshot.items():
+            if key in seen:
+                continue
+            value = self.resident_field_value(raw_value)
+            if value != "":
+                lines.append(f"{self.resident_field_label(key)}: {value}")
+        return "\n".join(lines)
 
     def show_error(self, title, text):
         QMessageBox.critical(self, title, text)
@@ -2911,7 +2996,6 @@ class DashboardWindow(QWidget):
             "btn_pair_selected": device_write,
             "btn_unpair_selected": device_write,
             "btn_send_text": device_write,
-            "btn_send_image": device_write,
             "btn_lcd_on": device_write,
             "btn_lcd_off": device_write,
             "btn_save_schedule": device_write,
@@ -3164,9 +3248,8 @@ class DashboardWindow(QWidget):
             "",
             "Resident Snapshot:",
         ]
-        for key in ["full_name", "room", "diet", "allergies", "note", "drinks", "schedule"]:
-            if payload.get(key):
-                fields.append(f"{key.replace('_', ' ').title()}: {payload.get(key)}")
+        snapshot = self.format_resident_snapshot(payload)
+        fields.append(snapshot or "No resident information in request.")
         if request.get("review_note"):
             fields.extend(["", "Admin Decision:", request.get("review_note")])
         self.approval_detail.setPlainText("\n".join(fields))
@@ -3328,15 +3411,15 @@ class DashboardWindow(QWidget):
             f"Message: {audit.get('message') or ''}",
             "",
             "Previous Information:",
-            self.pretty_json(before) or "No previous snapshot recorded.",
+            self.format_resident_snapshot(before) or "No previous snapshot recorded.",
             "",
             "Present / Proposed Information:",
-            self.pretty_json(after) or "No present snapshot recorded.",
+            self.format_resident_snapshot(after) or "No present snapshot recorded.",
         ]
         if audit.get("action_type") in {"resident_review_request", "resident_review_decision"}:
-            lines.extend(["", "Review Payload:", self.pretty_json(payload)])
+            lines.extend(["", "Review Payload:", self.format_resident_snapshot(payload) or self.pretty_json(payload)])
             if response:
-                lines.extend(["", "Review Result:", self.pretty_json(response)])
+                lines.extend(["", "Review Result:", self.format_resident_snapshot(response) or self.pretty_json(response)])
         self.resident_audit_detail.setPlainText("\n".join(lines))
         self.btn_open_audit_document.setEnabled(bool(document_path))
 
@@ -4993,12 +5076,14 @@ class DashboardWindow(QWidget):
         room = self.txt_room.text().strip() or "---"
         diet = self.field_text(self.txt_diet) or "---"
         texture = self.field_text(self.txt_allergies) or "---"
+        fluids = self.field_text(self.txt_schedule) or "---"
         note = self.txt_note.toPlainText().strip() or "---"
 
         self.ep_name.setText(name)
         self.ep_room.setText(f"Room {room}")
         self.ep_diet.setText(f"Diet: {diet}")
         self.ep_allergies.setText(f"Texture: {texture}")
+        self.ep_fluids.setText(f"Fluids: {fluids}")
         self.ep_note.setText(f"Note: {note[:80]}")
 
         self.lcd_name.setText(name)
@@ -5009,6 +5094,7 @@ class DashboardWindow(QWidget):
         self.upd_ep_room.setText(f"Room {room}")
         self.upd_ep_diet.setText(f"Diet: {diet}")
         self.upd_ep_allergies.setText(f"Texture: {texture}")
+        self.upd_ep_fluids.setText(f"Fluids: {fluids}")
         self.upd_ep_note.setText(f"Note: {note[:120]}")
 
         self.upd_lcd_name.setText(name)
