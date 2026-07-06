@@ -207,6 +207,27 @@ class ControlServiceClient:
     def save_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/schedules", payload)
 
+    def get_dropdown_options(self) -> Dict[str, Any]:
+        primary = self._request("GET", "/resident-dropdown-options")
+        if primary.get("ok") or primary.get("status_code") not in {404, 405}:
+            return primary
+        return self._request("GET", "/dropdown-options")
+
+    def save_dropdown_options(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {"options": options or {}}
+        attempts = [
+            ("PUT", "/resident-dropdown-options"),
+            ("POST", "/resident-dropdown-options"),
+            ("PUT", "/dropdown-options"),
+            ("POST", "/dropdown-options"),
+        ]
+        last = None
+        for method, endpoint in attempts:
+            last = self._request(method, endpoint, payload)
+            if last.get("ok") or last.get("status_code") not in {404, 405}:
+                return last
+        return last or self._result(False, "/resident-dropdown-options", error="Dropdown options endpoint is not available.")
+
     def get_dashboard_summary(self) -> Dict[str, Any]:
         return self._request("GET", "/dashboard/summary")
 

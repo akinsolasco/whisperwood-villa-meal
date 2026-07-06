@@ -294,9 +294,38 @@ class DatabaseService:
             """)
 
         self._migrate_resident_alias_columns(cur)
+        self._ensure_dropdown_options_table(cur)
         self._ensure_it_control_tables(cur)
         self.conn.commit()
         cur.close()
+
+    def _ensure_dropdown_options_table(self, cur):
+        if self.backend == "postgres":
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_dropdown_options (
+                id SERIAL PRIMARY KEY,
+                category VARCHAR(64) NOT NULL,
+                option_text TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                UNIQUE(category, option_text)
+            );
+            """)
+        else:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_dropdown_options (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                option_text TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(category, option_text)
+            );
+            """)
 
     def _ensure_it_control_tables(self, cur):
         if self.backend == "postgres":
@@ -1110,6 +1139,71 @@ class DatabaseService:
             SET is_active = {marker}, updated_at = {timestamp}
             WHERE id = {marker}
         """, (True if self.backend == "postgres" else 1, profile_id))
+        self.conn.commit()
+        cur.close()
+
+    def get_dropdown_options(self):
+        cur = self._cursor(dict_rows=True)
+        active_filter = "active = TRUE" if self.backend == "postgres" else "active = 1"
+        cur.execute(f"""
+            SELECT category, option_text, sort_order
+            FROM resident_dropdown_options
+            WHERE {active_filter}
+            ORDER BY category ASC, sort_order ASC, option_text ASC
+        """)
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        options = {}
+        for row in rows:
+            category = str(row.get("category") or "").strip()
+            text = str(row.get("option_text") or "").strip()
+            if not category or not text:
+                continue
+            options.setdefault(category, []).append(text)
+        return options
+
+    def save_dropdown_options(self, options):
+        options = options or {}
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        for category, values in options.items():
+            category = str(category or "").strip()
+            if not category:
+                continue
+            cur.execute(
+                f"UPDATE resident_dropdown_options SET active = {marker}, updated_at = {timestamp} WHERE category = {marker}",
+                (False if self.backend == "postgres" else 0, category),
+            )
+            seen = set()
+            order_index = 0
+            for value in values or []:
+                text = str(value or "").strip()
+                key = text.lower()
+                if not text or key in seen:
+                    continue
+                seen.add(key)
+                if self.backend == "postgres":
+                    cur.execute("""
+                        INSERT INTO resident_dropdown_options (category, option_text, sort_order, active, updated_at)
+                        VALUES (%s, %s, %s, TRUE, NOW())
+                        ON CONFLICT (category, option_text)
+                        DO UPDATE SET
+                            sort_order = EXCLUDED.sort_order,
+                            active = TRUE,
+                            updated_at = NOW()
+                    """, (category, text, order_index))
+                else:
+                    cur.execute("""
+                        INSERT INTO resident_dropdown_options (category, option_text, sort_order, active, updated_at)
+                        VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+                        ON CONFLICT(category, option_text)
+                        DO UPDATE SET
+                            sort_order = excluded.sort_order,
+                            active = 1,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (category, text, order_index))
+                order_index += 1
         self.conn.commit()
         cur.close()
 

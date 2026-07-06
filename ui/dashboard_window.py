@@ -40,12 +40,12 @@ class DashboardWindow(QWidget):
             "texture": ["Regular", "Easy to chew", "Soft and bite-sized", "Minced and moist", "Pureed", "Liquidised", "Thickened", "Custom"],
             "fluids": ["Regular fluids", "Encourage fluids", "Fluid restriction", "Thickened fluids", "Slightly thick", "Mildly thick", "Moderately thick", "Custom"],
         }
-        self.dropdown_options = self.load_dropdown_options()
         self.dropdown_option_buttons = []
         self.settings = AppSettingsStore()
         self.server_mode = self.current_user.get("data_source") == "server" or self.settings.get_mode() == APP_MODE_SERVER
         self.db = ServerDataService() if self.server_mode else DatabaseService()
         self.db.ensure_tables()
+        self.dropdown_options = self.load_dropdown_options()
         self.gateway = ServerGatewayClient() if self.server_mode else GatewayClient()
         self.gateway_online = False
         self.control_service_online = False
@@ -240,7 +240,7 @@ class DashboardWindow(QWidget):
             out.append(text)
         return out
 
-    def load_dropdown_options(self):
+    def load_local_dropdown_options(self):
         stored = {}
         path = self.dropdown_options_file()
         if path.exists():
@@ -249,16 +249,56 @@ class DashboardWindow(QWidget):
                     stored = json.load(fh)
             except Exception:
                 stored = {}
-        return {
-            key: self.normalize_option_list(list(defaults) + list(stored.get(key, [])))
+        return stored if isinstance(stored, dict) else {}
+
+    def load_shared_dropdown_options(self):
+        if not hasattr(self, "db") or not hasattr(self.db, "get_dropdown_options"):
+            return None
+        try:
+            options = self.db.get_dropdown_options()
+        except Exception:
+            return None
+        return options if isinstance(options, dict) else None
+
+    def load_dropdown_options(self):
+        local_options = self.load_local_dropdown_options()
+        shared_options = self.load_shared_dropdown_options()
+        stored = shared_options if shared_options is not None else local_options
+        merged = {
+            key: self.normalize_option_list(
+                list(defaults) +
+                list(stored.get(key, [])) +
+                list(local_options.get(key, []))
+            )
             for key, defaults in self.dropdown_option_defaults.items()
         }
+        if shared_options is not None and merged != shared_options:
+            self.save_shared_dropdown_options(merged, notify=False)
+        return merged
 
-    def save_dropdown_options(self):
+    def save_local_dropdown_options(self):
         path = self.dropdown_options_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as fh:
             json.dump(self.dropdown_options, fh, indent=2)
+
+    def save_shared_dropdown_options(self, options, notify=True):
+        if not hasattr(self, "db") or not hasattr(self.db, "save_dropdown_options"):
+            return False
+        try:
+            self.db.save_dropdown_options(options)
+            return True
+        except Exception as exc:
+            if notify:
+                self.show_error(
+                    "Shared dropdown not saved",
+                    f"The option was saved locally, but could not be shared with other users yet.\n\n{exc}",
+                )
+            return False
+
+    def save_dropdown_options(self, notify=True):
+        self.save_local_dropdown_options()
+        self.save_shared_dropdown_options(self.dropdown_options, notify=notify)
 
     def editable_dropdown(self, parent, options, placeholder="Select or type custom"):
         combo = QComboBox(parent)

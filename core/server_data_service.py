@@ -83,6 +83,60 @@ class ServerDataService:
     def set_active_control_profile(self, profile_id):
         self.settings.set_active_profile(profile_id)
 
+    def _normalize_dropdown_options(self, value):
+        if isinstance(value, list):
+            grouped = {}
+            for row in value:
+                if not isinstance(row, dict):
+                    continue
+                category = row.get("category") or row.get("option_key") or row.get("key")
+                text = row.get("option_text") or row.get("value") or row.get("name")
+                category = str(category or "").strip()
+                text = str(text or "").strip()
+                if category and text:
+                    grouped.setdefault(category, []).append(text)
+            value = grouped
+        if not isinstance(value, dict):
+            return {}
+        out = {}
+        for key, values in value.items():
+            category = str(key or "").strip()
+            if not category:
+                continue
+            if isinstance(values, str):
+                values = [values]
+            seen = set()
+            options = []
+            for item in values or []:
+                text = str(item or "").strip()
+                marker = text.lower()
+                if not text or marker in seen:
+                    continue
+                seen.add(marker)
+                options.append(text)
+            if options:
+                out[category] = options
+        return out
+
+    def get_dropdown_options(self):
+        result = self.client(timeout=2.5).get_dropdown_options()
+        if not result.get("ok"):
+            return None
+        data = result.get("data")
+        if isinstance(data, dict):
+            for key in ("options", "dropdown_options", "resident_dropdown_options"):
+                options = self._normalize_dropdown_options(data.get(key))
+                if options:
+                    return options
+            return self._normalize_dropdown_options(data)
+        return {}
+
+    def save_dropdown_options(self, options):
+        payload = self._normalize_dropdown_options(options)
+        result = self.client(timeout=6.0).save_dropdown_options(payload)
+        self._require_ok(result)
+        return True
+
     def _normalize_resident(self, row: Dict[str, Any], devices: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         row = dict(row or {})
         resident_id = row.get("id") or row.get("resident_id")
