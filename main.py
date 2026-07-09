@@ -1,8 +1,30 @@
 import sys
+from pathlib import Path
+
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
+
+from config import APP_NAME, APP_VERSION, ASSETS_DIR
 from ui.splash_screen import SplashScreen
 from ui.login_window import LoginWindow
 from ui.dashboard_window import DashboardWindow
+
+
+def configure_windows_identity():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        app_id = f"EnhancedLiving.Whisperwood.{APP_VERSION}"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
+def configure_app_icon(app: QApplication):
+    icon_path = Path(ASSETS_DIR) / "enhanced_living_whisperwood_icon.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
 
 class AppController:
@@ -59,7 +81,12 @@ class AppController:
 
 
 def main():
+    configure_windows_identity()
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    configure_app_icon(app)
     controller = AppController()
     controller.start()
     sys.exit(app.exec())

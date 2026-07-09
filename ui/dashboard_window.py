@@ -1222,24 +1222,8 @@ class DashboardWindow(QWidget):
         self.txt_allergies.setGeometry(22, 377, 266, 42)
         self.btn_add_texture_option, self.btn_delete_texture_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_allergies, 298, 377, 348)
 
-        self.lbl_note = QLabel("Note", self.form_panel)
-        self.lbl_note.setGeometry(22, 430, 60, 18)
-        self.lbl_note.setStyleSheet(self.label_style())
-
-        self.txt_note = QTextEdit(self.form_panel)
-        self.txt_note.setGeometry(22, 452, 376, 58)
-        self.txt_note.setStyleSheet(self.input_style())
-
-        self.lbl_drinks = QLabel("Drinks", self.form_panel)
-        self.lbl_drinks.setGeometry(22, 520, 60, 18)
-        self.lbl_drinks.setStyleSheet(self.label_style())
-
-        self.txt_drinks = QLineEdit(self.form_panel)
-        self.txt_drinks.setGeometry(22, 542, 376, 42)
-        self.txt_drinks.setStyleSheet(self.input_style())
-
         self.lbl_schedule = QLabel("Fluids", self.form_panel)
-        self.lbl_schedule.setGeometry(22, 595, 80, 18)
+        self.lbl_schedule.setGeometry(22, 430, 80, 18)
         self.lbl_schedule.setStyleSheet(self.label_style())
 
         self.txt_schedule = self.editable_dropdown(
@@ -1248,8 +1232,24 @@ class DashboardWindow(QWidget):
             "Select fluids or type custom",
         )
         self.txt_schedule.setProperty("option_key", "fluids")
-        self.txt_schedule.setGeometry(22, 617, 266, 42)
-        self.btn_add_fluids_option, self.btn_delete_fluids_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_schedule, 298, 617, 348)
+        self.txt_schedule.setGeometry(22, 452, 266, 42)
+        self.btn_add_fluids_option, self.btn_delete_fluids_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_schedule, 298, 452, 348)
+
+        self.lbl_note = QLabel("Note", self.form_panel)
+        self.lbl_note.setGeometry(22, 505, 60, 18)
+        self.lbl_note.setStyleSheet(self.label_style())
+
+        self.txt_note = QTextEdit(self.form_panel)
+        self.txt_note.setGeometry(22, 527, 376, 58)
+        self.txt_note.setStyleSheet(self.input_style())
+
+        self.lbl_drinks = QLabel("Drinks", self.form_panel)
+        self.lbl_drinks.setGeometry(22, 595, 60, 18)
+        self.lbl_drinks.setStyleSheet(self.label_style())
+
+        self.txt_drinks = QLineEdit(self.form_panel)
+        self.txt_drinks.setGeometry(22, 617, 376, 42)
+        self.txt_drinks.setStyleSheet(self.input_style())
 
         self.lbl_source = QLabel("Source document", self.form_panel)
         self.lbl_source.setGeometry(22, 670, 120, 18)
