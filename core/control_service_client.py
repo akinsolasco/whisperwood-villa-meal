@@ -282,6 +282,31 @@ class ControlServiceClient:
     def restart_operation(self) -> Dict[str, Any]:
         return self._request("POST", "/operation/restart")
 
+    def operation_devices(self) -> Dict[str, Any]:
+        return self._request("GET", "/operation/devices")
+
+    def operation_send_text(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/operation/send", payload)
+
+    def operation_send_image(self, device_id: str, image_path: str) -> Dict[str, Any]:
+        if not image_path or not os.path.isfile(image_path):
+            return self._result(False, "/operation/send_image", error="Image file was not found.")
+        with open(image_path, "rb") as fh:
+            files = {"image": (os.path.basename(image_path), fh, "application/octet-stream")}
+            return self._request("POST", "/operation/send_image", files=files, data={"id": device_id})
+
+    def operation_lcd_command(self, device_id: str, command: str) -> Dict[str, Any]:
+        return self._request("POST", "/operation/lcd", {"id": device_id, "command": command})
+
+    def operation_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/operation/schedule", payload)
+
+    def operation_resident_display(self, resident_id: int, device_id: str = "") -> Dict[str, Any]:
+        return self._request("POST", "/operation/resident-display", {
+            "resident_id": resident_id,
+            "device_id": device_id,
+        })
+
     def bootstrap_info(self) -> Dict[str, Any]:
         return self._request("GET", "/bootstrap/info")
 

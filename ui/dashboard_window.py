@@ -2032,18 +2032,88 @@ class DashboardWindow(QWidget):
             value.setStyleSheet("font-size: 24px; color: #0f172a; font-weight: 800;")
             self.control_device_summary[key] = value
 
-        message = QLabel("ESP32 Registry Pending Operation Manager Integration", page)
+        message = QLabel("ESP32 registry is refreshed from the Operation Manager in real time.", page)
         message.setGeometry(0, 166, 600, 26)
         message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
 
         self.it_device_table = QTableWidget(page)
-        self.it_device_table.setGeometry(0, 210, 955, 500)
+        self.it_device_table.setGeometry(0, 210, 955, 330)
         self.it_device_table.setColumnCount(7)
         self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Last Seen"])
         self.it_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.it_device_table.verticalHeader().setVisible(False)
         self.it_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.it_device_table.setStyleSheet(self.table_style())
+
+        wifi_panel = QFrame(page)
+        wifi_panel.setGeometry(0, 565, 955, 260)
+        self.apply_frame_style(wifi_panel, self.card_style())
+
+        wifi_title = QLabel("ESP32 WiFi Provisioning", wifi_panel)
+        wifi_title.setGeometry(22, 18, 260, 24)
+        wifi_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+
+        wifi_hint = QLabel("Plug the ESP32 into this laptop by USB, choose the COM port, scan/select WiFi, then save credentials to the device.", wifi_panel)
+        wifi_hint.setGeometry(22, 48, 850, 22)
+        wifi_hint.setStyleSheet("font-size: 12px; color: #64748b;")
+
+        port_label = QLabel("USB / COM Port", wifi_panel)
+        port_label.setGeometry(22, 84, 140, 18)
+        port_label.setStyleSheet(self.label_style())
+        self.esp32_serial_port = QComboBox(wifi_panel)
+        self.esp32_serial_port.setGeometry(22, 108, 250, 40)
+        self.esp32_serial_port.setStyleSheet(self.input_style())
+
+        self.btn_refresh_esp32_ports = QPushButton("Refresh Ports", wifi_panel)
+        self.btn_refresh_esp32_ports.setGeometry(288, 108, 132, 40)
+        self.btn_refresh_esp32_ports.setStyleSheet(self.secondary_btn_style())
+        self.btn_refresh_esp32_ports.clicked.connect(self.refresh_esp32_serial_ports)
+
+        self.btn_scan_esp32_wifi = QPushButton("Scan WiFi", wifi_panel)
+        self.btn_scan_esp32_wifi.setGeometry(435, 108, 112, 40)
+        self.btn_scan_esp32_wifi.setStyleSheet(self.secondary_btn_style())
+        self.btn_scan_esp32_wifi.clicked.connect(self.scan_esp32_wifi_networks)
+
+        ssid_label = QLabel("WiFi Network", wifi_panel)
+        ssid_label.setGeometry(22, 160, 140, 18)
+        ssid_label.setStyleSheet(self.label_style())
+        self.esp32_wifi_ssid = QComboBox(wifi_panel)
+        self.esp32_wifi_ssid.setEditable(True)
+        self.esp32_wifi_ssid.setGeometry(22, 184, 250, 40)
+        self.esp32_wifi_ssid.setStyleSheet(self.input_style())
+
+        pass_label = QLabel("WiFi Password", wifi_panel)
+        pass_label.setGeometry(288, 160, 140, 18)
+        pass_label.setStyleSheet(self.label_style())
+        self.esp32_wifi_password = QLineEdit(wifi_panel)
+        self.esp32_wifi_password.setGeometry(288, 184, 210, 40)
+        self.esp32_wifi_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.esp32_wifi_password.setStyleSheet(self.input_style())
+
+        host_label = QLabel("Pi Host", wifi_panel)
+        host_label.setGeometry(514, 160, 120, 18)
+        host_label.setStyleSheet(self.label_style())
+        self.esp32_pi_host = QLineEdit(wifi_panel)
+        self.esp32_pi_host.setGeometry(514, 184, 180, 40)
+        self.esp32_pi_host.setPlaceholderText("172.20.0.240")
+        self.esp32_pi_host.setStyleSheet(self.input_style())
+
+        port2_label = QLabel("TCP Port", wifi_panel)
+        port2_label.setGeometry(710, 160, 100, 18)
+        port2_label.setStyleSheet(self.label_style())
+        self.esp32_pi_port = QLineEdit(wifi_panel)
+        self.esp32_pi_port.setGeometry(710, 184, 80, 40)
+        self.esp32_pi_port.setText("5000")
+        self.esp32_pi_port.setStyleSheet(self.input_style())
+
+        self.btn_apply_esp32_wifi = QPushButton("Save To ESP32", wifi_panel)
+        self.btn_apply_esp32_wifi.setGeometry(806, 184, 126, 40)
+        self.btn_apply_esp32_wifi.setStyleSheet(self.primary_btn_style())
+        self.btn_apply_esp32_wifi.clicked.connect(self.provision_esp32_wifi)
+
+        self.esp32_wifi_status = QLabel("Connect ESP32 over USB, then refresh ports.", wifi_panel)
+        self.esp32_wifi_status.setGeometry(570, 112, 360, 28)
+        self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #475569; font-weight: 700;")
         return page
 
     def build_control_ota_section(self):
@@ -3959,7 +4029,14 @@ class DashboardWindow(QWidget):
             return
         devices = self.safe_get_devices()
         offline = sum(1 for d in devices if not d.get("is_online"))
-        low_battery = sum(1 for d in devices if d.get("battery_level") is not None and int(d.get("battery_level")) < 20)
+        low_battery = 0
+        for d in devices:
+            try:
+                battery = int(d.get("battery_level"))
+            except Exception:
+                battery = None
+            if battery is not None and battery < 20:
+                low_battery += 1
         if hasattr(self, "control_device_summary"):
             self.control_device_summary["total"].setText(str(len(devices)))
             self.control_device_summary["online"].setText(str(len(devices) - offline))
@@ -3980,7 +4057,134 @@ class DashboardWindow(QWidget):
             ]
             for c, value in enumerate(values):
                 self.it_device_table.setItem(r, c, QTableWidgetItem(str(value)))
+        if hasattr(self, "esp32_pi_host") and not self.esp32_pi_host.text().strip():
+            profile = self.current_control_profile()
+            self.esp32_pi_host.setText(profile.get("host") or "")
         self.load_it_recovery_users()
+
+    def refresh_esp32_serial_ports(self):
+        if not hasattr(self, "esp32_serial_port"):
+            return
+        current = self.esp32_serial_port.currentData()
+        self.esp32_serial_port.clear()
+        try:
+            from serial.tools import list_ports
+        except Exception:
+            self.esp32_wifi_status.setText("pyserial is not installed. Install/update the desktop app.")
+            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+            return
+        ports = list(list_ports.comports())
+        for port in ports:
+            label = f"{port.device} - {port.description}"
+            self.esp32_serial_port.addItem(label, port.device)
+        if current:
+            for idx in range(self.esp32_serial_port.count()):
+                if self.esp32_serial_port.itemData(idx) == current:
+                    self.esp32_serial_port.setCurrentIndex(idx)
+                    break
+        count = self.esp32_serial_port.count()
+        self.esp32_wifi_status.setText(f"{count} USB serial port(s) found." if count else "No USB serial ports found.")
+        self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;" if count else "font-size: 12px; color: #b91c1c; font-weight: 800;")
+
+    def _open_esp32_serial(self):
+        port = self.esp32_serial_port.currentData() if hasattr(self, "esp32_serial_port") else None
+        if not port:
+            raise RuntimeError("Select the ESP32 USB / COM port first.")
+        try:
+            import serial
+        except Exception as exc:
+            raise RuntimeError("pyserial is not installed. Install/update the desktop app before provisioning ESP32 WiFi.") from exc
+        return serial.Serial(port=port, baudrate=115200, timeout=0.8, write_timeout=2)
+
+    def _read_esp32_lines(self, ser, end_markers, timeout_s=12):
+        lines = []
+        start = time.time()
+        markers = tuple(end_markers)
+        while time.time() - start < timeout_s:
+            raw = ser.readline()
+            if not raw:
+                continue
+            line = raw.decode(errors="ignore").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if markers and any(line.startswith(marker) for marker in markers):
+                break
+        return lines
+
+    def _serial_value(self, value):
+        from urllib.parse import quote
+        return quote(str(value or "").strip(), safe="")
+
+    def scan_esp32_wifi_networks(self):
+        try:
+            with self._open_esp32_serial() as ser:
+                ser.reset_input_buffer()
+                ser.write(b"WWSCAN\n")
+                lines = self._read_esp32_lines(ser, ("WWEND", "WWERR"), timeout_s=18)
+            networks = []
+            for line in lines:
+                if not line.startswith("WWSSID "):
+                    continue
+                marker = " ssid="
+                rssi_marker = " rssi="
+                ssid = ""
+                if marker in line and rssi_marker in line:
+                    ssid = line.split(marker, 1)[1].split(rssi_marker, 1)[0].strip()
+                if ssid and ssid not in networks:
+                    networks.append(ssid)
+            self.esp32_wifi_ssid.clear()
+            for ssid in networks:
+                self.esp32_wifi_ssid.addItem(ssid)
+            self.esp32_wifi_status.setText(f"Found {len(networks)} WiFi network(s)." if networks else "No WiFi networks returned by ESP32.")
+            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;" if networks else "font-size: 12px; color: #b91c1c; font-weight: 800;")
+        except Exception as exc:
+            self.esp32_wifi_status.setText(f"WiFi scan failed: {exc}")
+            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+
+    def provision_esp32_wifi(self):
+        ssid = self.esp32_wifi_ssid.currentText().strip() if hasattr(self, "esp32_wifi_ssid") else ""
+        password = self.esp32_wifi_password.text() if hasattr(self, "esp32_wifi_password") else ""
+        pi_host = self.esp32_pi_host.text().strip() if hasattr(self, "esp32_pi_host") else ""
+        pi_port = self.esp32_pi_port.text().strip() if hasattr(self, "esp32_pi_port") else "5000"
+        if not ssid:
+            self.show_error("Missing WiFi", "Enter or select the WiFi network name.")
+            return
+        if not pi_host:
+            self.show_error("Missing Pi Host", "Enter the Raspberry Pi LAN IP or hostname for the ESP32 to connect to.")
+            return
+        try:
+            port_num = int(pi_port)
+            if port_num < 1 or port_num > 65535:
+                raise ValueError
+        except Exception:
+            self.show_error("Invalid Port", "ESP32 TCP port must be a number from 1 to 65535.")
+            return
+        command = (
+            f"WWSET ssid={self._serial_value(ssid)} "
+            f"pass={self._serial_value(password)} "
+            f"pi={self._serial_value(pi_host)} "
+            f"port={port_num}\n"
+        )
+        try:
+            with self._open_esp32_serial() as ser:
+                ser.reset_input_buffer()
+                ser.write(command.encode("utf-8"))
+                lines = self._read_esp32_lines(ser, ("WWOK", "WWERR"), timeout_s=10)
+            ok = any(line.startswith("WWOK") for line in lines)
+            detail = " | ".join(lines[-4:]) if lines else "No response from ESP32."
+            if ok:
+                self.esp32_wifi_status.setText("WiFi saved to ESP32. Device will reboot/reconnect.")
+                self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Success", f"Pi host {pi_host}:{port_num}")
+                self.show_info("ESP32 WiFi", "WiFi settings saved to the ESP32. It will reconnect using the new network.")
+            else:
+                self.esp32_wifi_status.setText(f"ESP32 response: {detail}")
+                self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+        except Exception as exc:
+            self.esp32_wifi_status.setText(f"Provision failed: {exc}")
+            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+            self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Failed", str(exc))
 
     def restart_operation_manager(self):
         client = self.control_client()
@@ -4717,15 +4921,14 @@ class DashboardWindow(QWidget):
             return
 
         payload = self.build_gateway_payload(device_id)
-        try:
-            result = self.gateway.send_text(self.base_url(), payload)
-            success = result["status_code"] == 200
-            message = "Saved resident sent to paired device" if success else f"Auto-send failed ({result['status_code']})"
-            response = result["body"]
-        except Exception as e:
-            success = False
-            message = f"Auto-send queued for later review: {e}"
-            response = {"error": str(e)}
+        success, message, response = self.send_resident_display_sequence(
+            row,
+            device_id,
+            payload,
+            "Saved resident sent to paired device",
+            "Auto-send",
+            image_path=self.selected_image_path or row.get("lcd_image_path"),
+        )
 
         self.db.log_update(
             "auto_send_after_save",
@@ -4924,18 +5127,19 @@ class DashboardWindow(QWidget):
         texture = row.get("texture") or row.get("allergies")
         fluids = row.get("fluids") or row.get("schedule")
         if texture:
+            payload["texture"] = [x.strip() for x in texture.split(",") if x.strip()]
             payload["allergies"] = [x.strip() for x in texture.split(",") if x.strip()]
         if fluids:
+            payload["fluids"] = fluids
             payload["schedule"] = fluids
-        try:
-            result = self.gateway.send_text(self.base_url(), payload)
-            success = result["status_code"] == 200
-            message = "Latest resident text pushed after pairing" if success else f"Auto-push failed ({result['status_code']})"
-            response = result["body"]
-        except Exception as e:
-            success = False
-            message = f"Auto-push queued for review: {e}"
-            response = {"error": str(e)}
+        success, message, response = self.send_resident_display_sequence(
+            row,
+            device_id,
+            payload,
+            "Latest resident text/photo pushed after pairing",
+            "Auto-push",
+            image_path=row.get("lcd_image_path"),
+        )
         self.db.log_update(
             action_type,
             row.get("id"),
@@ -4948,6 +5152,36 @@ class DashboardWindow(QWidget):
             success,
             message
         )
+
+    def send_resident_display_sequence(self, row, device_id, payload, success_message, label, image_path=None):
+        try:
+            if self.server_mode and hasattr(self.gateway, "send_resident_display") and row and row.get("id"):
+                result = self.gateway.send_resident_display(self.base_url(), row.get("id"), device_id)
+                success = result["status_code"] == 200
+                message = success_message if success else f"{label} failed ({result['status_code']})"
+                return success, message, result["body"]
+
+            text_result = self.gateway.send_text(self.base_url(), payload)
+            text_success = text_result["status_code"] == 200
+            response = {"text": text_result["body"]}
+            success = text_success
+            message = success_message if text_success else f"{label} text failed ({text_result['status_code']})"
+
+            if text_success and image_path and os.path.isfile(str(image_path)):
+                image_result = self.gateway.send_image(self.base_url(), device_id, str(image_path))
+                response["image"] = image_result["body"]
+                image_success = image_result["status_code"] == 200
+                success = image_success
+                message = (
+                    f"{success_message}; resident photo sent"
+                    if image_success
+                    else f"{label} photo failed ({image_result['status_code']})"
+                )
+            elif text_success:
+                response["image"] = {"ok": True, "skipped": True, "reason": "No resident photo available"}
+            return success, message, response
+        except Exception as e:
+            return False, f"{label} queued for later review: {e}", {"error": str(e)}
 
     def unpair_selected_from_menu(self):
         if not self.require_network_for_write("Unpairing device"):
@@ -5172,6 +5406,7 @@ class DashboardWindow(QWidget):
         note = self.txt_note.toPlainText().strip()
         drinks = self.txt_drinks.text().strip()
         schedule = self.field_text(self.txt_schedule)
+        texture = self.field_text(self.txt_allergies)
 
         if name:
             payload["name"] = name
@@ -5182,16 +5417,18 @@ class DashboardWindow(QWidget):
         if drinks:
             payload["drinks"] = drinks
         if schedule:
+            payload["fluids"] = schedule
             payload["schedule"] = schedule
 
         diet = self.field_text(self.txt_diet)
-        allergies = self.field_text(self.txt_allergies)
 
         if diet:
             payload["diet"] = [x.strip() for x in diet.split(",") if x.strip()]
 
-        if allergies:
-            payload["allergies"] = [x.strip() for x in allergies.split(",") if x.strip()]
+        if texture:
+            texture_items = [x.strip() for x in texture.split(",") if x.strip()]
+            payload["texture"] = texture_items
+            payload["allergies"] = texture_items
 
         if self.rules:
             payload["highlights"] = [r.to_json() for r in self.rules]
@@ -5302,36 +5539,30 @@ class DashboardWindow(QWidget):
         self.global_schedule_off = self.schedule_off_time()
         self.global_schedule_sleep_if_no_image = self.chk_sleep_no_image.isChecked()
 
-        responses = []
-        failed_devices = []
-        for d in devices:
-            device_id = d.get("device_id")
-            payload = {
-                "resident_uid": "GLOBAL",
-                "resident_id": None,
-                "device_id": device_id,
-                "enabled": self.global_schedule_enabled,
-                "lcd_on_time": self.global_schedule_on,
-                "lcd_off_time": self.global_schedule_off,
-                "sleep_if_no_image": self.global_schedule_sleep_if_no_image,
-                "has_image": False,
-            }
-            try:
-                result = self.gateway.save_schedule(self.base_url(), payload)
-                ok = result["status_code"] == 200
-                responses.append({"device_id": device_id, "status_code": result["status_code"], "body": result["body"]})
-                if not ok:
-                    failed_devices.append(device_id)
-            except Exception as e:
-                failed_devices.append(device_id)
-                responses.append({"device_id": device_id, "error": str(e)})
-
-        success_count = len(devices) - len(failed_devices)
-        success = len(failed_devices) == 0
-        if success:
-            message = f"Global LCD schedule saved for {success_count} device(s)."
-        else:
-            message = f"Schedule applied to {success_count}/{len(devices)} device(s). Failed: {', '.join(failed_devices)}"
+        payload = {
+            "resident_uid": "GLOBAL",
+            "resident_id": None,
+            "device_id": "all",
+            "enabled": self.global_schedule_enabled,
+            "lcd_on_time": self.global_schedule_on,
+            "lcd_off_time": self.global_schedule_off,
+            "sleep_if_no_image": self.global_schedule_sleep_if_no_image,
+            "has_image": False,
+            "device_ids": [d.get("device_id") for d in devices],
+        }
+        try:
+            result = self.gateway.save_schedule(self.base_url(), payload)
+            success = result["status_code"] == 200
+            responses = [{"device_id": "all", "status_code": result["status_code"], "body": result["body"]}]
+            message = (
+                f"Global LCD schedule saved for {len(devices)} device(s)."
+                if success
+                else f"Global LCD schedule failed ({result['status_code']})."
+            )
+        except Exception as e:
+            success = False
+            responses = [{"device_id": "all", "error": str(e)}]
+            message = f"Global LCD schedule could not be saved: {e}"
 
         self.db.log_update(
             "save_schedule",

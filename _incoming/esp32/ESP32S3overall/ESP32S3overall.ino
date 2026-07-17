@@ -10,13 +10,16 @@
 #include "fonts.h"
 #include "Font48.h"
 
-// ================= WIFI (Raspberry Pi AP) =================
-static const char* WIFI_SSID = "EPD-GATEWAY";
-static const char* WIFI_PASS = "epaper123";
+// ================= WIFI DEFAULTS / USB PROVISIONING =================
+static const char* DEFAULT_WIFI_SSID = "EPD-GATEWAY";
+static const char* DEFAULT_WIFI_PASS = "epaper123";
+static const char* DEFAULT_PI_HOST = "192.168.4.1";
+static const uint16_t DEFAULT_PI_PORT = 5000;
 
-// ================= RASPBERRY PI SERVER ====================
-static const char* PI_IP = "192.168.4.1";
-static const uint16_t PI_PORT = 5000;
+char gWifiSsid[64] = "EPD-GATEWAY";
+char gWifiPass[96] = "epaper123";
+char gPiHost[64] = "192.168.4.1";
+uint16_t gPiPort = 5000;
 
 WiFiClient client;
 Preferences prefs;
@@ -89,8 +92,10 @@ struct DisplayData {
   char room[24];
   char diet[8][32];
   int dietCount;
-  char allergies[8][32];
-  int allergiesCount;
+  char texture[8][32];
+  int textureCount;
+  char fluids[8][32];
+  int fluidsCount;
   char note[96];
   char drinks[48];
 };
@@ -102,9 +107,10 @@ static long lastAppliedSeq = -1;
 #define SEC_NAME 0
 #define SEC_ROOM 1
 #define SEC_DIET 2
-#define SEC_ALLERGIES 3
-#define SEC_NOTE 4
-#define SEC_DRINKS 5
+#define SEC_TEXTURE 3
+#define SEC_FLUIDS 4
+#define SEC_NOTE 5
+#define SEC_DRINKS 6
 #define SEC_UNKNOWN 255
 
 #define HL_SECTION 0
@@ -163,6 +169,36 @@ static void decodeUnderscore(char* s) {
     if (*s == '_') *s = ' ';
 }
 
+static int hexVal(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static void decodePercentInPlace(char* s) {
+  char* r = s;
+  char* w = s;
+  while (*r) {
+    if (*r == '%' && r[1] && r[2]) {
+      int hi = hexVal(r[1]);
+      int lo = hexVal(r[2]);
+      if (hi >= 0 && lo >= 0) {
+        *w++ = (char)((hi << 4) | lo);
+        r += 3;
+        continue;
+      }
+    }
+    if (*r == '+') {
+      *w++ = ' ';
+      r++;
+      continue;
+    }
+    *w++ = *r++;
+  }
+  *w = '\0';
+}
+
 static bool getTokenValue(const char* line, const char* key, char* out, size_t outSize) {
   char pattern[32];
   snprintf(pattern, sizeof(pattern), "%s=", key);
@@ -209,7 +245,8 @@ static uint8_t parseSectionCode(const char* s) {
   if (strcmp(s, "NAME") == 0) return SEC_NAME;
   if (strcmp(s, "ROOM") == 0) return SEC_ROOM;
   if (strcmp(s, "DIET") == 0) return SEC_DIET;
-  if (strcmp(s, "ALLERGIES") == 0) return SEC_ALLERGIES;
+  if (strcmp(s, "TEXTURE") == 0 || strcmp(s, "ALLERGIES") == 0) return SEC_TEXTURE;
+  if (strcmp(s, "FLUIDS") == 0 || strcmp(s, "SCHEDULE") == 0) return SEC_FLUIDS;
   if (strcmp(s, "NOTE") == 0) return SEC_NOTE;
   if (strcmp(s, "DRINKS") == 0) return SEC_DRINKS;
   return SEC_UNKNOWN;
@@ -569,14 +606,17 @@ static void displayFromData(const DisplayData& d) {
   int y = START_Y;
 
   char dietLine[200];
-  char allergyLine[200];
+  char textureLine[200];
+  char fluidsLine[200];
   joinListLineLocal((char(*)[32])d.diet, d.dietCount, dietLine, sizeof(dietLine));
-  joinListLineLocal((char(*)[32])d.allergies, d.allergiesCount, allergyLine, sizeof(allergyLine));
+  joinListLineLocal((char(*)[32])d.texture, d.textureCount, textureLine, sizeof(textureLine));
+  joinListLineLocal((char(*)[32])d.fluids, d.fluidsCount, fluidsLine, sizeof(fluidsLine));
 
   y = renderSection("NAME", d.name, SEC_NAME, startX, y, maxX, &Font48);
   y = renderSection("ROOM", d.room, SEC_ROOM, startX, y, maxX, &Font48);
   y = renderSection("DIET", dietLine, SEC_DIET, startX, y, maxX, &Font48);
-  y = renderSection("ALLERGIES", allergyLine, SEC_ALLERGIES, startX, y, maxX, &Font48);
+  y = renderSection("TEXTURE", textureLine, SEC_TEXTURE, startX, y, maxX, &Font48);
+  y = renderSection("FLUIDS", fluidsLine, SEC_FLUIDS, startX, y, maxX, &Font48);
   y = renderSection("NOTE", d.note, SEC_NOTE, startX, y, maxX, &Font48);
   y = renderSection("DRINKS", d.drinks, SEC_DRINKS, startX, y, maxX, &Font48);
 
@@ -761,6 +801,129 @@ static bool loadStateFromFlash() {
   return ok;
 }
 
+static void loadNetworkConfig() {
+  prefs.begin("epdnet", true);
+  String ssid = prefs.getString("ssid", DEFAULT_WIFI_SSID);
+  String pass = prefs.getString("pass", DEFAULT_WIFI_PASS);
+  String host = prefs.getString("pi", DEFAULT_PI_HOST);
+  uint16_t port = prefs.getUShort("port", DEFAULT_PI_PORT);
+  prefs.end();
+
+  ssid.toCharArray(gWifiSsid, sizeof(gWifiSsid));
+  pass.toCharArray(gWifiPass, sizeof(gWifiPass));
+  host.toCharArray(gPiHost, sizeof(gPiHost));
+  gPiPort = port ? port : DEFAULT_PI_PORT;
+}
+
+static void saveNetworkConfig(const char* ssid, const char* pass, const char* piHost, uint16_t piPort) {
+  prefs.begin("epdnet", false);
+  prefs.putString("ssid", ssid ? ssid : "");
+  prefs.putString("pass", pass ? pass : "");
+  prefs.putString("pi", piHost ? piHost : DEFAULT_PI_HOST);
+  prefs.putUShort("port", piPort ? piPort : DEFAULT_PI_PORT);
+  prefs.end();
+}
+
+static void printNetworkConfig() {
+  Serial.print("WWCFG id=");
+  Serial.print(DEVICE_ID);
+  Serial.print(" ssid=");
+  Serial.print(gWifiSsid);
+  Serial.print(" pi=");
+  Serial.print(gPiHost);
+  Serial.print(" port=");
+  Serial.print(gPiPort);
+  Serial.print(" wifi=");
+  Serial.print(WiFi.status() == WL_CONNECTED ? "connected" : "offline");
+  Serial.print(" ip=");
+  Serial.println(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "-");
+}
+
+static void scanWifiForSerial() {
+  Serial.println("WWSCAN begin=1");
+  int count = WiFi.scanNetworks(false, true);
+  if (count < 0) {
+    Serial.println("WWERR scan_failed");
+    return;
+  }
+  for (int i = 0; i < count; i++) {
+    Serial.print("WWSSID index=");
+    Serial.print(i);
+    Serial.print(" ssid=");
+    Serial.print(WiFi.SSID(i));
+    Serial.print(" rssi=");
+    Serial.print(WiFi.RSSI(i));
+    Serial.print(" enc=");
+    Serial.println((int)WiFi.encryptionType(i));
+  }
+  Serial.print("WWEND count=");
+  Serial.println(count);
+}
+
+static void handleSerialCommandLine(char* line) {
+  if (!line || !line[0]) return;
+  while (*line == ' ') line++;
+
+  if (strcmp(line, "WWCFG?") == 0) {
+    printNetworkConfig();
+    return;
+  }
+
+  if (strcmp(line, "WWSCAN") == 0) {
+    scanWifiForSerial();
+    return;
+  }
+
+  if (strncmp(line, "WWSET ", 6) == 0) {
+    char ssid[64] = {0};
+    char pass[96] = {0};
+    char pi[64] = {0};
+    char portBuf[12] = {0};
+
+    if (!getTokenValue(line, "ssid", ssid, sizeof(ssid))) {
+      Serial.println("WWERR missing_ssid");
+      return;
+    }
+    getTokenValue(line, "pass", pass, sizeof(pass));
+    if (!getTokenValue(line, "pi", pi, sizeof(pi))) {
+      strncpy(pi, DEFAULT_PI_HOST, sizeof(pi) - 1);
+    }
+    getTokenValue(line, "port", portBuf, sizeof(portBuf));
+
+    decodePercentInPlace(ssid);
+    decodePercentInPlace(pass);
+    decodePercentInPlace(pi);
+    uint16_t port = (uint16_t)atoi(portBuf);
+    if (!port) port = DEFAULT_PI_PORT;
+
+    saveNetworkConfig(ssid, pass, pi, port);
+    Serial.println("WWOK saved=1 rebooting=1");
+    delay(400);
+    ESP.restart();
+    return;
+  }
+
+  Serial.println("WWERR unknown_command");
+}
+
+static void handleSerialProvisioning() {
+  static char line[256];
+  static size_t len = 0;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      line[len] = '\0';
+      handleSerialCommandLine(line);
+      len = 0;
+      continue;
+    }
+    if (len < sizeof(line) - 1) {
+      line[len++] = c;
+    }
+  }
+}
+
 // ================= NETWORK =================
 static void connectWiFi() {
   stage("wifi: begin");
@@ -770,17 +933,18 @@ static void connectWiFi() {
   WiFi.setSleep(false);
   WiFi.setHostname(DEVICE_ID);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(gWifiSsid, gWifiPass);
 
   unsigned long t0 = millis();
   while (WiFi.status() != WL_CONNECTED) {
+    handleSerialProvisioning();
     delay(300);
     Serial.print(".");
     if (millis() - t0 > 20000) {
       Serial.println("\nWiFi timeout retry...");
       WiFi.disconnect(true);
       delay(500);
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      WiFi.begin(gWifiSsid, gWifiPass);
       t0 = millis();
     }
   }
@@ -799,7 +963,7 @@ static bool connectToPi() {
   stage("tcp: connect");
   client.setTimeout(1);
 
-  if (!client.connect(PI_IP, PI_PORT)) {
+  if (!client.connect(gPiHost, gPiPort)) {
     Serial.println("Pi connection failed.");
     stage("tcp: failed");
     return false;
@@ -807,7 +971,7 @@ static bool connectToPi() {
 
   client.print("HELLO id=");
   client.print(DEVICE_ID);
-  client.print(" fw=2\n");
+  client.print(" fw=3\n");
 
   Serial.println("Connected to Pi. Sent HELLO.");
   stage("tcp: connected");
@@ -837,7 +1001,12 @@ static bool applyUpdateLine(const char* line, long* outSeq) {
     nd.room[sizeof(nd.room) - 1] = '\0';
   }
   if (getTokenValue(line, "diet", tmp, sizeof(tmp))) { splitPipeToList(tmp, nd.diet, &nd.dietCount, 8); }
-  if (getTokenValue(line, "allergies", tmp, sizeof(tmp))) { splitPipeToList(tmp, nd.allergies, &nd.allergiesCount, 8); }
+  if (getTokenValue(line, "texture", tmp, sizeof(tmp)) || getTokenValue(line, "allergies", tmp, sizeof(tmp))) {
+    splitPipeToList(tmp, nd.texture, &nd.textureCount, 8);
+  }
+  if (getTokenValue(line, "fluids", tmp, sizeof(tmp)) || getTokenValue(line, "schedule", tmp, sizeof(tmp))) {
+    splitPipeToList(tmp, nd.fluids, &nd.fluidsCount, 8);
+  }
   if (getTokenValue(line, "note", tmp, sizeof(tmp))) {
     decodeUnderscore(tmp);
     strncpy(nd.note, tmp, sizeof(nd.note) - 1);
@@ -908,6 +1077,20 @@ static void pollPiMessages() {
   }
 }
 
+static void sendStatusIfDue() {
+  static unsigned long lastStatusMs = 0;
+  if (!client.connected()) return;
+  if (millis() - lastStatusMs < 10000) return;
+  lastStatusMs = millis();
+  client.print("STATUS battery=-1 heap=");
+  client.print(ESP.getFreeHeap());
+  client.print(" wifi=");
+  client.print(WiFi.status() == WL_CONNECTED ? "connected" : "offline");
+  client.print(" ip=");
+  client.print(WiFi.localIP());
+  client.print("\n");
+}
+
 // ================= DEFAULT SAMPLE =================
 static void loadSampleData() {
   memset(&gData, 0, sizeof(gData));
@@ -919,9 +1102,10 @@ static void loadSampleData() {
   strncpy(gData.diet[0], "MECHANICAL SOFT", 31);
   strncpy(gData.diet[1], "LOW SODIUM", 31);
   strncpy(gData.diet[2], "DIABETIC", 31);
-  gData.allergiesCount = 2;
-  strncpy(gData.allergies[0], "PEANUTS", 31);
-  strncpy(gData.allergies[1], "SHELLFISH", 31);
+  gData.textureCount = 1;
+  strncpy(gData.texture[0], "MINCED AND MOIST", 31);
+  gData.fluidsCount = 1;
+  strncpy(gData.fluids[0], "MILDLY THICK", 31);
   strncpy(gData.note, "NO FISH", sizeof(gData.note) - 1);
   strncpy(gData.drinks, "COFFEE", sizeof(gData.drinks) - 1);
 }
@@ -932,8 +1116,10 @@ void setup() {
   delay(400);
 
   makeDeviceId();
+  loadNetworkConfig();
   Serial.print("DEVICE_ID: ");
   Serial.println(DEVICE_ID);
+  printNetworkConfig();
 
   printHeap("boot");
 
@@ -984,6 +1170,7 @@ void setup() {
 }
 
 void loop() {
+  handleSerialProvisioning();
   if (WiFi.status() != WL_CONNECTED) connectWiFi();
   if (!connectToPi()) {
     delay(800);
@@ -991,5 +1178,6 @@ void loop() {
   }
 
   pollPiMessages();
+  sendStatusIfDue();
   delay(20);
 }
