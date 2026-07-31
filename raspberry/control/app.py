@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form, Body
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional, Any
 from sqlalchemy import create_engine, text
@@ -9,7 +9,8 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 import os, json, platform, subprocess, shutil, psutil, requests, secrets, string, time
 
-app = FastAPI(title="Whisperwood Control Service", version="0.4.0")
+app = FastAPI(title="Whisperwood Control Service", version="0.5.2")
+STARTED_AT = datetime.utcnow()
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +30,15 @@ DOC_DIR = "/opt/whisperwood/data/documents"
 IMG_DIR = "/opt/whisperwood/data/images"
 os.makedirs(DOC_DIR, exist_ok=True)
 os.makedirs(IMG_DIR, exist_ok=True)
+
+BATTERY_ROLE_DEFAULTS = ["IT_ADMIN"]
+DEFAULT_BATTERY_ALERT_SETTINGS = {
+    "enabled": True,
+    "low_threshold": 20,
+    "critical_threshold": 10,
+    "popup_cooldown_minutes": 30,
+    "recipient_roles": BATTERY_ROLE_DEFAULTS,
+}
 
 def now():
     return datetime.utcnow().isoformat()
@@ -62,6 +72,11 @@ def verify_pw(hash_value: str, password: str):
     except Exception:
         return False
 
+
+def json_value(value):
+    return json.dumps(value or {}, default=str)
+
+
 def log_action(username="system", action="", target="", result="success", message="", payload=None, response=None):
     db_exec("""
         INSERT INTO audit_logs(timestamp, username, action, target, result, message, payload_json, response_json)
@@ -75,6 +90,30 @@ def log_action(username="system", action="", target="", result="success", messag
         "message": message,
         "payload_json": json.dumps(payload or {}),
         "response_json": json.dumps(response or {})
+    })
+
+
+def log_resident_audit(username="system", action="", resident=None, old_values=None, new_values=None, reason="", source_document_path=""):
+    resident = resident or {}
+    db_exec("""
+        INSERT INTO resident_audit(
+            resident_id, resident_uid, changed_by, change_type,
+            old_values, new_values, reason, source_document_path, created_at
+        )
+        VALUES(
+            :resident_id, :resident_uid, :changed_by, :change_type,
+            :old_values, :new_values, :reason, :source_document_path, :created_at
+        )
+    """, {
+        "resident_id": resident.get("id"),
+        "resident_uid": resident.get("resident_uid") or "",
+        "changed_by": username or "system",
+        "change_type": action,
+        "old_values": json_value(old_values),
+        "new_values": json_value(new_values),
+        "reason": reason or "",
+        "source_document_path": source_document_path or resident.get("source_document_path") or "",
+        "created_at": now(),
     })
 
 
@@ -112,6 +151,76 @@ def bool_value(*values):
         if value is not None:
             return bool(value)
     return False
+
+
+def normalize_role_key(role: str) -> str:
+    raw = str(role or "").strip()
+    upper = raw.upper()
+    lower = raw.lower()
+    if upper == "ADMIN" or lower in {"admin", "nurse_admin", "nurseadmin"}:
+        return "NURSE_ADMIN"
+    if upper == "STAFF" or lower in {"staff", "nurse", "user"}:
+        return "NURSE"
+    if upper in {"IT_ADMIN", "ITADMIN"} or lower in {"it_admin", "itadmin", "it"}:
+        return "IT_ADMIN"
+    if upper in {"VERIFIER", "DISPLAY_VERIFIER"}:
+        return "VERIFIER"
+    return upper or "IT_ADMIN"
+
+
+def normalize_battery_alert_settings(raw: Any = None) -> dict[str, Any]:
+    data = dict(DEFAULT_BATTERY_ALERT_SETTINGS)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    if isinstance(raw, dict):
+        data.update(raw)
+    try:
+        data["low_threshold"] = max(1, min(100, int(data.get("low_threshold", 20))))
+    except Exception:
+        data["low_threshold"] = 20
+    try:
+        data["critical_threshold"] = max(1, min(data["low_threshold"], int(data.get("critical_threshold", 10))))
+    except Exception:
+        data["critical_threshold"] = 10
+    try:
+        data["popup_cooldown_minutes"] = max(1, min(1440, int(data.get("popup_cooldown_minutes", 30))))
+    except Exception:
+        data["popup_cooldown_minutes"] = 30
+    roles = data.get("recipient_roles") or BATTERY_ROLE_DEFAULTS
+    if isinstance(roles, str):
+        roles = [role.strip() for role in roles.split(",")]
+    allowed = {"IT_ADMIN", "NURSE_ADMIN", "NURSE", "VERIFIER"}
+    normalized = []
+    for role in roles or []:
+        key = normalize_role_key(role)
+        if key in allowed and key not in normalized:
+            normalized.append(key)
+    data["recipient_roles"] = normalized or list(BATTERY_ROLE_DEFAULTS)
+    data["enabled"] = bool(data.get("enabled", True))
+    return data
+
+
+def get_system_setting(key: str, default: Any = None) -> Any:
+    row = db_one("SELECT value_json FROM system_settings WHERE key=:key", {"key": key})
+    if not row:
+        return default
+    try:
+        return json.loads(row.get("value_json") or "")
+    except Exception:
+        return default
+
+
+def save_system_setting(key: str, value: Any) -> None:
+    payload = json.dumps(value or {}, default=str)
+    db_exec("""
+        INSERT INTO system_settings(key, value_json, updated_at)
+        VALUES(:key, :value_json, :updated_at)
+        ON CONFLICT (key)
+        DO UPDATE SET value_json=EXCLUDED.value_json, updated_at=EXCLUDED.updated_at
+    """, {"key": key, "value_json": payload, "updated_at": now()})
 
 
 def resident_display_payload(row, device_id=""):
@@ -156,20 +265,44 @@ def sync_operation_devices():
             "firmware_version": device.get("fw") or device.get("firmware") or "",
             "battery_level": str(device.get("battery_level") if device.get("battery_level") is not None else ""),
             "battery_percent": device.get("battery_level") if isinstance(device.get("battery_level"), int) else None,
+            "battery_ok": device.get("battery_ok"),
+            "battery_mv": device.get("battery_mv"),
+            "battery_voltage": device.get("battery_voltage"),
+            "battery_raw_percent": device.get("battery_raw_percent"),
+            "battery_low": device.get("battery_low"),
+            "battery_alert": device.get("battery_alert"),
+            "battery_plugged": device.get("battery_plugged"),
+            "battery_charging": device.get("battery_charging"),
+            "battery_full": device.get("battery_full"),
+            "rssi": device.get("rssi"),
+            "heap": device.get("heap"),
+            "last_status_at": device.get("last_status_at") or "",
             "status": "online" if device.get("is_online") or device.get("online") else "offline",
-            "last_seen": now(),
+            "last_seen": device.get("last_seen_at") or now(),
             "t": now(),
         }
         if existing:
             db_exec("""
                 UPDATE devices SET ip_address=:ip_address, port=:port, firmware_version=:firmware_version,
                 battery_level=:battery_level, battery_percent=:battery_percent, status=:status,
+                battery_ok=:battery_ok, battery_mv=:battery_mv, battery_voltage=:battery_voltage,
+                battery_raw_percent=:battery_raw_percent, battery_low=:battery_low, battery_alert=:battery_alert,
+                battery_plugged=:battery_plugged, battery_charging=:battery_charging, battery_full=:battery_full,
+                rssi=:rssi, heap=:heap, last_status_at=:last_status_at,
                 last_seen=:last_seen, updated_at=:t WHERE device_id=:device_id
             """, data)
         else:
             db_exec("""
-                INSERT INTO devices(device_id,ip_address,port,firmware_version,battery_level,battery_percent,status,last_seen,created_at,updated_at)
-                VALUES(:device_id,:ip_address,:port,:firmware_version,:battery_level,:battery_percent,:status,:last_seen,:t,:t)
+                INSERT INTO devices(
+                    device_id,ip_address,port,firmware_version,battery_level,battery_percent,status,last_seen,
+                    battery_ok,battery_mv,battery_voltage,battery_raw_percent,battery_low,battery_alert,
+                    battery_plugged,battery_charging,battery_full,rssi,heap,last_status_at,created_at,updated_at
+                )
+                VALUES(
+                    :device_id,:ip_address,:port,:firmware_version,:battery_level,:battery_percent,:status,:last_seen,
+                    :battery_ok,:battery_mv,:battery_voltage,:battery_raw_percent,:battery_low,:battery_alert,
+                    :battery_plugged,:battery_charging,:battery_full,:rssi,:heap,:last_status_at,:t,:t
+                )
             """, data)
     return devices
 
@@ -209,6 +342,24 @@ def merged_devices():
             "last_seen_s": live.get("last_seen_s") if live else 9999,
             "battery_level": live.get("battery_level") if live.get("battery_level") is not None else row.get("battery_percent"),
             "battery": live.get("battery_level") if live.get("battery_level") is not None else row.get("battery_percent"),
+            "battery_ok": first_value(live.get("battery_ok"), row.get("battery_ok")),
+            "battery_mv": first_value(live.get("battery_mv"), row.get("battery_mv")),
+            "battery_voltage": first_value(live.get("battery_voltage"), row.get("battery_voltage")),
+            "battery_raw_percent": first_value(live.get("battery_raw_percent"), row.get("battery_raw_percent")),
+            "battery_low": first_value(live.get("battery_low"), row.get("battery_low")),
+            "battery_alert": first_value(live.get("battery_alert"), row.get("battery_alert")),
+            "battery_plugged": first_value(live.get("battery_plugged"), row.get("battery_plugged")),
+            "battery_charging": first_value(live.get("battery_charging"), row.get("battery_charging")),
+            "battery_full": first_value(live.get("battery_full"), row.get("battery_full")),
+            "rssi": first_value(live.get("rssi"), row.get("rssi")),
+            "heap": first_value(live.get("heap"), row.get("heap")),
+            "wifi": live.get("wifi"),
+            "last_status_at": first_value(live.get("last_status_at"), row.get("last_status_at")),
+            "lcd_image_cached": live.get("lcd_image_cached"),
+            "epaper_busy": live.get("epaper_busy"),
+            "pi_cached_image": live.get("pi_cached_image"),
+            "connection_state": live.get("connection_state") or ("online" if is_online else "offline"),
+            "offline_reason": live.get("offline_reason") or "",
             "pending_seq": live.get("pending_seq"),
             "pending_img_seq": live.get("pending_img_seq"),
             "pending_lcd_seq": live.get("pending_lcd_seq"),
@@ -217,6 +368,7 @@ def merged_devices():
     for device_id, live in operation_by_id.items():
         if device_id in seen:
             continue
+        is_online = bool(live.get("is_online") or live.get("online"))
         out.append({
             "id": device_id,
             "device_id": device_id,
@@ -225,12 +377,30 @@ def merged_devices():
             "port": live.get("port") or 5000,
             "fw": live.get("fw") or "",
             "firmware": live.get("fw") or "",
-            "status": "online",
-            "is_online": True,
-            "online": True,
+            "status": "online" if is_online else "offline",
+            "is_online": is_online,
+            "online": is_online,
             "last_seen_s": live.get("last_seen_s") or 0,
             "battery_level": live.get("battery_level"),
             "battery": live.get("battery_level"),
+            "battery_ok": live.get("battery_ok"),
+            "battery_mv": live.get("battery_mv"),
+            "battery_voltage": live.get("battery_voltage"),
+            "battery_raw_percent": live.get("battery_raw_percent"),
+            "battery_low": live.get("battery_low"),
+            "battery_alert": live.get("battery_alert"),
+            "battery_plugged": live.get("battery_plugged"),
+            "battery_charging": live.get("battery_charging"),
+            "battery_full": live.get("battery_full"),
+            "rssi": live.get("rssi"),
+            "heap": live.get("heap"),
+            "wifi": live.get("wifi"),
+            "last_status_at": live.get("last_status_at"),
+            "lcd_image_cached": live.get("lcd_image_cached"),
+            "epaper_busy": live.get("epaper_busy"),
+            "pi_cached_image": live.get("pi_cached_image"),
+            "connection_state": live.get("connection_state") or ("online" if is_online else "offline"),
+            "offline_reason": live.get("offline_reason") or "",
             "paired_resident_id": None,
             "resident_name": "",
             "resident_uid": "",
@@ -341,6 +511,18 @@ def init_db():
     );
     """)
 
+    for sql in [
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS proposed_payload JSONB",
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS comment TEXT",
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS requested_by_user_id INTEGER",
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS requested_by_username TEXT",
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS reviewed_by_user_id INTEGER",
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS reviewed_by_username TEXT",
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS review_note TEXT",
+        "ALTER TABLE resident_change_requests ADD COLUMN IF NOT EXISTS reviewed_at TEXT",
+    ]:
+        db_exec(sql)
+
     db_exec("""
     CREATE TABLE IF NOT EXISTS devices (
         id SERIAL PRIMARY KEY,
@@ -354,6 +536,30 @@ def init_db():
         last_seen TEXT,
         paired_resident_id INTEGER,
         created_at TEXT,
+        updated_at TEXT
+    );
+    """)
+
+    for sql in [
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_ok BOOLEAN",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_mv INTEGER",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_voltage REAL",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_raw_percent REAL",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_low BOOLEAN",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_alert BOOLEAN",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_plugged BOOLEAN",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_charging BOOLEAN",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS battery_full BOOLEAN",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS rssi INTEGER",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS heap INTEGER",
+        "ALTER TABLE devices ADD COLUMN IF NOT EXISTS last_status_at TEXT",
+    ]:
+        db_exec(sql)
+
+    db_exec("""
+    CREATE TABLE IF NOT EXISTS system_settings (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
         updated_at TEXT
     );
     """)
@@ -385,6 +591,13 @@ def init_db():
     );
     """)
 
+    for sql in [
+        "ALTER TABLE verification_checks ADD COLUMN IF NOT EXISTS checked_by_user_id INTEGER",
+        "ALTER TABLE verification_checks ADD COLUMN IF NOT EXISTS checked_by_username TEXT",
+        "ALTER TABLE verification_checks ADD COLUMN IF NOT EXISTS created_at TEXT",
+    ]:
+        db_exec(sql)
+
     db_exec("""
     CREATE TABLE IF NOT EXISTS audit_logs (
         id SERIAL PRIMARY KEY,
@@ -410,6 +623,19 @@ def init_db():
         message TEXT,
         payload_json JSONB,
         response_json JSONB
+    );
+    """)
+
+    db_exec("""
+    CREATE TABLE IF NOT EXISTS resident_dropdown_options (
+        id SERIAL PRIMARY KEY,
+        category TEXT NOT NULL,
+        option_text TEXT NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        active BOOLEAN DEFAULT TRUE,
+        created_at TEXT,
+        updated_at TEXT,
+        UNIQUE(category, option_text)
     );
     """)
 
@@ -482,6 +708,18 @@ class DevicePayload(BaseModel):
     firmware_version: Optional[str] = ""
     battery_level: Optional[str] = "Medium"
     battery_percent: Optional[int] = None
+    battery_ok: Optional[bool] = None
+    battery_mv: Optional[int] = None
+    battery_voltage: Optional[float] = None
+    battery_raw_percent: Optional[float] = None
+    battery_low: Optional[bool] = None
+    battery_alert: Optional[bool] = None
+    battery_plugged: Optional[bool] = None
+    battery_charging: Optional[bool] = None
+    battery_full: Optional[bool] = None
+    rssi: Optional[int] = None
+    heap: Optional[int] = None
+    last_status_at: Optional[str] = ""
     status: Optional[str] = "offline"
 
 class PairPayload(BaseModel):
@@ -501,14 +739,23 @@ class SchedulePayload(BaseModel):
 
 class ChangeRequestPayload(BaseModel):
     resident_id: int
-    requested_by: str
-    proposed_new: dict[str, Any]
+    resident_uid: Optional[str] = ""
+    proposed_payload: Optional[dict[str, Any]] = None
+    proposed_new: Optional[dict[str, Any]] = None
+    comment: Optional[str] = ""
+    requested_by_user_id: Optional[int] = None
+    requested_by_username: Optional[str] = ""
+    requested_by: Optional[str] = ""
     reason: Optional[str] = ""
 
 class DecisionPayload(BaseModel):
-    decision: str
-    decision_by: str
+    decision: Optional[str] = ""
+    status: Optional[str] = ""
+    decision_by: Optional[str] = ""
     decision_note: Optional[str] = ""
+    reviewed_by_user_id: Optional[int] = None
+    reviewed_by_username: Optional[str] = ""
+    review_note: Optional[str] = ""
 
 class VerificationPayload(BaseModel):
     resident_id: int
@@ -516,7 +763,9 @@ class VerificationPayload(BaseModel):
     device_id: Optional[str] = ""
     status: str
     note: Optional[str] = ""
-    checked_by: str
+    checked_by: Optional[str] = ""
+    checked_by_user_id: Optional[int] = None
+    checked_by_username: Optional[str] = ""
 
 class ItLogPayload(BaseModel):
     username: str
@@ -524,8 +773,22 @@ class ItLogPayload(BaseModel):
     target: Optional[str] = ""
     result: Optional[str] = "success"
     message: Optional[str] = ""
+    payload_json: Optional[dict[str, Any]] = None
+    response_json: Optional[dict[str, Any]] = None
+
+
+class DropdownOptionsPayload(BaseModel):
+    options: dict[str, list[str]] = {}
     payload_json: Optional[dict] = {}
     response_json: Optional[dict] = {}
+
+
+class BatteryAlertSettingsPayload(BaseModel):
+    enabled: bool = True
+    low_threshold: int = 20
+    critical_threshold: int = 10
+    popup_cooldown_minutes: int = 30
+    recipient_roles: list[str] = Field(default_factory=lambda: ["IT_ADMIN"])
 
 
 def resident_sql_values(payload: ResidentPayload, resident_id: int | None = None):
@@ -545,7 +808,17 @@ def resident_sql_values(payload: ResidentPayload, resident_id: int | None = None
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "control", "version": "0.4.0", "time": now()}
+    uptime_s = int((datetime.utcnow() - STARTED_AT).total_seconds())
+    return {
+        "ok": True,
+        "service": "control",
+        "version": "0.5.2",
+        "hostname": platform.node(),
+        "time": now(),
+        "uptime": f"{uptime_s}s",
+        "uptime_s": uptime_s,
+        "last_restart": STARTED_AT.isoformat(),
+    }
 
 @app.post("/auth/login")
 def login(payload: LoginPayload, x_whisperwood_key: str | None = Header(default=None)):
@@ -624,6 +897,8 @@ def create_resident(payload: ResidentPayload, x_whisperwood_key: str | None = He
         :safety_review_flag,:safety_review_note,:lcd_schedule_enabled,:lcd_on_time,:lcd_off_time,:sleep_if_no_image,:t,:t)
         RETURNING *
     """, resident_sql_values(payload))
+    log_resident_audit("system", "resident_create", row, old_values={}, new_values=row, reason="Resident created")
+    log_action("system", "resident_create", row.get("resident_uid") or "", "success", "Resident created", payload=payload.dict(), response=row)
     return {"ok": True, "resident": row}
 
 @app.put("/residents/{resident_id}")
@@ -642,23 +917,39 @@ def update_resident(resident_id: int, payload: ResidentPayload, x_whisperwood_ke
         WHERE id=:id
         RETURNING *
     """, resident_sql_values(payload, resident_id))
+    log_resident_audit("system", "resident_update", row, old_values=old, new_values=row, reason="Resident updated")
+    log_action("system", "resident_update", row.get("resident_uid") or "", "success", "Resident updated", payload={"before": old, "after": payload.dict()}, response=row)
     return {"ok": True, "resident": row}
 
 @app.put("/residents/{resident_id}/archive")
 def archive_resident(resident_id: int, payload: ArchivePayload, x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
+    old = db_one("SELECT * FROM residents WHERE id=:id", {"id": resident_id})
     db_exec("UPDATE residents SET archived=:a, updated_at=:t WHERE id=:id", {"a": payload.archived, "t": now(), "id": resident_id})
+    row = db_one("SELECT * FROM residents WHERE id=:id", {"id": resident_id}) or old or {"id": resident_id}
+    log_resident_audit("system", "resident_delete", row, old_values=old or {}, new_values=row, reason=payload.reason or "Resident archived")
+    log_action("system", "resident_delete", row.get("resident_uid") or str(resident_id), "success", "Resident archived", payload=payload.dict(), response=row)
     return {"ok": True}
 
 @app.post("/residents/{resident_id}/document")
-async def upload_document(resident_id: int, file: UploadFile = File(...), x_whisperwood_key: str | None = Header(default=None)):
+async def upload_document(
+    resident_id: int,
+    document: UploadFile | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    x_whisperwood_key: str | None = Header(default=None),
+):
     require_key(x_whisperwood_key)
+    file = document or file
+    if not file:
+        raise HTTPException(status_code=400, detail="Document file is required")
     safe_name = file.filename.replace("/", "_")
     path = os.path.join(DOC_DIR, f"resident_{resident_id}_{safe_name}")
     with open(path, "wb") as f:
         f.write(await file.read())
     db_exec("UPDATE residents SET source_document_path=:p, source_document_name=:n, updated_at=:t WHERE id=:id",
             {"p": path, "n": safe_name, "t": now(), "id": resident_id})
+    row = db_one("SELECT * FROM residents WHERE id=:id", {"id": resident_id}) or {"id": resident_id}
+    log_resident_audit("system", "resident_document_upload", row, old_values={}, new_values={"source_document_path": path, "source_document_name": safe_name}, reason="Source document uploaded", source_document_path=path)
     return {"ok": True, "filename": safe_name}
 
 @app.get("/residents/{resident_id}/document")
@@ -670,14 +961,24 @@ def get_document(resident_id: int, x_whisperwood_key: str | None = Header(defaul
     return FileResponse(r["source_document_path"], filename=r["source_document_name"] or "document")
 
 @app.post("/residents/{resident_id}/image")
-async def upload_image(resident_id: int, file: UploadFile = File(...), x_whisperwood_key: str | None = Header(default=None)):
+async def upload_image(
+    resident_id: int,
+    image: UploadFile | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    x_whisperwood_key: str | None = Header(default=None),
+):
     require_key(x_whisperwood_key)
+    file = image or file
+    if not file:
+        raise HTTPException(status_code=400, detail="Image file is required")
     safe_name = file.filename.replace("/", "_")
     path = os.path.join(IMG_DIR, f"resident_{resident_id}_{safe_name}")
     with open(path, "wb") as f:
         f.write(await file.read())
     db_exec("UPDATE residents SET image_path=:p, image_name=:n, updated_at=:t WHERE id=:id",
             {"p": path, "n": safe_name, "t": now(), "id": resident_id})
+    row = db_one("SELECT * FROM residents WHERE id=:id", {"id": resident_id}) or {"id": resident_id}
+    log_resident_audit("system", "resident_photo_upload", row, old_values={}, new_values={"image_path": path, "image_name": safe_name}, reason="Resident photo uploaded")
     return {"ok": True, "filename": safe_name}
 
 @app.get("/residents/{resident_id}/image")
@@ -701,13 +1002,26 @@ def upsert_device(payload: DevicePayload, x_whisperwood_key: str | None = Header
     if existing:
         db_exec("""
             UPDATE devices SET ip_address=:ip_address, port=:port, firmware_version=:firmware_version,
-            battery_level=:battery_level, battery_percent=:battery_percent, status=:status, updated_at=:t
+            battery_level=:battery_level, battery_percent=:battery_percent,
+            battery_ok=:battery_ok, battery_mv=:battery_mv, battery_voltage=:battery_voltage,
+            battery_raw_percent=:battery_raw_percent, battery_low=:battery_low, battery_alert=:battery_alert,
+            battery_plugged=:battery_plugged, battery_charging=:battery_charging, battery_full=:battery_full,
+            rssi=:rssi, heap=:heap, last_status_at=:last_status_at,
+            status=:status, updated_at=:t
             WHERE device_id=:device_id
         """, data)
     else:
         db_exec("""
-            INSERT INTO devices(device_id,ip_address,port,firmware_version,battery_level,battery_percent,status,created_at,updated_at)
-            VALUES(:device_id,:ip_address,:port,:firmware_version,:battery_level,:battery_percent,:status,:t,:t)
+            INSERT INTO devices(
+                device_id,ip_address,port,firmware_version,battery_level,battery_percent,
+                battery_ok,battery_mv,battery_voltage,battery_raw_percent,battery_low,battery_alert,
+                battery_plugged,battery_charging,battery_full,rssi,heap,last_status_at,status,created_at,updated_at
+            )
+            VALUES(
+                :device_id,:ip_address,:port,:firmware_version,:battery_level,:battery_percent,
+                :battery_ok,:battery_mv,:battery_voltage,:battery_raw_percent,:battery_low,:battery_alert,
+                :battery_plugged,:battery_charging,:battery_full,:rssi,:heap,:last_status_at,:status,:t,:t
+            )
         """, data)
     return {"ok": True}
 
@@ -716,13 +1030,25 @@ def pair_device(payload: PairPayload, x_whisperwood_key: str | None = Header(def
     require_key(x_whisperwood_key)
     db_exec("UPDATE devices SET paired_resident_id=:r, updated_at=:t WHERE device_id=:d",
             {"r": payload.resident_id, "d": payload.device_id, "t": now()})
+    row = db_one("SELECT resident_uid, full_name FROM residents WHERE id=:id", {"id": payload.resident_id}) or {}
+    log_action(
+        "system",
+        "pair_device",
+        payload.device_id,
+        "success",
+        f"Device paired to {row.get('full_name') or payload.resident_id}",
+        payload=payload.dict(),
+        response={"resident": row},
+    )
     return {"ok": True}
 
 @app.post("/devices/unpair")
 def unpair_device(payload: UnpairPayload, x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
+    old = db_one("SELECT paired_resident_id FROM devices WHERE device_id=:d", {"d": payload.device_id}) or {}
     db_exec("UPDATE devices SET paired_resident_id=NULL, updated_at=:t WHERE device_id=:d",
             {"d": payload.device_id, "t": now()})
+    log_action("system", "unpair_device", payload.device_id, "success", "Device unpaired", payload=payload.dict(), response=old)
     return {"ok": True}
 
 @app.get("/schedules")
@@ -756,18 +1082,333 @@ def save_schedule(payload: SchedulePayload, x_whisperwood_key: str | None = Head
 def dashboard_summary(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     devices = merged_devices()
+    today = datetime.utcnow().date().isoformat() + "%"
     return {"ok": True, "summary": {
         "active_residents": db_one("SELECT COUNT(*) c FROM residents WHERE active=TRUE AND archived=FALSE")["c"],
         "inactive_residents": db_one("SELECT COUNT(*) c FROM residents WHERE active=FALSE AND archived=FALSE")["c"],
         "known_devices": len(devices),
         "online_devices": sum(1 for device in devices if device.get("is_online")),
-        "paired_devices": db_one("SELECT COUNT(*) c FROM devices WHERE paired_resident_id IS NOT NULL")["c"]
+        "paired_devices": db_one("SELECT COUNT(*) c FROM devices WHERE paired_resident_id IS NOT NULL")["c"],
+        "recent_activity": db_one("SELECT COUNT(*) c FROM audit_logs")["c"],
+        "recent_activity_total": db_one("SELECT COUNT(*) c FROM audit_logs")["c"],
+        "recent_activity_today": db_one("SELECT COUNT(*) c FROM audit_logs WHERE timestamp LIKE :today", {"today": today})["c"],
+        "failed_updates": db_one("SELECT COUNT(*) c FROM audit_logs WHERE lower(result) NOT IN ('success','ok','true','1')")["c"],
+        "safety_reviews": db_one("SELECT COUNT(*) c FROM residents WHERE archived=FALSE AND safety_review_flag=TRUE")["c"],
+        "pending_requests": db_one("SELECT COUNT(*) c FROM resident_change_requests WHERE upper(status)='PENDING' OR lower(status)='pending'")["c"],
+        "verification_checks": db_one("SELECT COUNT(*) c FROM verification_checks")["c"],
+        "verification_mismatches": db_one("SELECT COUNT(*) c FROM verification_checks WHERE upper(status)='MISMATCH'")["c"],
+        "database_mode": "server",
     }}
 
 @app.get("/logs")
-def logs(x_whisperwood_key: str | None = Header(default=None)):
+def logs(limit: int = 500, x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
-    return {"ok": True, "logs": db_all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 500")}
+    return {"ok": True, "logs": db_all("SELECT * FROM audit_logs ORDER BY id DESC LIMIT :limit", {"limit": limit})}
+
+@app.get("/logs/{log_id}")
+def get_log(log_id: int, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    row = db_one("SELECT * FROM audit_logs WHERE id=:id", {"id": log_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="Log not found")
+    return {"ok": True, "log": row}
+
+@app.get("/resident-audit")
+def resident_audit(limit: int = 200, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    rows = db_all("""
+        SELECT id,
+               created_at,
+               change_type AS action_type,
+               resident_id,
+               resident_uid,
+               changed_by AS pushed_by_username,
+               '' AS device_id,
+               TRUE AS success,
+               reason AS message,
+               old_values AS payload_json,
+               new_values AS response_json,
+               source_document_path
+        FROM resident_audit
+        ORDER BY id DESC
+        LIMIT :limit
+    """, {"limit": limit})
+    return {"ok": True, "audit": rows, "logs": rows}
+
+@app.get("/residents/{resident_id}/audit")
+def resident_audit_for_resident(resident_id: int, limit: int = 200, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    rows = db_all("""
+        SELECT id,
+               created_at,
+               change_type AS action_type,
+               resident_id,
+               resident_uid,
+               changed_by AS pushed_by_username,
+               '' AS device_id,
+               TRUE AS success,
+               reason AS message,
+               old_values AS payload_json,
+               new_values AS response_json,
+               source_document_path
+        FROM resident_audit
+        WHERE resident_id=:resident_id
+        ORDER BY id DESC
+        LIMIT :limit
+    """, {"resident_id": resident_id, "limit": limit})
+    return {"ok": True, "audit": rows, "logs": rows}
+
+@app.post("/resident-change-requests")
+def create_change_request(payload: ChangeRequestPayload, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    row = db_one("SELECT * FROM residents WHERE id=:id", {"id": payload.resident_id}) or {}
+    proposed = payload.proposed_payload or payload.proposed_new or {}
+    comment = payload.comment or payload.reason or ""
+    requested_by = payload.requested_by_username or payload.requested_by or "staff"
+    inserted = db_one("""
+        INSERT INTO resident_change_requests(
+            resident_id, resident_uid, requested_by, status,
+            proposed_new, proposed_payload, reason, comment,
+            requested_by_user_id, requested_by_username, created_at
+        )
+        VALUES(
+            :resident_id, :resident_uid, :requested_by, 'PENDING',
+            :proposed_new, :proposed_payload, :reason, :comment,
+            :requested_by_user_id, :requested_by_username, :created_at
+        )
+        RETURNING *
+    """, {
+        "resident_id": payload.resident_id,
+        "resident_uid": payload.resident_uid or row.get("resident_uid") or "",
+        "requested_by": requested_by,
+        "proposed_new": json_value(proposed),
+        "proposed_payload": json_value(proposed),
+        "reason": comment,
+        "comment": comment,
+        "requested_by_user_id": payload.requested_by_user_id,
+        "requested_by_username": requested_by,
+        "created_at": now(),
+    })
+    log_action(requested_by, "resident_review_request", row.get("resident_uid") or "", "success", "Resident review request submitted", payload=payload.dict(), response=inserted)
+    return {"ok": True, "request": inserted}
+
+@app.get("/resident-change-requests")
+def change_requests(status: Optional[str] = None, limit: int = 100, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    where = ""
+    params = {"limit": limit}
+    if status:
+        where = "WHERE upper(cr.status)=upper(:status)"
+        params["status"] = status
+    rows = db_all(f"""
+        SELECT cr.*,
+               upper(cr.status) AS status,
+               COALESCE(cr.proposed_payload, cr.proposed_new) AS proposed_payload,
+               COALESCE(cr.comment, cr.reason, '') AS comment,
+               COALESCE(cr.requested_by_username, cr.requested_by, '') AS requested_by_username,
+               COALESCE(cr.reviewed_by_username, cr.decision_by, '') AS reviewed_by_username,
+               COALESCE(cr.review_note, cr.decision_note, '') AS review_note,
+               COALESCE(cr.reviewed_at, cr.decided_at, '') AS reviewed_at,
+               r.full_name,
+               r.room
+        FROM resident_change_requests cr
+        LEFT JOIN residents r ON r.id = cr.resident_id
+        {where}
+        ORDER BY cr.id DESC
+        LIMIT :limit
+    """, params)
+    return {"ok": True, "requests": rows}
+
+@app.put("/resident-change-requests/{request_id}/decision")
+def decide_change_request(request_id: int, payload: DecisionPayload, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    status = (payload.status or payload.decision or "REVIEWED").upper()
+    reviewed_by = payload.reviewed_by_username or payload.decision_by or "admin"
+    note = payload.review_note or payload.decision_note or ""
+    db_exec("""
+        UPDATE resident_change_requests
+        SET status=:status,
+            decision_by=:decision_by,
+            decision_note=:decision_note,
+            decided_at=:decided_at,
+            reviewed_by_user_id=:reviewed_by_user_id,
+            reviewed_by_username=:reviewed_by_username,
+            review_note=:review_note,
+            reviewed_at=:reviewed_at
+        WHERE id=:id
+    """, {
+        "status": status,
+        "decision_by": reviewed_by,
+        "decision_note": note,
+        "decided_at": now(),
+        "reviewed_by_user_id": payload.reviewed_by_user_id,
+        "reviewed_by_username": reviewed_by,
+        "review_note": note,
+        "reviewed_at": now(),
+        "id": request_id,
+    })
+    request = db_one("SELECT * FROM resident_change_requests WHERE id=:id", {"id": request_id}) or {}
+    log_action(reviewed_by, "resident_review_decision", request.get("resident_uid") or "", "success", f"Review request {status.lower()}", payload=payload.dict(), response=request)
+    return {"ok": True, "request": request}
+
+@app.post("/verification-checks")
+def create_verification_check(payload: VerificationPayload, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    checked_by = payload.checked_by_username or payload.checked_by or "verifier"
+    row = db_one("""
+        INSERT INTO verification_checks(
+            resident_id, resident_uid, device_id, status, note,
+            checked_by, checked_at, checked_by_user_id, checked_by_username, created_at
+        )
+        VALUES(
+            :resident_id, :resident_uid, :device_id, :status, :note,
+            :checked_by, :checked_at, :checked_by_user_id, :checked_by_username, :created_at
+        )
+        RETURNING *
+    """, {
+        "resident_id": payload.resident_id,
+        "resident_uid": payload.resident_uid,
+        "device_id": payload.device_id or "",
+        "status": payload.status.upper(),
+        "note": payload.note or "",
+        "checked_by": checked_by,
+        "checked_at": now(),
+        "checked_by_user_id": payload.checked_by_user_id,
+        "checked_by_username": checked_by,
+        "created_at": now(),
+    })
+    log_action(checked_by, "display_verification", payload.device_id or "", "success", "Display verification recorded", payload=payload.dict(), response=row)
+    return {"ok": True, "check": row}
+
+@app.get("/verification-checks")
+def verification_checks(limit: int = 100, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    rows = db_all("""
+        SELECT vc.*,
+               COALESCE(vc.created_at, vc.checked_at) AS created_at,
+               COALESCE(vc.checked_by_username, vc.checked_by, '') AS checked_by_username,
+               r.full_name,
+               r.room
+        FROM verification_checks vc
+        LEFT JOIN residents r ON r.id = vc.resident_id
+        ORDER BY vc.id DESC
+        LIMIT :limit
+    """, {"limit": limit})
+    return {"ok": True, "checks": rows}
+
+@app.post("/it-audit-logs")
+def create_it_audit(payload: ItLogPayload, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    row = db_one("""
+        INSERT INTO it_audit_logs(timestamp, username, action, target, result, message, payload_json, response_json)
+        VALUES(:timestamp, :username, :action, :target, :result, :message, :payload_json, :response_json)
+        RETURNING *
+    """, {
+        "timestamp": now(),
+        "username": payload.username,
+        "action": payload.action,
+        "target": payload.target or "",
+        "result": payload.result or "success",
+        "message": payload.message or "",
+        "payload_json": json_value(payload.payload_json),
+        "response_json": json_value(payload.response_json),
+    })
+    return {"ok": True, "log": row}
+
+@app.get("/it-audit-logs")
+def it_audit_logs(limit: int = 100, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    rows = db_all("""
+        SELECT id, timestamp AS created_at, timestamp, username, action, target, result, message, payload_json, response_json
+        FROM it_audit_logs
+        ORDER BY id DESC
+        LIMIT :limit
+    """, {"limit": limit})
+    return {"ok": True, "logs": rows}
+
+
+def grouped_dropdown_options():
+    rows = db_all("""
+        SELECT category, option_text
+        FROM resident_dropdown_options
+        WHERE active=TRUE
+        ORDER BY category, sort_order, option_text
+    """)
+    options = {}
+    for row in rows:
+        options.setdefault(row["category"], []).append(row["option_text"])
+    return options
+
+
+def save_grouped_dropdown_options(options: dict[str, list[str]]):
+    db_exec("UPDATE resident_dropdown_options SET active=FALSE, updated_at=:t", {"t": now()})
+    for category, values in (options or {}).items():
+        for order, value in enumerate(values or []):
+            text_value = str(value or "").strip()
+            category_value = str(category or "").strip()
+            if not category_value or not text_value:
+                continue
+            db_exec("""
+                INSERT INTO resident_dropdown_options(category, option_text, sort_order, active, created_at, updated_at)
+                VALUES(:category, :option_text, :sort_order, TRUE, :t, :t)
+                ON CONFLICT(category, option_text)
+                DO UPDATE SET sort_order=:sort_order, active=TRUE, updated_at=:t
+            """, {
+                "category": category_value,
+                "option_text": text_value,
+                "sort_order": order,
+                "t": now(),
+            })
+
+
+@app.get("/resident-dropdown-options")
+def resident_dropdown_options(x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    return {"ok": True, "options": grouped_dropdown_options()}
+
+
+@app.post("/resident-dropdown-options")
+@app.put("/resident-dropdown-options")
+def save_resident_dropdown_options(payload: DropdownOptionsPayload, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    save_grouped_dropdown_options(payload.options or {})
+    return {"ok": True, "options": grouped_dropdown_options()}
+
+
+@app.get("/dropdown-options")
+def dropdown_options_alias(x_whisperwood_key: str | None = Header(default=None)):
+    return resident_dropdown_options(x_whisperwood_key)
+
+
+@app.post("/dropdown-options")
+@app.put("/dropdown-options")
+def save_dropdown_options_alias(payload: DropdownOptionsPayload, x_whisperwood_key: str | None = Header(default=None)):
+    return save_resident_dropdown_options(payload, x_whisperwood_key)
+
+
+@app.get("/battery-alert-settings")
+def battery_alert_settings(x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    settings = normalize_battery_alert_settings(get_system_setting("battery_alert_settings", DEFAULT_BATTERY_ALERT_SETTINGS))
+    return {"ok": True, "settings": settings}
+
+
+@app.post("/battery-alert-settings")
+@app.put("/battery-alert-settings")
+def save_battery_alert_settings(payload: BatteryAlertSettingsPayload, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    settings = normalize_battery_alert_settings(payload.dict())
+    save_system_setting("battery_alert_settings", settings)
+    log_action(
+        "system",
+        "battery_alert_settings",
+        "devices",
+        "success",
+        "Battery alert policy updated",
+        payload=settings,
+        response={"ok": True},
+    )
+    return {"ok": True, "settings": settings}
 
 @app.get("/system")
 def system_status(x_whisperwood_key: str | None = Header(default=None)):
@@ -791,6 +1432,26 @@ def network_status(x_whisperwood_key: str | None = Header(default=None)):
     except Exception:
         ts_ip = ""
     return {"hostname": platform.node(), "lan_ips": lan_ips, "tailscale_ip": ts_ip}
+
+
+@app.get("/tailscale")
+def tailscale_status(x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    try:
+        ts_ip = subprocess.check_output(["tailscale", "ip", "-4"], text=True, timeout=4).strip()
+    except Exception:
+        ts_ip = ""
+    try:
+        status_text = subprocess.check_output(["tailscale", "status", "--self"], text=True, timeout=4).strip()
+    except Exception:
+        status_text = ""
+    return {
+        "ok": bool(ts_ip),
+        "ip": ts_ip,
+        "tailscale_ip": ts_ip,
+        "status": "connected" if ts_ip else "not available",
+        "raw": status_text,
+    }
 
 @app.get("/operation/status")
 def operation_status(x_whisperwood_key: str | None = Header(default=None)):
@@ -817,14 +1478,14 @@ def operation_devices(x_whisperwood_key: str | None = Header(default=None)):
 @app.post("/operation/send")
 def operation_send(payload: Optional[dict] = Body(default=None), x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
-    return operation_request("POST", "/send", json=payload or {}, timeout=40)
+    return operation_request("POST", "/send", json=payload or {}, timeout=100)
 
 @app.post("/operation/send_image")
 async def operation_send_image(id: str = Form(default=""), image: UploadFile = File(...), x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     raw = await image.read()
     files = {"image": (image.filename or "resident_photo", raw, image.content_type or "application/octet-stream")}
-    return operation_request("POST", "/send_image", files=files, data={"id": id}, timeout=55)
+    return operation_request("POST", "/send_image", files=files, data={"id": id}, timeout=100)
 
 @app.post("/operation/lcd")
 def operation_lcd(payload: Optional[dict] = Body(default=None), x_whisperwood_key: str | None = Header(default=None)):
@@ -871,7 +1532,7 @@ def operation_resident_display(payload: Optional[dict] = Body(default=None), x_w
     outbound = resident_display_payload(row, device_id)
     if not outbound.get("device_id"):
         raise HTTPException(status_code=400, detail="Resident is not paired to a device")
-    result = operation_request("POST", "/resident_display", json=outbound, timeout=80)
+    result = operation_request("POST", "/resident_display", json=outbound, timeout=150)
     log_action(
         "system",
         "resident_display",
@@ -888,7 +1549,7 @@ def bootstrap_info(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     return {
         "ok": True,
-        "version": "0.4.0",
+        "version": "0.5.2",
         "database_user": "whisperwood_app",
         "default_users": [
             {"username": "admin", "password": "admin123", "role": "admin"},

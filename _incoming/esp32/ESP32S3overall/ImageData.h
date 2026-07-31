@@ -1,7 +1,7 @@
 /*****************************************************************************
 * | File      	:   ImageData.h
 * | Author      :   Waveshare team
-* | Function    :	
+* | Function    :
 *----------------
 * |	This version:   V1.0
 * | Date        :   2018-10-23
@@ -39,5 +39,3 @@ extern const unsigned char headshot[];
 
 #endif
 /* FILE END */
-
-

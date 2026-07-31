@@ -1,7 +1,7 @@
 /*****************************************************************************
 * | File      	:   ImageData.c
 * | Author      :   Waveshare team
-* | Function    :	
+* | Function    :
 *----------------
 * |	This version:   V1.1
 * | Date        :   2019-06-12
@@ -33,7 +33,7 @@
 //#define HEADSHOT_WIDTH  400
 //#define HEADSHOT_HEIGHT 200
 
-// 6 Color Image Data 400*600 
+// 6 Color Image Data 400*600
 const unsigned char headshot[]  = {
 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -2437,5 +2437,3 @@ const unsigned char headshot[]  = {
 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
 
 };
-
-

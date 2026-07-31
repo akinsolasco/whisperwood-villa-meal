@@ -3,6 +3,7 @@ import re
 import json
 import secrets
 import string
+import threading
 import time
 from typing import Optional, List, Dict, Any
 
@@ -13,14 +14,14 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu,
-    QInputDialog
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu, QSpinBox,
+    QInputDialog, QApplication
 )
 
-from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS, APP_DATA_DIR
+from config import APP_NAME, APP_VERSION, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS, APP_DATA_DIR
 from auth.auth_service import AuthService
 from core.app_settings import APP_MODE_DEMO, APP_MODE_SERVER, AppSettingsStore
-from core.control_service_client import ControlServiceClient
+from core.control_service_client import ControlServiceClient, friendly_error_message
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
@@ -30,6 +31,7 @@ from core.server_gateway_client import ServerGatewayClient
 
 class DashboardWindow(QWidget):
     logout_requested = pyqtSignal()
+    resident_display_finished = pyqtSignal(dict)
 
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
@@ -50,6 +52,8 @@ class DashboardWindow(QWidget):
         self.gateway_online = False
         self.control_service_online = False
         self.control_last_results: Dict[str, Dict[str, Any]] = {}
+        self.battery_alert_settings = self.default_battery_alert_settings()
+        self.battery_alert_last_popup: Dict[str, float] = {}
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -87,6 +91,7 @@ class DashboardWindow(QWidget):
 
         self.build_ui()
         self.bind_events()
+        self.resident_display_finished.connect(self.on_resident_display_finished)
         self.fit_to_screen()
         self.apply_role_permissions()
         self.apply_write_lock()
@@ -111,6 +116,7 @@ class DashboardWindow(QWidget):
         self.control_status_timer.start()
         QTimer.singleShot(0, self.position_window_controls)
         QTimer.singleShot(200, self.refresh_control_connection_status)
+        QTimer.singleShot(650, lambda: self.load_battery_alert_settings())
         if self.current_user.get("password_must_change"):
             QTimer.singleShot(300, self.show_required_password_change)
         elif self.current_user.get("force_password_change_warning"):
@@ -156,6 +162,82 @@ class DashboardWindow(QWidget):
 
     def can_view_technical(self) -> bool:
         return self.current_role == "IT_ADMIN"
+
+    # ---------------------------- battery alert policy ----------------------------
+
+    def default_battery_alert_settings(self) -> Dict[str, Any]:
+        return {
+            "enabled": True,
+            "low_threshold": 20,
+            "critical_threshold": 10,
+            "popup_cooldown_minutes": 30,
+            "recipient_roles": ["IT_ADMIN"],
+        }
+
+    def normalize_battery_alert_settings(self, raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        settings = self.default_battery_alert_settings()
+        if isinstance(raw, dict):
+            settings.update(raw)
+        try:
+            settings["low_threshold"] = max(1, min(100, int(settings.get("low_threshold", 20))))
+        except Exception:
+            settings["low_threshold"] = 20
+        try:
+            settings["critical_threshold"] = max(1, min(settings["low_threshold"], int(settings.get("critical_threshold", 10))))
+        except Exception:
+            settings["critical_threshold"] = 10
+        try:
+            settings["popup_cooldown_minutes"] = max(1, min(1440, int(settings.get("popup_cooldown_minutes", 30))))
+        except Exception:
+            settings["popup_cooldown_minutes"] = 30
+        roles = settings.get("recipient_roles") or ["IT_ADMIN"]
+        if isinstance(roles, str):
+            roles = [r.strip() for r in roles.split(",")]
+        normalized_roles = []
+        for role in roles:
+            key = self.normalize_role(role)
+            if key in {"IT_ADMIN", "NURSE_ADMIN", "NURSE", "VERIFIER"} and key not in normalized_roles:
+                normalized_roles.append(key)
+        settings["recipient_roles"] = normalized_roles or ["IT_ADMIN"]
+        settings["enabled"] = bool(settings.get("enabled", True))
+        return settings
+
+    def role_allows_battery_popup(self) -> bool:
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        return settings.get("enabled", True) and self.current_role in set(settings.get("recipient_roles") or [])
+
+    def truthy(self, value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "ok"}
+
+    def battery_display_text(self, device: Dict[str, Any], compact: bool = False) -> str:
+        level = device.get("battery_level")
+        if level is None or level == "":
+            return "N/A"
+        text = f"{level}%"
+        voltage = device.get("battery_voltage")
+        if voltage not in (None, "") and not compact:
+            try:
+                text += f" | {float(voltage):.2f}V"
+            except Exception:
+                pass
+        if self.truthy(device.get("battery_low")):
+            text += " | LOW" if not compact else " low"
+        return text
+
+    def power_state_text(self, device: Dict[str, Any]) -> str:
+        if self.truthy(device.get("battery_full")):
+            return "Fully charged"
+        if self.truthy(device.get("battery_charging")):
+            return "Charging"
+        if self.truthy(device.get("battery_plugged")):
+            return "Plugged in"
+        if device.get("battery_ok") is False or str(device.get("battery_ok")).lower() == "false":
+            return "Gauge not detected"
+        return "On battery"
 
     # ---------------------------- styles ----------------------------
 
@@ -204,7 +286,7 @@ class DashboardWindow(QWidget):
 
     def input_style(self):
         return """
-            QLineEdit, QTextEdit, QComboBox, QTimeEdit {
+            QLineEdit, QTextEdit, QComboBox, QTimeEdit, QSpinBox {
                 background-color: #ffffff;
                 color: #0f172a;
                 border: 1px solid #cbd5e1;
@@ -212,10 +294,10 @@ class DashboardWindow(QWidget):
                 padding: 10px 12px;
                 font-size: 14px;
             }
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QTimeEdit:focus {
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QTimeEdit:focus, QSpinBox:focus {
                 border: 1px solid #0f766e;
             }
-            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QTimeEdit:disabled {
+            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QTimeEdit:disabled, QSpinBox:disabled {
                 background-color: #f1f5f9;
                 color: #94a3b8;
                 border: 1px solid #d8e1ea;
@@ -224,6 +306,29 @@ class DashboardWindow(QWidget):
 
     def label_style(self):
         return "font-size: 13px; font-weight: 700; color: #334155; background: transparent; border: none;"
+
+    def checkbox_style(self):
+        return """
+            QCheckBox {
+                color: #0f172a;
+                font-size: 13px;
+                font-weight: 700;
+                spacing: 8px;
+                background: transparent;
+                border: none;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 5px;
+                border: 1px solid #94a3b8;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0f766e;
+                border: 1px solid #0f766e;
+            }
+        """
 
     def dropdown_options_file(self):
         return APP_DATA_DIR / "resident_dropdown_options.json"
@@ -607,6 +712,11 @@ class DashboardWindow(QWidget):
         self.btn_logout.setGeometry(18, 805, 208, 42)
         self.btn_logout.setStyleSheet(self.secondary_btn_style())
 
+        self.sidebar_version = QLabel(f"v{APP_VERSION}", self.sidebar)
+        self.sidebar_version.setGeometry(18, 856, 208, 22)
+        self.sidebar_version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sidebar_version.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 800;")
+
         # Title area
         self.title = QLabel(f"{APP_NAME} Control Center", self.container)
         self.title.setGeometry(280, 22, 850, 32)
@@ -615,6 +725,11 @@ class DashboardWindow(QWidget):
         self.subtitle = QLabel("Hospital-grade resident display operations, approvals, verification, and technical health", self.container)
         self.subtitle.setGeometry(280, 56, 860, 18)
         self.subtitle.setStyleSheet("font-size: 13px; color: #475569;")
+
+        self.version_badge = QLabel(f"v{APP_VERSION}", self.container)
+        self.version_badge.setGeometry(1140, 56, 180, 24)
+        self.version_badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.version_badge.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 800;")
 
         self.base_url_edit = QLineEdit(self.container)
         self.base_url_edit.setGeometry(0, 0, 1, 1)
@@ -748,6 +863,7 @@ class DashboardWindow(QWidget):
         if self.btn_profile_settings.isVisible():
             controls.append((self.btn_profile_settings, 42, 10))
         controls.append((self.btn_logout, 42, 0))
+        controls.append((self.sidebar_version, 22, 0))
 
         controls_height = sum(height + gap for _widget, height, gap in controls)
         controls_y = max(nav_y + 14, sidebar_h - controls_height - 18)
@@ -761,6 +877,7 @@ class DashboardWindow(QWidget):
         self.close_btn.move(right, 24)
         self.max_btn.move(right - 45, 24)
         self.min_btn.move(right - 90, 24)
+        self.version_badge.setGeometry(max(280, right - 280), 56, 230, 24)
         self.base_url_edit.setVisible(False)
 
         available_width = max(640, self.container.width() - 302)
@@ -1276,29 +1393,33 @@ class DashboardWindow(QWidget):
         self.btn_clear_resident_photo.setGeometry(158, 756, 110, 36)
         self.btn_clear_resident_photo.setStyleSheet(self.secondary_btn_style())
 
+        self.btn_send_resident_photo = QPushButton("Send Photo", self.form_panel)
+        self.btn_send_resident_photo.setGeometry(278, 756, 120, 36)
+        self.btn_send_resident_photo.setStyleSheet(self.secondary_btn_style())
+
         self.resident_photo_label = QLabel("No resident photo attached", self.form_panel)
-        self.resident_photo_label.setGeometry(278, 756, 120, 36)
+        self.resident_photo_label.setGeometry(22, 796, 376, 18)
         self.resident_photo_label.setWordWrap(True)
         self.resident_photo_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
 
         self.chk_safety_review = QCheckBox("Needs safety review", self.form_panel)
-        self.chk_safety_review.setGeometry(22, 812, 160, 24)
+        self.chk_safety_review.setGeometry(22, 820, 160, 24)
         self.chk_safety_review.setStyleSheet(self.chk_active.styleSheet())
 
         self.btn_new_resident = QPushButton("New Resident", self.form_panel)
-        self.btn_new_resident.setGeometry(22, 848, 120, 42)
+        self.btn_new_resident.setGeometry(22, 856, 120, 42)
         self.btn_new_resident.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_resident = QPushButton("Save Resident", self.form_panel)
-        self.btn_save_resident.setGeometry(152, 848, 120, 42)
+        self.btn_save_resident.setGeometry(152, 856, 120, 42)
         self.btn_save_resident.setStyleSheet(self.primary_btn_style())
 
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
-        self.btn_clear_fields.setGeometry(282, 848, 116, 42)
+        self.btn_clear_fields.setGeometry(282, 856, 116, 42)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
 
         self.btn_delete_resident = QPushButton("Delete Resident", self.form_panel)
-        self.btn_delete_resident.setGeometry(22, 898, 376, 38)
+        self.btn_delete_resident.setGeometry(22, 906, 376, 38)
         self.btn_delete_resident.setStyleSheet("""
             QPushButton {
                 background-color: #fff1f2;
@@ -1314,11 +1435,11 @@ class DashboardWindow(QWidget):
         """)
 
         review_label = QLabel("Staff review note", self.form_panel)
-        review_label.setGeometry(22, 950, 150, 18)
+        review_label.setGeometry(22, 958, 150, 18)
         review_label.setStyleSheet(self.label_style())
 
         self.nurse_review_comment = QTextEdit(self.form_panel)
-        self.nurse_review_comment.setGeometry(22, 974, 376, 68)
+        self.nurse_review_comment.setGeometry(22, 982, 376, 68)
         self.nurse_review_comment.setPlaceholderText("Write what needs review, the source checked, or the observation to verify.")
         self.nurse_review_comment.setStyleSheet(self.input_style())
 
@@ -1681,7 +1802,7 @@ class DashboardWindow(QWidget):
         subtitle.setGeometry(24, 56, 760, 22)
         subtitle.setStyleSheet("font-size: 13px; color: #475569;")
 
-        self.control_header_status = QLabel("Demo Mode - No Raspberry Pi Connected", header)
+        self.control_header_status = QLabel("Control Service Not Configured", header)
         self.control_header_status.setGeometry(820, 30, 360, 34)
         self.control_header_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.control_header_status.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 700;")
@@ -1763,6 +1884,7 @@ class DashboardWindow(QWidget):
         elif index == 1:
             self.load_control_services()
         elif index == 2:
+            self.load_battery_alert_settings(timeout=3.0)
             self.load_control_devices()
         elif index == 5:
             self.load_it_audit_logs()
@@ -2037,16 +2159,83 @@ class DashboardWindow(QWidget):
         message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
 
         self.it_device_table = QTableWidget(page)
-        self.it_device_table.setGeometry(0, 210, 955, 330)
-        self.it_device_table.setColumnCount(7)
-        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Last Seen"])
+        self.it_device_table.setGeometry(0, 205, 955, 250)
+        self.it_device_table.setColumnCount(8)
+        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Power", "Last Seen"])
         self.it_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.it_device_table.verticalHeader().setVisible(False)
         self.it_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.it_device_table.setStyleSheet(self.table_style())
 
+        battery_panel = QFrame(page)
+        battery_panel.setGeometry(0, 475, 955, 138)
+        self.apply_frame_style(battery_panel, self.card_style())
+
+        battery_title = QLabel("Battery Alert Policy", battery_panel)
+        battery_title.setGeometry(22, 16, 230, 24)
+        battery_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+
+        self.chk_battery_alert_enabled = QCheckBox("Enable popups", battery_panel)
+        self.chk_battery_alert_enabled.setGeometry(22, 52, 145, 26)
+        self.chk_battery_alert_enabled.setStyleSheet(self.checkbox_style())
+
+        low_label = QLabel("Low at", battery_panel)
+        low_label.setGeometry(178, 48, 75, 18)
+        low_label.setStyleSheet(self.label_style())
+        self.spin_battery_low = QSpinBox(battery_panel)
+        self.spin_battery_low.setGeometry(178, 70, 92, 38)
+        self.spin_battery_low.setRange(1, 100)
+        self.spin_battery_low.setSuffix("%")
+        self.spin_battery_low.setStyleSheet(self.input_style())
+
+        critical_label = QLabel("Critical at", battery_panel)
+        critical_label.setGeometry(288, 48, 95, 18)
+        critical_label.setStyleSheet(self.label_style())
+        self.spin_battery_critical = QSpinBox(battery_panel)
+        self.spin_battery_critical.setGeometry(288, 70, 92, 38)
+        self.spin_battery_critical.setRange(1, 100)
+        self.spin_battery_critical.setSuffix("%")
+        self.spin_battery_critical.setStyleSheet(self.input_style())
+
+        cooldown_label = QLabel("Popup cooldown", battery_panel)
+        cooldown_label.setGeometry(398, 48, 130, 18)
+        cooldown_label.setStyleSheet(self.label_style())
+        self.spin_battery_cooldown = QSpinBox(battery_panel)
+        self.spin_battery_cooldown.setGeometry(398, 70, 122, 38)
+        self.spin_battery_cooldown.setRange(1, 1440)
+        self.spin_battery_cooldown.setSuffix(" min")
+        self.spin_battery_cooldown.setStyleSheet(self.input_style())
+
+        role_label = QLabel("Notify", battery_panel)
+        role_label.setGeometry(540, 48, 70, 18)
+        role_label.setStyleSheet(self.label_style())
+        self.chk_battery_role_it = QCheckBox("IT Admin", battery_panel)
+        self.chk_battery_role_it.setGeometry(540, 70, 95, 26)
+        self.chk_battery_role_admin = QCheckBox("Admin", battery_panel)
+        self.chk_battery_role_admin.setGeometry(642, 70, 82, 26)
+        self.chk_battery_role_staff = QCheckBox("Staff", battery_panel)
+        self.chk_battery_role_staff.setGeometry(724, 70, 75, 26)
+        self.chk_battery_role_verifier = QCheckBox("Verifier", battery_panel)
+        self.chk_battery_role_verifier.setGeometry(800, 70, 86, 26)
+        for checkbox in [
+            self.chk_battery_role_it,
+            self.chk_battery_role_admin,
+            self.chk_battery_role_staff,
+            self.chk_battery_role_verifier,
+        ]:
+            checkbox.setStyleSheet(self.checkbox_style())
+
+        self.btn_save_battery_alerts = QPushButton("Save Policy", battery_panel)
+        self.btn_save_battery_alerts.setGeometry(808, 18, 124, 38)
+        self.btn_save_battery_alerts.setStyleSheet(self.primary_btn_style())
+        self.btn_save_battery_alerts.clicked.connect(self.save_battery_alert_settings_from_ui)
+
+        self.battery_alert_status = QLabel("Battery popups use the latest ESP32 status sent through the Raspberry Pi.", battery_panel)
+        self.battery_alert_status.setGeometry(22, 108, 900, 20)
+        self.battery_alert_status.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 700;")
+
         wifi_panel = QFrame(page)
-        wifi_panel.setGeometry(0, 565, 955, 260)
+        wifi_panel.setGeometry(0, 635, 955, 250)
         self.apply_frame_style(wifi_panel, self.card_style())
 
         wifi_title = QLabel("ESP32 WiFi Provisioning", wifi_panel)
@@ -2435,37 +2624,40 @@ class DashboardWindow(QWidget):
         self.btn_choose_image = QPushButton("Choose LCD Image", self.upd_left)
         self.btn_choose_image.setGeometry(22, 488, 150, 42)
         self.btn_choose_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_choose_image.setEnabled(False)
         self.btn_choose_image.hide()
 
-        self.btn_send_image = QPushButton("", self.upd_left)
-        self.btn_send_image.setGeometry(22, 488, 170, 42)
+        self.btn_send_image = QPushButton("Send Photo Only", self.upd_left)
+        self.btn_send_image.setGeometry(360, 444, 152, 42)
         self.btn_send_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_send_image.setEnabled(False)
         self.btn_send_image.hide()
 
         self.btn_clear_image = QPushButton("Clear Image", self.upd_left)
         self.btn_clear_image.setGeometry(312, 488, 120, 42)
         self.btn_clear_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_clear_image.setEnabled(False)
         self.btn_clear_image.hide()
 
-        self.image_path_label = QLabel("Resident photo is managed in Resident Records and uploaded on Save.", self.upd_left)
-        self.image_path_label.setGeometry(22, 540, 490, 44)
+        self.image_path_label = QLabel("Resident photos are managed in Resident Records. This page controls LCD power and global schedule only.", self.upd_left)
+        self.image_path_label.setGeometry(22, 456, 490, 34)
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
 
-        manual_title = QLabel("Manual LCD Control", self.upd_left)
-        manual_title.setGeometry(22, 566, 180, 22)
+        manual_title = QLabel("Manual LCD Control - All Devices", self.upd_left)
+        manual_title.setGeometry(22, 520, 260, 22)
         manual_title.setStyleSheet("font-size: 15px; font-weight: 800; color: white;")
 
-        self.btn_lcd_on = QPushButton("Turn LCD ON", self.upd_left)
-        self.btn_lcd_on.setGeometry(22, 596, 150, 40)
+        self.btn_lcd_on = QPushButton("All LCDs ON", self.upd_left)
+        self.btn_lcd_on.setGeometry(22, 550, 150, 40)
         self.btn_lcd_on.setStyleSheet(self.primary_btn_style())
 
-        self.btn_lcd_off = QPushButton("Turn LCD OFF", self.upd_left)
-        self.btn_lcd_off.setGeometry(184, 596, 150, 40)
+        self.btn_lcd_off = QPushButton("All LCDs OFF", self.upd_left)
+        self.btn_lcd_off.setGeometry(184, 550, 150, 40)
         self.btn_lcd_off.setStyleSheet(self.secondary_btn_style())
 
         self.chk_sleep_no_image = QCheckBox("Keep LCD asleep if no image exists", self.upd_left)
-        self.chk_sleep_no_image.setGeometry(22, 644, 300, 24)
+        self.chk_sleep_no_image.setGeometry(22, 598, 300, 24)
         self.chk_sleep_no_image.setStyleSheet(self.chk_active.styleSheet())
 
         self.upd_right = QFrame(page)
@@ -2695,6 +2887,7 @@ class DashboardWindow(QWidget):
         self.btn_attach_source.clicked.connect(self.attach_source_document)
         self.btn_attach_resident_photo.clicked.connect(self.attach_resident_photo)
         self.btn_clear_resident_photo.clicked.connect(self.clear_lcd_image)
+        self.btn_send_resident_photo.clicked.connect(lambda: self.send_image(self.btn_send_resident_photo))
         self.btn_submit_review_request.clicked.connect(self.submit_resident_review_request)
 
         self.search_resident.textChanged.connect(self.filter_residents)
@@ -2715,11 +2908,9 @@ class DashboardWindow(QWidget):
 
         self.btn_preview.clicked.connect(self.update_preview)
         self.btn_send_text.clicked.connect(self.send_text_update)
-        self.btn_choose_image.clicked.connect(self.choose_image)
-        self.btn_clear_image.clicked.connect(self.clear_lcd_image)
         self.upd_target.currentIndexChanged.connect(lambda _index: self.on_update_target_changed())
-        self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
-        self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
+        self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on", "all"))
+        self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off", "all"))
         self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
         self.btn_refresh_approvals.clicked.connect(self.load_approvals)
         self.approval_table.cellClicked.connect(lambda row, _col: self.show_approval_detail(row))
@@ -2838,17 +3029,12 @@ class DashboardWindow(QWidget):
 
     def sync_resident_photo_labels(self):
         form_text = self.display_path_label(self.selected_image_path, "No resident photo attached")
-        schedule_text = self.display_path_label(
-            self.selected_image_path,
-            "No resident photo attached. Add one in Resident Records, then Save.",
-        )
         if hasattr(self, "resident_photo_label"):
             self.resident_photo_label.setText(form_text)
         if hasattr(self, "image_path_label"):
-            if self.selected_image_path:
-                self.image_path_label.setText(f"Resident photo saved with record: {schedule_text}")
-            else:
-                self.image_path_label.setText(schedule_text)
+            self.image_path_label.setText(
+                "Resident photos are managed in Resident Records. This page controls LCD power and global schedule only."
+            )
 
     def set_resident_photo_path(self, path):
         self.selected_image_path = path or None
@@ -2986,10 +3172,51 @@ class DashboardWindow(QWidget):
         return "\n".join(lines)
 
     def show_error(self, title, text):
-        QMessageBox.critical(self, title, text)
+        QMessageBox.critical(self, title, friendly_error_message(str(text or "")))
 
     def show_info(self, title, text):
         QMessageBox.information(self, title, text)
+
+    def begin_button_busy(self, button, busy_text):
+        if button is None:
+            return None
+        state = {
+            "button": button,
+            "text": button.text(),
+            "enabled": button.isEnabled(),
+        }
+        button.setText(busy_text)
+        button.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        return state
+
+    def end_button_busy(self, state):
+        if not state:
+            return
+        button = state.get("button")
+        if button is not None:
+            button.setText(state.get("text") or button.text())
+            button.setEnabled(bool(state.get("enabled", True)))
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+        QApplication.processEvents()
+
+    def result_error_message(self, result, fallback="The request could not be completed."):
+        status_code = result.get("status_code") if isinstance(result, dict) else None
+        body = result.get("body") if isinstance(result, dict) else None
+        message = fallback
+        if isinstance(body, dict):
+            value = body.get("message") or body.get("error") or body.get("err") or body.get("detail")
+            if isinstance(value, dict):
+                value = value.get("message") or value.get("error") or value.get("err") or value.get("line")
+            if value:
+                message = str(value)
+        elif body:
+            message = str(body)
+        return friendly_error_message(message, status_code=status_code, data=body)
 
     def set_gateway_state(self, online: bool):
         self.gateway_online = bool(online)
@@ -3003,7 +3230,7 @@ class DashboardWindow(QWidget):
         if self.server_mode:
             self.gateway_online = self.control_service_online
         if not profile.get("host"):
-            text = "Gateway: Demo Mode"
+            text = "Gateway: Not Configured"
             color = "#64748b"
             background = "#f8fafc"
             border = "#d8e1ea"
@@ -3062,8 +3289,12 @@ class DashboardWindow(QWidget):
         self.load_control_services()
 
     def refresh_all(self):
-        self.refresh_control_connection_status()
-        self.refresh_devices()
+        busy = self.begin_button_busy(getattr(self, "btn_refresh_devices", None), "Refreshing...")
+        try:
+            self.refresh_control_connection_status()
+            self.refresh_devices()
+        finally:
+            self.end_button_busy(busy)
 
     def apply_role_permissions(self):
         access = {
@@ -3092,7 +3323,7 @@ class DashboardWindow(QWidget):
             self.txt_allergies, self.txt_note, self.txt_drinks, self.txt_schedule,
             self.chk_active, self.chk_safety_review, self.btn_attach_source,
             self.btn_attach_resident_photo, self.btn_clear_resident_photo,
-            self.btn_choose_image, self.btn_clear_image,
+            self.btn_send_resident_photo,
         ]
         for widget in field_widgets:
             widget.setEnabled(self.can_edit_residents())
@@ -3119,6 +3350,7 @@ class DashboardWindow(QWidget):
             "btn_save_resident": resident_write,
             "btn_clear_fields": resident_write or self.is_nurse(),
             "btn_delete_resident": resident_write,
+            "btn_send_resident_photo": device_write,
             "btn_go_pairing_after_save": resident_write,
             "btn_pair_selected": device_write,
             "btn_unpair_selected": device_write,
@@ -3143,7 +3375,12 @@ class DashboardWindow(QWidget):
             return True
         if not self.server_mode and self.gateway_online:
             return True
-        self.show_error("Network Required", f"{action_name} requires an active Raspberry Pi Control Service connection.")
+        self.show_error(
+            "Facility Network Required",
+            f"{action_name} needs the Raspberry Pi Control Service. "
+            "Connect this computer to the dedicated facility network, then try again. "
+            "If you are already connected, ask IT to check the Raspberry Pi and Control Service."
+        )
         return False
 
     def safe_get_devices(self) -> List[Dict[str, Any]]:
@@ -3250,7 +3487,7 @@ class DashboardWindow(QWidget):
             if self.server_mode:
                 mode = "Server Mode Connected" if self.control_service_online else "Server Mode Offline"
             else:
-                mode = "Offline Demo Mode"
+                mode = "Offline Mode"
             self.record_summary_labels["database_mode"].setText(f"Data store: {mode}")
 
         overview_values = {
@@ -3267,7 +3504,7 @@ class DashboardWindow(QWidget):
             if self.server_mode:
                 mode = "Server Mode Connected" if self.control_service_online else "Server Mode Offline"
             else:
-                mode = "Offline Demo Mode"
+                mode = "Offline Mode"
             gateway_text = self.connection_badge.text().replace("Gateway: ", "")
             self.overview_status.setText(f"Data store: {mode}\nGateway: {gateway_text}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
         if hasattr(self, "overview_device_table"):
@@ -3280,7 +3517,7 @@ class DashboardWindow(QWidget):
             values = [
                 d.get("device_id") or "",
                 "Online" if d.get("is_online") else "Offline",
-                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A",
+                self.battery_display_text(d, compact=True),
                 ("Assigned" if d.get("resident_name") else "Unassigned") if self.is_it_admin() else (d.get("resident_name") or "Unassigned"),
                 str(d.get("last_seen_s") or ""),
             ]
@@ -3679,6 +3916,149 @@ class DashboardWindow(QWidget):
             timeout=timeout,
         )
 
+    def load_local_battery_alert_settings(self) -> Dict[str, Any]:
+        try:
+            settings = self.settings.load().get("battery_alert_settings") or {}
+        except Exception:
+            settings = {}
+        return self.normalize_battery_alert_settings(settings)
+
+    def save_local_battery_alert_settings(self, settings: Dict[str, Any]):
+        data = self.settings.load()
+        data["battery_alert_settings"] = self.normalize_battery_alert_settings(settings)
+        self.settings.save(data)
+
+    def load_battery_alert_settings(self, quiet: bool = True, timeout: float = 1.0):
+        settings = self.load_local_battery_alert_settings()
+        if self.server_mode:
+            result = self.control_client(timeout=timeout).get_battery_alert_settings()
+            if result.get("ok"):
+                payload = result.get("data") or {}
+                settings = self.normalize_battery_alert_settings(payload.get("settings") or payload)
+                self.save_local_battery_alert_settings(settings)
+            elif not quiet and hasattr(self, "battery_alert_status"):
+                self.battery_alert_status.setText(f"Using local policy. {result.get('error') or 'Pi setting not available.'}")
+                self.battery_alert_status.setStyleSheet("font-size: 12px; color: #b45309; font-weight: 800;")
+        self.battery_alert_settings = settings
+        self.apply_battery_alert_settings_to_ui()
+        return settings
+
+    def apply_battery_alert_settings_to_ui(self):
+        if not hasattr(self, "chk_battery_alert_enabled"):
+            return
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        self.chk_battery_alert_enabled.setChecked(bool(settings.get("enabled")))
+        self.spin_battery_low.setValue(int(settings.get("low_threshold", 20)))
+        self.spin_battery_critical.setValue(int(settings.get("critical_threshold", 10)))
+        self.spin_battery_cooldown.setValue(int(settings.get("popup_cooldown_minutes", 30)))
+        roles = set(settings.get("recipient_roles") or [])
+        self.chk_battery_role_it.setChecked("IT_ADMIN" in roles)
+        self.chk_battery_role_admin.setChecked("NURSE_ADMIN" in roles)
+        self.chk_battery_role_staff.setChecked("NURSE" in roles)
+        self.chk_battery_role_verifier.setChecked("VERIFIER" in roles)
+
+    def battery_alert_settings_from_ui(self) -> Dict[str, Any]:
+        roles = []
+        for checkbox, role in [
+            (self.chk_battery_role_it, "IT_ADMIN"),
+            (self.chk_battery_role_admin, "NURSE_ADMIN"),
+            (self.chk_battery_role_staff, "NURSE"),
+            (self.chk_battery_role_verifier, "VERIFIER"),
+        ]:
+            if checkbox.isChecked():
+                roles.append(role)
+        return self.normalize_battery_alert_settings({
+            "enabled": self.chk_battery_alert_enabled.isChecked(),
+            "low_threshold": self.spin_battery_low.value(),
+            "critical_threshold": self.spin_battery_critical.value(),
+            "popup_cooldown_minutes": self.spin_battery_cooldown.value(),
+            "recipient_roles": roles or ["IT_ADMIN"],
+        })
+
+    def save_battery_alert_settings_from_ui(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can change battery alert policy.")
+            return
+        settings = self.battery_alert_settings_from_ui()
+        busy = self.begin_button_busy(getattr(self, "btn_save_battery_alerts", None), "Saving...")
+        try:
+            result = self.control_client(timeout=5.0).save_battery_alert_settings(settings) if self.server_mode else {"ok": False}
+            if result.get("ok"):
+                payload = result.get("data") or {}
+                settings = self.normalize_battery_alert_settings(payload.get("settings") or settings)
+                message = "Battery alert policy saved to the Raspberry Pi."
+                state_color = "#047857"
+            else:
+                message = result.get("error") or "Battery alert policy saved locally. Connect to the Raspberry Pi to share it."
+                state_color = "#b45309"
+            self.battery_alert_settings = settings
+            self.save_local_battery_alert_settings(settings)
+            self.apply_battery_alert_settings_to_ui()
+            if hasattr(self, "battery_alert_status"):
+                self.battery_alert_status.setText(message)
+                self.battery_alert_status.setStyleSheet(f"font-size: 12px; color: {state_color}; font-weight: 800;")
+            try:
+                self.db.log_it_audit(
+                    self.current_user.get("username"),
+                    "Battery Alert Policy",
+                    "devices",
+                    "Success" if result.get("ok") else "Local",
+                    message,
+                )
+            except Exception:
+                pass
+        finally:
+            self.end_button_busy(busy)
+
+    def battery_alert_level(self, device: Dict[str, Any], settings: Dict[str, Any]) -> Optional[str]:
+        try:
+            percent = int(device.get("battery_level"))
+        except Exception:
+            percent = None
+        if percent is None and not self.truthy(device.get("battery_low")):
+            return None
+        if percent is not None and percent <= int(settings.get("critical_threshold", 10)):
+            return "critical"
+        if self.truthy(device.get("battery_low")) or (percent is not None and percent <= int(settings.get("low_threshold", 20))):
+            return "low"
+        return None
+
+    def check_battery_alerts(self, devices: List[Dict[str, Any]]):
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        if not settings.get("enabled", True) or not self.role_allows_battery_popup():
+            return
+        cooldown_s = int(settings.get("popup_cooldown_minutes", 30)) * 60
+        now_ts = time.time()
+        due = []
+        for device in devices:
+            if not device.get("is_online"):
+                continue
+            level = self.battery_alert_level(device, settings)
+            if not level:
+                continue
+            device_id = str(device.get("device_id") or device.get("id") or "unknown")
+            key = f"{device_id}:{level}"
+            last = self.battery_alert_last_popup.get(key, 0)
+            if now_ts - last < cooldown_s:
+                continue
+            self.battery_alert_last_popup[key] = now_ts
+            resident = device.get("resident_name") or device.get("paired_resident_name") or "Unassigned"
+            due.append((level, device_id, resident, self.battery_display_text(device), self.power_state_text(device)))
+        if not due:
+            return
+        critical = [row for row in due if row[0] == "critical"]
+        title = "Critical Battery Alert" if critical else "Low Battery Alert"
+        lines = []
+        for level, device_id, resident, battery, power in due[:8]:
+            lines.append(f"{device_id} | {resident} | {battery} | {power}")
+        if len(due) > 8:
+            lines.append(f"...and {len(due) - 8} more device(s).")
+        QMessageBox.warning(
+            self,
+            title,
+            "One or more connected smart labels need battery attention.\n\n" + "\n".join(lines),
+        )
+
     def control_client_from_form(self, timeout=2.0):
         if not hasattr(self, "control_host"):
             return self.control_client(timeout=timeout)
@@ -3748,7 +4128,7 @@ class DashboardWindow(QWidget):
     def control_status_text(self, result):
         if result.get("ok"):
             return "Connected"
-        return result.get("error") or "Control Service Offline or Unreachable"
+        return friendly_error_message(result.get("error") or "Control Service Offline or Unreachable")
 
     def load_it_health(self):
         if not hasattr(self, "it_control_stack"):
@@ -3768,7 +4148,7 @@ class DashboardWindow(QWidget):
             return
         profile = self.current_control_profile()
         if not profile.get("host"):
-            self.control_dashboard_labels["service"].setText("Demo Mode - No Raspberry Pi Connected")
+            self.control_dashboard_labels["service"].setText("Control Service Not Configured")
         else:
             self.control_dashboard_labels["service"].setText("Not refreshed")
         for key in ["hostname", "lan_ip", "tailscale_ip", "cpu", "memory", "disk", "operation"]:
@@ -3915,34 +4295,38 @@ class DashboardWindow(QWidget):
         self.show_info("Copied", "API key copied.")
 
     def test_control_connection(self):
+        busy = self.begin_button_busy(getattr(self, "btn_test_control_connection", None), "Testing...")
         client = self.control_client_from_form()
-        result = client.health()
-        self.control_last_results["health"] = result
-        if result.get("ok"):
-            data = result.get("data") or {}
-            hostname = data.get("hostname") or "unknown host"
-            version = data.get("version") or "version pending"
-            self.control_test_status.setText(f"Connection Status: Connected | {hostname} | {version}")
-            self.control_test_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
-            audit_result = "Success"
-            message = f"Connected to Control Service at {client.base_url}"
-        else:
-            self.control_test_status.setText(f"Connection Status: {self.control_status_text(result)}")
-            self.control_test_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
-            audit_result = "Failed"
-            message = self.control_status_text(result)
-        tested_profile = self.control_profile_from_form()
-        self.update_control_network_labels(result, tested_profile)
-        self.update_control_header(result, tested_profile)
-        self.db.log_it_audit(self.current_user.get("username"), "Connection Test", client.base_url, audit_result, message)
-        self.load_it_audit_logs()
+        try:
+            result = client.health()
+            self.control_last_results["health"] = result
+            if result.get("ok"):
+                data = result.get("data") or {}
+                hostname = data.get("hostname") or "unknown host"
+                version = data.get("version") or "version pending"
+                self.control_test_status.setText(f"Connection Status: Connected | {hostname} | {version}")
+                self.control_test_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                audit_result = "Success"
+                message = f"Connected to Control Service at {client.base_url}"
+            else:
+                self.control_test_status.setText(f"Connection Status: {self.control_status_text(result)}")
+                self.control_test_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+                audit_result = "Failed"
+                message = self.control_status_text(result)
+            tested_profile = self.control_profile_from_form()
+            self.update_control_network_labels(result, tested_profile)
+            self.update_control_header(result, tested_profile)
+            self.db.log_it_audit(self.current_user.get("username"), "Connection Test", client.base_url, audit_result, message)
+            self.load_it_audit_logs()
+        finally:
+            self.end_button_busy(busy)
 
     def update_control_header(self, health_result=None, profile=None):
         if not hasattr(self, "control_header_status"):
             return
         profile = profile or self.current_control_profile()
         if not profile.get("host"):
-            self.control_header_status.setText("Demo Mode - No Raspberry Pi Connected")
+            self.control_header_status.setText("Control Service Not Configured")
             self.control_header_status.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 800;")
             return
         if health_result and health_result.get("ok"):
@@ -4029,20 +4413,23 @@ class DashboardWindow(QWidget):
             return
         devices = self.safe_get_devices()
         offline = sum(1 for d in devices if not d.get("is_online"))
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        low_threshold = int(settings.get("low_threshold", 20))
         low_battery = 0
         for d in devices:
             try:
                 battery = int(d.get("battery_level"))
             except Exception:
                 battery = None
-            if battery is not None and battery < 20:
+            if (battery is not None and battery <= low_threshold) or self.truthy(d.get("battery_low")):
                 low_battery += 1
         if hasattr(self, "control_device_summary"):
             self.control_device_summary["total"].setText(str(len(devices)))
             self.control_device_summary["online"].setText(str(len(devices) - offline))
             self.control_device_summary["offline"].setText(str(offline))
             self.control_device_summary["low_battery"].setText(str(low_battery))
-            self.control_device_summary["firmware"].setText("Pending")
+            versions = sorted({str(d.get("fw") or d.get("firmware") or "").strip() for d in devices if str(d.get("fw") or d.get("firmware") or "").strip()})
+            self.control_device_summary["firmware"].setText(", ".join(versions) if versions else "Not reported")
 
         self.it_device_table.setRowCount(len(devices))
         for r, d in enumerate(devices):
@@ -4052,7 +4439,8 @@ class DashboardWindow(QWidget):
                 d.get("ip") or "",
                 str(d.get("port") or ""),
                 d.get("fw") or "",
-                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A",
+                self.battery_display_text(d),
+                self.power_state_text(d),
                 str(d.get("last_seen_s") or ""),
             ]
             for c, value in enumerate(values):
@@ -4065,26 +4453,55 @@ class DashboardWindow(QWidget):
     def refresh_esp32_serial_ports(self):
         if not hasattr(self, "esp32_serial_port"):
             return
-        current = self.esp32_serial_port.currentData()
-        self.esp32_serial_port.clear()
+        busy = self.begin_button_busy(getattr(self, "btn_refresh_esp32_ports", None), "Refreshing...")
+        self.set_esp32_wifi_status("Refreshing USB serial ports...", "pending")
         try:
-            from serial.tools import list_ports
-        except Exception:
-            self.esp32_wifi_status.setText("pyserial is not installed. Install/update the desktop app.")
-            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+            current = self.esp32_serial_port.currentData()
+            self.esp32_serial_port.clear()
+            try:
+                from serial.tools import list_ports
+            except Exception:
+                message = "USB serial support is missing from this installation. Install/update the desktop app, then try again."
+                self.set_esp32_wifi_status(message, "error")
+                self.show_error("USB Ports", message)
+                return
+            ports = list(list_ports.comports())
+            for port in ports:
+                label = f"{port.device} - {port.description}"
+                self.esp32_serial_port.addItem(label, port.device)
+            if current:
+                for idx in range(self.esp32_serial_port.count()):
+                    if self.esp32_serial_port.itemData(idx) == current:
+                        self.esp32_serial_port.setCurrentIndex(idx)
+                        break
+            count = self.esp32_serial_port.count()
+            self.set_esp32_wifi_status(
+                f"{count} USB serial port(s) found." if count else "No USB serial ports found. Plug in the ESP32, wait a few seconds, then click Refresh Ports again.",
+                "ok" if count else "error",
+            )
+        finally:
+            self.end_button_busy(busy)
+
+    def set_esp32_wifi_status(self, message, state="info"):
+        if not hasattr(self, "esp32_wifi_status"):
             return
-        ports = list(list_ports.comports())
-        for port in ports:
-            label = f"{port.device} - {port.description}"
-            self.esp32_serial_port.addItem(label, port.device)
-        if current:
-            for idx in range(self.esp32_serial_port.count()):
-                if self.esp32_serial_port.itemData(idx) == current:
-                    self.esp32_serial_port.setCurrentIndex(idx)
-                    break
-        count = self.esp32_serial_port.count()
-        self.esp32_wifi_status.setText(f"{count} USB serial port(s) found." if count else "No USB serial ports found.")
-        self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;" if count else "font-size: 12px; color: #b91c1c; font-weight: 800;")
+        colors = {
+            "ok": "#047857",
+            "error": "#b91c1c",
+            "pending": "#b45309",
+            "info": "#475569",
+        }
+        color = colors.get(state, colors["info"])
+        self.esp32_wifi_status.setText(message)
+        self.esp32_wifi_status.setStyleSheet(f"font-size: 12px; color: {color}; font-weight: 800;")
+        QApplication.processEvents()
+
+    def set_esp32_provisioning_busy(self, busy):
+        for name in ("btn_refresh_esp32_ports", "btn_scan_esp32_wifi", "btn_apply_esp32_wifi"):
+            button = getattr(self, name, None)
+            if button:
+                button.setEnabled(not busy)
+        QApplication.processEvents()
 
     def _open_esp32_serial(self):
         port = self.esp32_serial_port.currentData() if hasattr(self, "esp32_serial_port") else None
@@ -4094,7 +4511,57 @@ class DashboardWindow(QWidget):
             import serial
         except Exception as exc:
             raise RuntimeError("pyserial is not installed. Install/update the desktop app before provisioning ESP32 WiFi.") from exc
-        return serial.Serial(port=port, baudrate=115200, timeout=0.8, write_timeout=2)
+        try:
+            ser = serial.Serial(port=port, baudrate=115200, timeout=0.45, write_timeout=4)
+        except Exception as exc:
+            detail = str(exc)
+            lowered = detail.lower()
+            if "access is denied" in lowered or "permission" in lowered or "permissionerror" in lowered:
+                raise RuntimeError(
+                    f"{port} is busy or Windows denied access. Close Arduino Serial Monitor, "
+                    "Arduino Serial Plotter, PuTTY, Thonny, or any other app using the ESP32 USB port, "
+                    "then click Refresh Ports and try again."
+                ) from exc
+            raise RuntimeError(f"Could not open {port}. Unplug/replug the ESP32, refresh ports, and try again. Details: {detail}") from exc
+        try:
+            ser.setDTR(False)
+            ser.setRTS(False)
+        except Exception:
+            pass
+        return ser
+
+    def _wait_for_esp32_usb_ready(self, ser, timeout_s=8):
+        lines = []
+        start = time.time()
+        while time.time() - start < timeout_s:
+            raw = ser.readline()
+            if not raw:
+                continue
+            line = raw.decode(errors="ignore").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if line.startswith(("WWREADY", "WWCFG", "WWERR")):
+                break
+        return lines
+
+    def _write_esp32_command(self, ser, command):
+        data = command.encode("utf-8")
+        last_error = None
+        for _ in range(3):
+            try:
+                written = ser.write(data)
+                ser.flush()
+                if written == len(data):
+                    return
+                last_error = RuntimeError(f"Only wrote {written}/{len(data)} bytes to ESP32.")
+            except Exception as exc:
+                last_error = exc
+            time.sleep(1.2)
+        raise RuntimeError(
+            "Windows opened the USB serial port, but the ESP32 did not accept the command. "
+            "Flash the latest provisioning firmware or select the correct ESP32 COM port."
+        ) from last_error
 
     def _read_esp32_lines(self, ser, end_markers, timeout_s=12):
         lines = []
@@ -4112,16 +4579,27 @@ class DashboardWindow(QWidget):
                 break
         return lines
 
+    def _esp32_serial_transaction(self, command, end_markers, timeout_s=12, ready_timeout_s=8):
+        with self._open_esp32_serial() as ser:
+            boot_lines = self._wait_for_esp32_usb_ready(ser, timeout_s=ready_timeout_s)
+            ser.reset_input_buffer()
+            self._write_esp32_command(ser, command)
+            response_lines = self._read_esp32_lines(ser, end_markers, timeout_s=timeout_s)
+        return boot_lines + response_lines
+
     def _serial_value(self, value):
         from urllib.parse import quote
         return quote(str(value or "").strip(), safe="")
 
     def scan_esp32_wifi_networks(self):
+        busy = self.begin_button_busy(getattr(self, "btn_scan_esp32_wifi", None), "Scanning...")
+        self.set_esp32_provisioning_busy(True)
+        self.set_esp32_wifi_status("Scanning WiFi from ESP32 over USB... keep the board plugged in.", "pending")
         try:
-            with self._open_esp32_serial() as ser:
-                ser.reset_input_buffer()
-                ser.write(b"WWSCAN\n")
-                lines = self._read_esp32_lines(ser, ("WWEND", "WWERR"), timeout_s=18)
+            lines = self._esp32_serial_transaction("WWSCAN\n", ("WWEND", "WWERR"), timeout_s=22, ready_timeout_s=8)
+            err_line = next((line for line in lines if line.startswith("WWERR")), "")
+            if err_line:
+                raise RuntimeError(f"The ESP32 returned an error during WiFi scan. {err_line}")
             networks = []
             for line in lines:
                 if not line.startswith("WWSSID "):
@@ -4136,11 +4614,27 @@ class DashboardWindow(QWidget):
             self.esp32_wifi_ssid.clear()
             for ssid in networks:
                 self.esp32_wifi_ssid.addItem(ssid)
-            self.esp32_wifi_status.setText(f"Found {len(networks)} WiFi network(s)." if networks else "No WiFi networks returned by ESP32.")
-            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;" if networks else "font-size: 12px; color: #b91c1c; font-weight: 800;")
+            for idx in range(self.esp32_wifi_ssid.count()):
+                if self.esp32_wifi_ssid.itemText(idx).strip().lower() == "bell458":
+                    self.esp32_wifi_ssid.setCurrentIndex(idx)
+                    break
+            detail = " Last: " + lines[-1] if lines else ""
+            self.set_esp32_wifi_status(
+                f"Found {len(networks)} WiFi network(s).{detail}" if networks else "No WiFi networks returned by ESP32. Confirm the latest ESP32 firmware is flashed.",
+                "ok" if networks else "error",
+            )
+            if not networks:
+                self.show_error(
+                    "WiFi Scan",
+                    "The ESP32 did not return any WiFi networks. Keep it plugged in, confirm the latest ESP32 firmware is flashed, then try Scan WiFi again."
+                )
         except Exception as exc:
-            self.esp32_wifi_status.setText(f"WiFi scan failed: {exc}")
-            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+            message = friendly_error_message(str(exc))
+            self.set_esp32_wifi_status(f"WiFi scan failed. {message}", "error")
+            self.show_error("WiFi Scan Failed", message)
+        finally:
+            self.set_esp32_provisioning_busy(False)
+            self.end_button_busy(busy)
 
     def provision_esp32_wifi(self):
         ssid = self.esp32_wifi_ssid.currentText().strip() if hasattr(self, "esp32_wifi_ssid") else ""
@@ -4166,39 +4660,47 @@ class DashboardWindow(QWidget):
             f"pi={self._serial_value(pi_host)} "
             f"port={port_num}\n"
         )
+        busy = self.begin_button_busy(getattr(self, "btn_apply_esp32_wifi", None), "Saving...")
+        self.set_esp32_provisioning_busy(True)
+        self.set_esp32_wifi_status(f"Saving WiFi '{ssid}' to ESP32 and waiting for acknowledgement...", "pending")
         try:
-            with self._open_esp32_serial() as ser:
-                ser.reset_input_buffer()
-                ser.write(command.encode("utf-8"))
-                lines = self._read_esp32_lines(ser, ("WWOK", "WWERR"), timeout_s=10)
+            lines = self._esp32_serial_transaction(command, ("WWOK", "WWERR"), timeout_s=16, ready_timeout_s=8)
             ok = any(line.startswith("WWOK") for line in lines)
             detail = " | ".join(lines[-4:]) if lines else "No response from ESP32."
             if ok:
-                self.esp32_wifi_status.setText("WiFi saved to ESP32. Device will reboot/reconnect.")
-                self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                self.set_esp32_wifi_status(f"WiFi saved to ESP32. Reconnecting to {ssid} and Pi {pi_host}:{port_num}.", "ok")
                 self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Success", f"Pi host {pi_host}:{port_num}")
-                self.show_info("ESP32 WiFi", "WiFi settings saved to the ESP32. It will reconnect using the new network.")
+                self.show_info("ESP32 WiFi", "WiFi settings saved to the ESP32. It will reconnect using the new network without needing a restart.")
             else:
-                self.esp32_wifi_status.setText(f"ESP32 response: {detail}")
-                self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+                message = f"The ESP32 did not confirm the WiFi save. Last response: {detail}"
+                self.set_esp32_wifi_status(message, "error")
+                self.show_error("ESP32 WiFi", message)
         except Exception as exc:
-            self.esp32_wifi_status.setText(f"Provision failed: {exc}")
-            self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
-            self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Failed", str(exc))
+            message = friendly_error_message(str(exc))
+            self.set_esp32_wifi_status(f"Provision failed. {message}", "error")
+            self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Failed", message)
+            self.show_error("ESP32 WiFi Failed", message)
+        finally:
+            self.set_esp32_provisioning_busy(False)
+            self.end_button_busy(busy)
 
     def restart_operation_manager(self):
+        busy = self.begin_button_busy(getattr(self, "btn_restart_operation", None), "Restarting...")
         client = self.control_client()
-        result = client.restart_operation()
-        audit_result = "Success" if result.get("ok") else "Failed"
-        message = "Operation Manager restart requested." if result.get("ok") else self.control_status_text(result)
-        self.db.log_it_audit(self.current_user.get("username"), "Restart Operation Manager", client.base_url, audit_result, message)
-        self.load_it_audit_logs()
-        self.control_last_results["operation"] = client.operation_status()
-        self.load_control_services()
-        if result.get("ok"):
-            self.show_info("Restart requested", "Operation Manager restart request was sent to the Raspberry Pi Control Service.")
-        else:
-            self.show_error("Restart failed", message)
+        try:
+            result = client.restart_operation()
+            audit_result = "Success" if result.get("ok") else "Failed"
+            message = "Operation Manager restart requested." if result.get("ok") else self.control_status_text(result)
+            self.db.log_it_audit(self.current_user.get("username"), "Restart Operation Manager", client.base_url, audit_result, message)
+            self.load_it_audit_logs()
+            self.control_last_results["operation"] = client.operation_status()
+            self.load_control_services()
+            if result.get("ok"):
+                self.show_info("Restart requested", "Operation Manager restart request was sent to the Raspberry Pi Control Service.")
+            else:
+                self.show_error("Restart failed", message)
+        finally:
+            self.end_button_busy(busy)
 
     def load_it_audit_logs(self):
         if not hasattr(self, "it_audit_table"):
@@ -4323,7 +4825,7 @@ class DashboardWindow(QWidget):
             self.ai_diag_input.setPlainText(json.dumps(diagnostics, indent=2, default=str))
 
         if not profile.get("host"):
-            summary = "Demo Mode - no Raspberry Pi Control Service host is configured."
+            summary = "No Raspberry Pi Control Service host is configured."
             cause = "The active connection profile does not have a host."
             fixes = [
                 "Confirm this deployment build includes the site Raspberry Pi address.",
@@ -4763,6 +5265,7 @@ class DashboardWindow(QWidget):
             self.show_error("Missing name", "Resident name is required.")
             return
 
+        busy = self.begin_button_busy(getattr(self, "btn_save_resident", None), "Saving...")
         try:
             before_snapshot = None
             if self.selected_resident_id is None:
@@ -4796,11 +5299,16 @@ class DashboardWindow(QWidget):
             self.load_approvals()
             self.load_resident_audit()
             self.refresh_dashboard_summary()
-            self.send_saved_resident_if_paired()
-            self.show_info("Saved", message)
+            queued = self.send_saved_resident_if_paired()
+            if queued:
+                self.show_info("Saved", f"{message}\n\nText update started in the background. Send the resident photo from Resident Records after the e-paper finishes.")
+            else:
+                self.show_info("Saved", message)
 
         except Exception as e:
             self.show_error("Save failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def submit_resident_review_request(self):
         if not self.is_nurse():
@@ -4820,6 +5328,7 @@ class DashboardWindow(QWidget):
             return
 
         payload = self.collect_resident_payload()
+        busy = self.begin_button_busy(getattr(self, "btn_submit_review_request", None), "Submitting...")
         try:
             self.db.create_change_request(
                 self.selected_resident_id,
@@ -4853,6 +5362,8 @@ class DashboardWindow(QWidget):
             self.show_info("Submitted", "Review request sent to the admin queue.")
         except Exception as e:
             self.show_error("Submit failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def delete_selected_resident(self):
         if not self.can_edit_residents():
@@ -4879,6 +5390,7 @@ class DashboardWindow(QWidget):
 
         resident_id = self.selected_resident_id
         resident_uid = row.get("resident_uid")
+        busy = self.begin_button_busy(getattr(self, "btn_delete_resident", None), "Deleting...")
         try:
             self.db.delete_resident(resident_id)
             self.db.log_update(
@@ -4911,38 +5423,75 @@ class DashboardWindow(QWidget):
             self.show_info("Deleted", "Resident deleted successfully.")
         except Exception as e:
             self.show_error("Delete failed", str(e))
+        finally:
+            self.end_button_busy(busy)
+
+    def find_paired_device_id_for_resident(self, row):
+        row = dict(row or {})
+        direct = row.get("paired_device_id") or row.get("device_id")
+        if direct:
+            return str(direct)
+
+        resident_id = row.get("id") or self.selected_resident_id
+        resident_uid = row.get("resident_uid")
+        resident_name = row.get("full_name")
+        for device in self.safe_get_devices():
+            device_id = device.get("device_id") or device.get("id")
+            if not device_id:
+                continue
+            paired_id = device.get("paired_resident_id") or device.get("resident_id")
+            if resident_id is not None and str(paired_id or "") == str(resident_id):
+                return str(device_id)
+            if resident_uid and str(device.get("resident_uid") or "") == str(resident_uid):
+                return str(device_id)
+            if resident_name and str(device.get("resident_name") or "") == str(resident_name):
+                return str(device_id)
+        return None
+
+    def build_gateway_payload_from_row(self, row, device_id):
+        row = dict(row or {})
+        payload = {
+            "id": device_id,
+            "name": row.get("full_name") or "",
+            "room": row.get("room") or "",
+            "note": row.get("note") or "",
+            "drinks": row.get("drinks") or "",
+        }
+        diet = row.get("diet")
+        if diet:
+            payload["diet"] = [x.strip() for x in str(diet).split(",") if x.strip()]
+        texture = row.get("texture") or row.get("allergies")
+        if texture:
+            texture_items = [x.strip() for x in str(texture).split(",") if x.strip()]
+            payload["texture"] = texture_items
+            payload["allergies"] = texture_items
+        fluids = row.get("fluids") or row.get("schedule")
+        if fluids:
+            payload["fluids"] = str(fluids)
+            payload["schedule"] = str(fluids)
+        return payload
 
     def send_saved_resident_if_paired(self):
         if not self.gateway_online:
-            return
+            return False
         row = self.db.get_resident(self.selected_resident_id)
-        device_id = row.get("paired_device_id") if row else None
+        device_id = self.find_paired_device_id_for_resident(row)
         if not device_id:
-            return
+            return False
 
-        payload = self.build_gateway_payload(device_id)
-        success, message, response = self.send_resident_display_sequence(
+        payload = self.build_gateway_payload_from_row(row, device_id)
+        self.queue_resident_display_sequence(
             row,
             device_id,
             payload,
-            "Saved resident sent to paired device",
+            "Saved resident text sent to paired device",
             "Auto-send",
-            image_path=self.selected_image_path or row.get("lcd_image_path"),
+            image_path=None,
+            action_type="auto_send_after_save",
+            notify_on_failure=False,
+            include_image=False,
         )
-
-        self.db.log_update(
-            "auto_send_after_save",
-            self.selected_resident_id,
-            self.current_resident_uid(),
-            device_id,
-            self.current_user.get("id"),
-            self.current_user.get("username"),
-            payload,
-            response,
-            success,
-            message
-        )
-        self.load_recent_logs()
+        return True
 
     # ---------------------------- devices / pairing ----------------------------
 
@@ -4951,6 +5500,7 @@ class DashboardWindow(QWidget):
             devices = self.gateway.get_devices(self.base_url())
             self.db.upsert_devices(devices)
             self.set_gateway_state(True)
+            self.check_battery_alerts(self.safe_get_devices())
         except Exception as e:
             self.set_gateway_state(False)
             try:
@@ -5052,7 +5602,7 @@ class DashboardWindow(QWidget):
                 d.get("resident_name") or "Unpaired",
                 d.get("resident_uid") or "-",
                 "Online" if d.get("is_online") else "Offline",
-                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A"
+                self.battery_display_text(d, compact=True)
             ]
             for c, val in enumerate(vals):
                 self.pair_table.setItem(r, c, QTableWidgetItem(val))
@@ -5090,6 +5640,7 @@ class DashboardWindow(QWidget):
             self.show_error("Not found", "Resident record was not found.")
             return
 
+        busy = self.begin_button_busy(getattr(self, "btn_pair_selected", None), "Pairing...")
         try:
             self.selected_pair_resident_id = resident_id
             self.selected_pair_device_id = device_id
@@ -5108,80 +5659,156 @@ class DashboardWindow(QWidget):
             )
             self.push_resident_row_to_device(row, device_id, "auto_send_after_pair")
             self.refresh_devices()
-            self.show_info("Paired", f"{row['full_name']} paired to {device_id}.")
+            self.show_info("Paired", f"{row['full_name']} paired to {device_id}.\n\nText update started in the background. Send the resident photo from Resident Records after the e-paper finishes.")
         except Exception as e:
             self.show_error("Pair failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def push_resident_row_to_device(self, row, device_id, action_type):
         if not self.gateway_online:
             return
-        payload = {
-            "id": device_id,
-            "name": row.get("full_name") or "",
-            "room": row.get("room") or "",
-            "note": row.get("note") or "",
-            "drinks": row.get("drinks") or "",
-        }
-        if row.get("diet"):
-            payload["diet"] = [x.strip() for x in row.get("diet").split(",") if x.strip()]
-        texture = row.get("texture") or row.get("allergies")
-        fluids = row.get("fluids") or row.get("schedule")
-        if texture:
-            payload["texture"] = [x.strip() for x in texture.split(",") if x.strip()]
-            payload["allergies"] = [x.strip() for x in texture.split(",") if x.strip()]
-        if fluids:
-            payload["fluids"] = fluids
-            payload["schedule"] = fluids
-        success, message, response = self.send_resident_display_sequence(
+        payload = self.build_gateway_payload_from_row(row, device_id)
+        self.queue_resident_display_sequence(
             row,
             device_id,
             payload,
-            "Latest resident text/photo pushed after pairing",
+            "Latest resident text pushed after pairing",
             "Auto-push",
-            image_path=row.get("lcd_image_path"),
-        )
-        self.db.log_update(
-            action_type,
-            row.get("id"),
-            row.get("resident_uid"),
-            device_id,
-            self.current_user.get("id"),
-            self.current_user.get("username"),
-            payload,
-            response,
-            success,
-            message
+            image_path=None,
+            action_type=action_type,
+            notify_on_failure=True,
+            include_image=False,
         )
 
-    def send_resident_display_sequence(self, row, device_id, payload, success_message, label, image_path=None):
+    def queue_resident_display_sequence(
+        self,
+        row,
+        device_id,
+        payload,
+        success_message,
+        label,
+        image_path=None,
+        action_type="auto_send",
+        notify_on_failure=False,
+        include_image=True,
+    ):
+        task = {
+            "row": dict(row or {}),
+            "device_id": device_id,
+            "payload": dict(payload or {}),
+            "success_message": success_message,
+            "label": label,
+            "image_path": image_path,
+            "action_type": action_type,
+            "notify_on_failure": notify_on_failure,
+            "include_image": include_image,
+            "user_id": self.current_user.get("id"),
+            "username": self.current_user.get("username"),
+            "server_mode": self.server_mode,
+            "base_url": self.base_url(),
+        }
+        threading.Thread(target=self._resident_display_worker, args=(task,), daemon=True).start()
+
+    def _resident_display_worker(self, task):
         try:
-            if self.server_mode and hasattr(self.gateway, "send_resident_display") and row and row.get("id"):
-                result = self.gateway.send_resident_display(self.base_url(), row.get("id"), device_id)
-                success = result["status_code"] == 200
-                message = success_message if success else f"{label} failed ({result['status_code']})"
+            gateway = ServerGatewayClient() if task.get("server_mode") else GatewayClient()
+            success, message, response = self.send_resident_display_sequence(
+                task.get("row"),
+                task.get("device_id"),
+                task.get("payload"),
+                task.get("success_message"),
+                task.get("label"),
+                image_path=task.get("image_path"),
+                include_image=task.get("include_image", True),
+                gateway=gateway,
+                base_url=task.get("base_url"),
+            )
+            task.update({"success": success, "message": message, "response": response})
+        except Exception as exc:
+            task.update({
+                "success": False,
+                "message": f"{task.get('label') or 'Display update'} could not finish. {friendly_error_message(str(exc))}",
+                "response": {"error": str(exc)},
+            })
+        self.resident_display_finished.emit(task)
+
+    def on_resident_display_finished(self, task):
+        self.end_button_busy(task.get("busy_state"))
+        row = task.get("row") or {}
+        payload = task.get("payload") or {}
+        self.db.log_update(
+            task.get("action_type") or "auto_send",
+            row.get("id") or self.selected_resident_id,
+            row.get("resident_uid") or self.current_resident_uid(),
+            task.get("device_id"),
+            task.get("user_id"),
+            task.get("username"),
+            payload,
+            task.get("response"),
+            bool(task.get("success")),
+            task.get("message") or "",
+        )
+        self.load_recent_logs()
+        self.refresh_devices()
+        if task.get("notify_on_success") and task.get("success"):
+            self.show_info(task.get("success_title") or "Success", task.get("message") or "The request completed successfully.")
+        if task.get("notify_on_failure") and not task.get("success"):
+            self.show_error(task.get("failure_title") or "Display update", task.get("message") or "The resident was saved, but the display update failed.")
+
+    def send_resident_display_sequence(self, row, device_id, payload, success_message, label, image_path=None, include_image=True, gateway=None, base_url=None):
+        try:
+            gateway = gateway or self.gateway
+            target_base_url = base_url if base_url is not None else self.base_url()
+            if not include_image:
+                text_result = gateway.send_text(target_base_url, payload)
+                text_success = text_result["status_code"] == 200
+                response = {"text": text_result["body"], "image": {"ok": True, "skipped": True, "reason": "Photo send is manual"}}
+                message = success_message if text_success else self.result_error_message(text_result, f"{label} text failed.")
+                return text_success, message, response
+
+            if self.server_mode and hasattr(gateway, "send_resident_display") and row and row.get("id"):
+                result = gateway.send_resident_display(target_base_url, row.get("id"), device_id)
+                body = result.get("body") or {}
+                success = (
+                    result["status_code"] == 200
+                    and not (isinstance(body, dict) and body.get("ok") is False)
+                    and not (isinstance(body, dict) and body.get("partial") is True)
+                )
+                message = success_message if success else self.result_error_message(result, f"{label} failed.")
+                if success and isinstance(body, dict):
+                    image = body.get("image") or {}
+                    if isinstance(image, dict) and image.get("ok") is False:
+                        detail = image.get("message") or image.get("detail") or "Resident photo could not be sent."
+                        message = f"{success_message}; {friendly_error_message(str(detail))}"
+                elif isinstance(body, dict) and body.get("message"):
+                    message = friendly_error_message(str(body.get("message")))
                 return success, message, result["body"]
 
-            text_result = self.gateway.send_text(self.base_url(), payload)
-            text_success = text_result["status_code"] == 200
-            response = {"text": text_result["body"]}
-            success = text_success
-            message = success_message if text_success else f"{label} text failed ({text_result['status_code']})"
-
-            if text_success and image_path and os.path.isfile(str(image_path)):
-                image_result = self.gateway.send_image(self.base_url(), device_id, str(image_path))
+            response = {}
+            image_success = True
+            if image_path and os.path.isfile(str(image_path)):
+                image_result = gateway.send_image(target_base_url, device_id, str(image_path))
                 response["image"] = image_result["body"]
                 image_success = image_result["status_code"] == 200
-                success = image_success
-                message = (
-                    f"{success_message}; resident photo sent"
-                    if image_success
-                    else f"{label} photo failed ({image_result['status_code']})"
-                )
-            elif text_success:
+                if not image_success:
+                    message = self.result_error_message(image_result, f"{label} photo failed. E-paper text will still be attempted.")
+                else:
+                    message = f"{success_message}; resident photo sent"
+            else:
                 response["image"] = {"ok": True, "skipped": True, "reason": "No resident photo available"}
+
+            text_result = gateway.send_text(target_base_url, payload)
+            text_success = text_result["status_code"] == 200
+            response["text"] = text_result["body"]
+            success = text_success and image_success
+            if text_success and image_success:
+                message = f"{success_message}; e-paper text sent after photo step"
+            elif not text_success:
+                message = self.result_error_message(text_result, f"{label} text failed after the photo step.")
             return success, message, response
         except Exception as e:
-            return False, f"{label} queued for later review: {e}", {"error": str(e)}
+            return False, f"{label} could not finish. {friendly_error_message(str(e))}", {"error": str(e)}
 
     def unpair_selected_from_menu(self):
         if not self.require_network_for_write("Unpairing device"):
@@ -5191,6 +5818,7 @@ class DashboardWindow(QWidget):
         if not device_id:
             self.show_error("No device", "Select a device first.")
             return
+        busy = self.begin_button_busy(getattr(self, "btn_unpair_selected", None), "Unpairing...")
         try:
             self.selected_pair_device_id = device_id
             self.db.unpair_device(device_id)
@@ -5210,6 +5838,8 @@ class DashboardWindow(QWidget):
             self.show_info("Unpaired", f"{device_id} was unpaired.")
         except Exception as e:
             self.show_error("Unpair failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     # ---------------------------- highlights ----------------------------
 
@@ -5449,10 +6079,11 @@ class DashboardWindow(QWidget):
 
         payload = self.build_gateway_payload(device_id)
 
+        busy = self.begin_button_busy(getattr(self, "btn_send_text", None), "Sending...")
         try:
             result = self.gateway.send_text(self.base_url(), payload)
             success = result["status_code"] == 200
-            message = "Text update sent successfully" if success else f"Text update failed ({result['status_code']})"
+            message = "Text update sent successfully" if success else self.result_error_message(result, "Text update failed.")
 
             self.db.log_update(
                 "send_text",
@@ -5473,7 +6104,7 @@ class DashboardWindow(QWidget):
             if success:
                 self.show_info("Success", message)
             else:
-                self.show_error("Send failed", f"{message}\n\n{result['body']}")
+                self.show_error("Send failed", message)
 
         except Exception as e:
             self.db.log_update(
@@ -5490,6 +6121,8 @@ class DashboardWindow(QWidget):
             )
             self.load_recent_logs()
             self.show_error("Network Error", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def send_lcd_command(self, command, device_id=None):
         if not self.require_network_for_write("Sending LCD command"):
@@ -5498,21 +6131,31 @@ class DashboardWindow(QWidget):
         if not device_id:
             self.show_error("No device", "Please select a paired device first.")
             return
+        is_global_target = str(device_id).lower() == "all"
+        target_label = "all LCD devices" if is_global_target else str(device_id)
         payload = {"device_id": device_id, "command": command}
+        button = self.btn_lcd_on if command == "on" else self.btn_lcd_off
+        busy = self.begin_button_busy(button, f"LCD {command.upper()}...")
         try:
             result = self.gateway.send_lcd_command(self.base_url(), device_id, command)
-            success = result["status_code"] == 200
             response = result["body"]
-            message = f"LCD {command.upper()} command sent" if success else f"LCD command failed ({result['status_code']})"
+            success = result["status_code"] == 200 and not (isinstance(response, dict) and response.get("ok") is False)
+            message = (
+                f"LCD {command.upper()} command sent to {target_label}."
+                if success
+                else self.result_error_message(result, "LCD command failed.")
+            )
         except Exception as e:
             success = False
             response = {"error": str(e)}
-            message = f"LCD command queued for review: {e}"
+            message = f"LCD command could not be completed. {friendly_error_message(str(e))}"
+        finally:
+            self.end_button_busy(busy)
         self.db.log_update(
             "lcd_command",
             self.selected_resident_id,
             self.current_resident_uid(),
-            device_id,
+            "ALL" if is_global_target else device_id,
             self.current_user.get("id"),
             self.current_user.get("username"),
             payload,
@@ -5550,19 +6193,23 @@ class DashboardWindow(QWidget):
             "has_image": False,
             "device_ids": [d.get("device_id") for d in devices],
         }
+        busy = self.begin_button_busy(getattr(self, "btn_save_schedule", None), "Saving...")
         try:
             result = self.gateway.save_schedule(self.base_url(), payload)
-            success = result["status_code"] == 200
+            body = result["body"]
+            success = result["status_code"] == 200 and not (isinstance(body, dict) and body.get("ok") is False)
             responses = [{"device_id": "all", "status_code": result["status_code"], "body": result["body"]}]
             message = (
                 f"Global LCD schedule saved for {len(devices)} device(s)."
                 if success
-                else f"Global LCD schedule failed ({result['status_code']})."
+                else self.result_error_message(result, "Global LCD schedule failed.")
             )
         except Exception as e:
             success = False
             responses = [{"device_id": "all", "error": str(e)}]
-            message = f"Global LCD schedule could not be saved: {e}"
+            message = f"Global LCD schedule could not be saved. {friendly_error_message(str(e))}"
+        finally:
+            self.end_button_busy(busy)
 
         self.db.log_update(
             "save_schedule",
@@ -5607,16 +6254,26 @@ class DashboardWindow(QWidget):
     def clear_lcd_image(self):
         self.set_resident_photo_path(None)
 
-    def send_image(self):
+    def send_image(self, busy_button=None):
+        if isinstance(busy_button, bool):
+            busy_button = None
         if not self.require_network_for_write("Sending LCD image"):
             return
         if not self.selected_resident_id:
             self.show_error("No resident", "Select or save a resident first.")
             return
 
-        device_id = self.selected_device_id()
+        from_resident_record = busy_button is getattr(self, "btn_send_resident_photo", None)
+        row = self.db.get_resident(self.selected_resident_id) or {}
+        if from_resident_record:
+            device_id = self.find_paired_device_id_for_resident(row)
+        else:
+            device_id = self.selected_device_id() or self.find_paired_device_id_for_resident(row)
         if not device_id:
-            self.show_error("No device", "Please select a device.")
+            if from_resident_record:
+                self.show_error("No paired device", "Pair this resident to a device before sending the attached photo.")
+            else:
+                self.show_error("No device", "Please select a device or pair this resident first.")
             return
 
         if not self.selected_image_path or not os.path.isfile(self.selected_image_path):
@@ -5625,47 +6282,42 @@ class DashboardWindow(QWidget):
 
         payload = {"device_id": device_id, "image_path": self.selected_image_path}
 
+        button = busy_button or getattr(self, "btn_send_image", None)
+        busy = self.begin_button_busy(button, "Sending...")
+        task = {
+            "row": dict(row or {}),
+            "device_id": device_id,
+            "payload": payload,
+            "image_path": self.selected_image_path,
+            "action_type": "send_image",
+            "label": "LCD photo",
+            "busy_state": busy,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "success_title": "LCD Photo",
+            "failure_title": "LCD Photo",
+            "user_id": self.current_user.get("id"),
+            "username": self.current_user.get("username"),
+            "server_mode": self.server_mode,
+            "base_url": self.base_url(),
+        }
+        threading.Thread(target=self._resident_photo_worker, args=(task,), daemon=True).start()
+
+    def _resident_photo_worker(self, task):
         try:
-            result = self.gateway.send_image(self.base_url(), device_id, self.selected_image_path)
-            success = result["status_code"] == 200
-            message = "Image sent successfully" if success else f"Image send failed ({result['status_code']})"
-
-            self.db.log_update(
-                "send_image",
-                self.selected_resident_id,
-                self.current_resident_uid(),
-                device_id,
-                self.current_user.get("id"),
-                self.current_user.get("username"),
-                payload,
-                result["body"],
-                success,
-                message
-            )
-
-            self.load_recent_logs()
-            self.refresh_devices()
-
-            if success:
-                self.show_info("Success", message)
-            else:
-                self.show_error("Send failed", f"{message}\n\n{result['body']}")
-
-        except Exception as e:
-            self.db.log_update(
-                "send_image",
-                self.selected_resident_id,
-                self.current_resident_uid(),
-                device_id,
-                self.current_user.get("id"),
-                self.current_user.get("username"),
-                payload,
-                {"error": str(e)},
-                False,
-                str(e)
-            )
-            self.load_recent_logs()
-            self.show_error("Network Error", str(e))
+            gateway = ServerGatewayClient() if task.get("server_mode") else GatewayClient()
+            result = gateway.send_image(task.get("base_url"), task.get("device_id"), task.get("image_path"))
+            body = result.get("body") or {}
+            success = result.get("status_code") == 200 and not (isinstance(body, dict) and body.get("ok") is False)
+            message = "Resident photo sent to LCD successfully." if success else self.result_error_message(result, "LCD photo send failed.")
+            task.update({"success": success, "message": message, "response": body})
+        except Exception as exc:
+            task.update({
+                "success": False,
+                "message": f"LCD photo could not finish. {friendly_error_message(str(exc))}",
+                "response": {"error": str(exc)},
+            })
+        self.resident_display_finished.emit(task)
 
     # ---------------------------- logs ----------------------------
 
