@@ -19,7 +19,7 @@ static const char* DEFAULT_WIFI_SSID = "EPD-GATEWAY";
 static const char* DEFAULT_WIFI_PASS = "epaper123";
 static const char* DEFAULT_PI_HOST = "192.168.4.1";
 static const uint16_t DEFAULT_PI_PORT = 5000;
-static const uint8_t FIRMWARE_VERSION = 17;
+static const uint8_t FIRMWARE_VERSION = 19;
 static const uint32_t WIFI_RETRY_MS = 15000;
 static const uint32_t WIFI_CONNECT_GRACE_MS = 20000;
 static const uint32_t PI_RETRY_MS = 3000;
@@ -795,6 +795,31 @@ public:
   }
 };
 
+static void reclaimEpaperBus() {
+  stage("epaper: reclaim bus");
+  digitalWrite(LCD_CS_PIN, HIGH);
+  tft.releaseBus();
+  delay(5);
+
+  pinMode(LCD_CS_PIN, OUTPUT);
+  digitalWrite(LCD_CS_PIN, HIGH);
+  pinMode(EPD_CS_PIN, OUTPUT);
+  pinMode(EPD_DC_PIN, OUTPUT);
+  pinMode(EPD_RST_PIN, OUTPUT);
+  pinMode(EPD_BUSY_PIN, INPUT);
+  pinMode(SHARED_SPI_SCLK_PIN, OUTPUT);
+  pinMode(SHARED_SPI_MOSI_PIN, OUTPUT);
+#if D_9PIN
+  pinMode(EPD_PWR_PIN, OUTPUT);
+  digitalWrite(EPD_PWR_PIN, HIGH);
+#endif
+  digitalWrite(EPD_CS_PIN, HIGH);
+  digitalWrite(EPD_DC_PIN, LOW);
+  digitalWrite(SHARED_SPI_SCLK_PIN, LOW);
+  digitalWrite(SHARED_SPI_MOSI_PIN, LOW);
+  delay(10);
+}
+
 // ================= E-PAPER DISPLAY =================
 static void displayFromData(const DisplayData& d) {
   EpaperBusyScope epaperBusyScope;
@@ -804,7 +829,7 @@ static void displayFromData(const DisplayData& d) {
   if (gLcdImageStored) {
     releaseLcdImageBuffer();
   }
-  digitalWrite(LCD_CS_PIN, HIGH);
+  reclaimEpaperBus();
 
   stage("epaper: init");
   EPD_3IN6E_Init();
@@ -887,6 +912,7 @@ static void displayFromData(const DisplayData& d) {
 
 // ================= LCD DISPLAY =================
 static void hardResetLcdController();
+static void reclaimLcdSpiBus();
 static void prepareLcdController(bool hardReset);
 
 static void initLCD() {
@@ -922,9 +948,27 @@ static void hardResetLcdController() {
   delay(160);
 }
 
-static void prepareLcdController(bool hardReset) {
+static void reclaimLcdSpiBus() {
   digitalWrite(EPD_CS_PIN, HIGH);
   digitalWrite(LCD_CS_PIN, HIGH);
+  pinMode(EPD_CS_PIN, OUTPUT);
+  pinMode(LCD_CS_PIN, OUTPUT);
+  pinMode(LCD_DC_PIN, OUTPUT);
+  pinMode(SHARED_SPI_SCLK_PIN, OUTPUT);
+  pinMode(SHARED_SPI_MOSI_PIN, OUTPUT);
+  digitalWrite(EPD_CS_PIN, HIGH);
+  digitalWrite(LCD_CS_PIN, HIGH);
+  digitalWrite(LCD_DC_PIN, HIGH);
+  digitalWrite(SHARED_SPI_SCLK_PIN, LOW);
+  digitalWrite(SHARED_SPI_MOSI_PIN, LOW);
+
+  tft.releaseBus();
+  delay(5);
+  tft.initBus();
+}
+
+static void prepareLcdController(bool hardReset) {
+  reclaimLcdSpiBus();
   if (hardReset) {
     stage("lcd: hard reset");
     hardResetLcdController();
