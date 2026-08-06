@@ -1,7 +1,7 @@
 [Setup]
 AppId={{A4C5B8D4-7E5E-4E41-9D1B-1D3F5C1A9A11}
 AppName=Enhanced Living Whisperwood
-AppVersion=2.1.2
+AppVersion=2.1.3
 AppPublisher=Enhanced Living Whisperwood
 DefaultDirName={localappdata}\Programs\Enhanced Living Whisperwood
 DefaultGroupName=Enhanced Living Whisperwood
@@ -12,6 +12,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 UsePreviousAppDir=no
+ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=assets\enhanced_living_whisperwood_icon.ico
 UninstallDisplayIcon={app}\WhisperwoodVilla.exe
 

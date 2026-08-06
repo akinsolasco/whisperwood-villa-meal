@@ -1,6 +1,5 @@
-import time
-
 from PyQt6 import QtCore, QtGui, QtWidgets
+import time
 
 from config import APP_NAME, APP_VERSION, ASSETS_DIR
 from core.updater import UpdaterService

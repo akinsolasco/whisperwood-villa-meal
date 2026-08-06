@@ -4,6 +4,7 @@ import os
 import sqlite3
 import uuid
 from datetime import datetime
+from core.time_utils import format_readable_datetime
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
@@ -390,7 +391,7 @@ class DatabaseService:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (%s, %s, %s, %s, %s, TRUE)
-                """, ("Whisperwood Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection.",))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection.",))
         else:
             cur.execute("""
             CREATE TABLE IF NOT EXISTS control_service_profiles (
@@ -422,7 +423,7 @@ class DatabaseService:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (?, ?, ?, ?, ?, 1)
-                """, ("Whisperwood Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
 
     def _add_resident_columns(self, cur):
         existing = {row["name"] for row in cur.execute("PRAGMA table_info(residents)").fetchall()}
@@ -1140,12 +1141,12 @@ class DatabaseService:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (%s, %s, %s, %s, %s, TRUE)
-                """, ("Whisperwood Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
             else:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (?, ?, ?, ?, ?, 1)
-                """, ("Whisperwood Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
             self.conn.commit()
             cur.close()
             rows = self.list_control_profiles()
@@ -1308,6 +1309,4 @@ class DatabaseService:
 
     @staticmethod
     def format_timestamp(value):
-        if isinstance(value, datetime):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-        return str(value or "")
+        return format_readable_datetime(value)
