@@ -29,15 +29,20 @@ HEARTBEAT_INTERVAL_S = int(os.getenv("WHISPERWOOD_HEARTBEAT_INTERVAL_S", "5"))
 ACK_TIMEOUT_S = int(os.getenv("WHISPERWOOD_ACK_TIMEOUT_S", "90"))
 FIRMWARE_ACK_TIMEOUT_S = int(os.getenv("WHISPERWOOD_FIRMWARE_ACK_TIMEOUT_S", "360"))
 IMAGE_RESYNC_COOLDOWN_S = int(os.getenv("WHISPERWOOD_IMAGE_RESYNC_COOLDOWN_S", "60"))
+SCHEDULE_TICK_INTERVAL_S = int(os.getenv("WHISPERWOOD_SCHEDULE_TICK_INTERVAL_S", "5"))
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
 
-app = FastAPI(title="Whisperwood Operation Manager", version="0.3.7")
+app = FastAPI(title="Whisperwood Operation Manager", version="0.3.8")
 
 
 def utc_now() -> str:
     return datetime.utcnow().isoformat()
+
+
+def local_now() -> datetime:
+    return datetime.now().astimezone()
 
 
 def wall_time() -> str:
@@ -248,6 +253,7 @@ SEQ = 1
 SERVER_STARTED = False
 SERVER_SOCKET: Optional[socket.socket] = None
 SCHEDULE_STATE: Dict[str, Any] = {}
+SCHEDULE_LAST_FIRE = ""
 
 
 def next_seq() -> int:
@@ -560,30 +566,67 @@ def parse_schedule_time(value: Any) -> Optional[str]:
     return None
 
 
+def schedule_due_command(state: Dict[str, Any], now_dt: Optional[datetime] = None) -> Optional[str]:
+    now_dt = now_dt or local_now()
+    now_hm = now_dt.strftime("%H:%M")
+    if parse_schedule_time(state.get("lcd_on_time")) == now_hm:
+        return "on"
+    if parse_schedule_time(state.get("lcd_off_time")) == now_hm:
+        return "off"
+    return None
+
+
+def fire_schedule_if_due(state: Dict[str, Any], reason: str = "timer") -> Optional[Dict[str, Any]]:
+    global SCHEDULE_LAST_FIRE
+    if not state.get("enabled"):
+        return None
+
+    now_dt = local_now()
+    command = schedule_due_command(state, now_dt)
+    if not command:
+        return None
+
+    fire_key = f"{now_dt.strftime('%Y-%m-%d')}:{now_dt.strftime('%H:%M')}:{command}"
+    with LOCK:
+        if fire_key == SCHEDULE_LAST_FIRE:
+            return {"ok": True, "skipped": True, "reason": "already fired this minute", "fire_key": fire_key}
+        SCHEDULE_LAST_FIRE = fire_key
+
+    target = state.get("device_id") or "all"
+    try:
+        result = send_lcd_to_target(target, command)
+        print(
+            f"[{wall_time()}] schedule fired command={command} target={target} reason={reason} "
+            f"local_time={now_dt.isoformat(timespec='seconds')}",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "fired": True,
+            "command": command,
+            "target": target,
+            "reason": reason,
+            "server_time": now_dt.isoformat(timespec="seconds"),
+            "result": result,
+        }
+    except Exception as exc:
+        print(f"[{wall_time()}] schedule LCD {command} failed: {exc}", flush=True)
+        return {
+            "ok": False,
+            "fired": True,
+            "command": command,
+            "target": target,
+            "reason": reason,
+            "server_time": now_dt.isoformat(timespec="seconds"),
+            "error": str(exc),
+        }
+
+
 def schedule_loop() -> None:
-    last_fire = ""
     while True:
-        time.sleep(20)
+        time.sleep(SCHEDULE_TICK_INTERVAL_S)
         state = SCHEDULE_STATE or load_schedule_state()
-        if not state.get("enabled"):
-            continue
-        now_hm = datetime.now().strftime("%H:%M")
-        date_key = datetime.now().strftime("%Y-%m-%d")
-        command = None
-        if parse_schedule_time(state.get("lcd_on_time")) == now_hm:
-            command = "on"
-        elif parse_schedule_time(state.get("lcd_off_time")) == now_hm:
-            command = "off"
-        if not command:
-            continue
-        fire_key = f"{date_key}:{now_hm}:{command}"
-        if fire_key == last_fire:
-            continue
-        last_fire = fire_key
-        try:
-            send_lcd_to_target(state.get("device_id") or "all", command)
-        except Exception as exc:
-            print(f"[{wall_time()}] schedule LCD {command} failed: {exc}", flush=True)
+        fire_schedule_if_due(state, "timer")
 
 
 def start_background_threads() -> None:
@@ -833,6 +876,12 @@ def send_lcd_to_device(device_id: str, command: str) -> Dict[str, Any]:
     command = str(command or "").strip().lower()
     if command not in {"on", "off"}:
         raise HTTPException(status_code=400, detail="command must be on or off")
+    if st.pending_seq is not None or st.epaper_busy:
+        raise HTTPException(status_code=409, detail="E-paper is updating; wait before sending an LCD command.")
+    if st.pending_img_seq is not None:
+        raise HTTPException(status_code=409, detail="LCD photo is updating; wait before sending an LCD command.")
+    if st.pending_lcd_seq is not None:
+        raise HTTPException(status_code=409, detail=f"LCD command already pending: pending_lcd_seq={st.pending_lcd_seq}")
     line = f"LCD seq={seq} cmd={enc_spaces(command)}"
     event = create_ack(st, "lcd", seq)
     try:
@@ -959,8 +1008,9 @@ def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "service": "operation",
-        "version": "0.3.7",
+        "version": "0.3.8",
         "time": utc_now(),
+        "local_time": local_now().isoformat(timespec="seconds"),
         "tcp_host": HOST,
         "tcp_port": TCP_PORT,
         "connected_devices": connected,
@@ -997,7 +1047,14 @@ def lcd(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
 @app.post("/schedule")
 def schedule(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
     state = save_schedule_state(body or {})
-    return {"ok": True, "schedule": state, "message": "Global LCD schedule saved in Operation Manager"}
+    due_result = fire_schedule_if_due(state, "save")
+    return {
+        "ok": True,
+        "schedule": state,
+        "server_time": local_now().isoformat(timespec="seconds"),
+        "due_result": due_result,
+        "message": "Global LCD schedule saved in Operation Manager",
+    }
 
 
 @app.post("/firmware/ota")

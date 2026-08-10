@@ -20,7 +20,7 @@ static const char* DEFAULT_WIFI_SSID = "EPD-GATEWAY";
 static const char* DEFAULT_WIFI_PASS = "epaper123";
 static const char* DEFAULT_PI_HOST = "192.168.4.1";
 static const uint16_t DEFAULT_PI_PORT = 5000;
-static const uint8_t FIRMWARE_VERSION = 18;
+static const uint8_t FIRMWARE_VERSION = 20;
 static const uint32_t WIFI_RETRY_MS = 15000;
 static const uint32_t WIFI_CONNECT_GRACE_MS = 20000;
 static const uint32_t PI_RETRY_MS = 3000;
@@ -108,6 +108,7 @@ LGFX tft;
 
 uint16_t* lcdImageBuf = nullptr;
 static bool lcdPowerOn = true;
+static bool gLcdPrepared = false;
 static bool gEpaperActive = false;
 static unsigned long gEpaperGuardUntilMs = 0;
 
@@ -932,7 +933,10 @@ static void prepareLcdController(bool hardReset) {
     stage("lcd: hard reset");
     hardResetLcdController();
   }
-  tft.init();
+  if (hardReset || !gLcdPrepared) {
+    tft.init();
+    gLcdPrepared = true;
+  }
   tft.setRotation(1);
   tft.setSwapBytes(true);
   tft.wakeup();
@@ -1193,19 +1197,18 @@ static bool receiveImageToFlash(size_t totalBytes, uint32_t* checksumOut, const 
   return true;
 }
 
-static void displayLCDImage565(const uint16_t* img565) {
+static void displayLCDImage565(const uint16_t* img565, bool hardReset = false) {
   setLcdPower(true);
-  prepareLcdController(true);
+  prepareLcdController(hardReset);
   stage("lcd: pushImage");
   tft.startWrite();
-  tft.fillScreen(TFT_BLACK);
   tft.pushImage(0, 0, LCD_IMG_W, LCD_IMG_H, img565);
   tft.endWrite();
   tft.display();
   stage("lcd: done");
 }
 
-static bool displayLcdImageFromFlash(bool hardReset = true) {
+static bool displayLcdImageFromFlash(bool hardReset = false) {
   if (!gFsReady || !gLcdImageStored) return false;
 
   File f = LittleFS.open(LCD_IMAGE_PATH, "r");
@@ -1220,7 +1223,6 @@ static bool displayLcdImageFromFlash(bool hardReset = true) {
   prepareLcdController(hardReset);
   stage("lcd: pushImage flash");
   tft.startWrite();
-  tft.fillScreen(TFT_BLACK);
 
   uint16_t row[LCD_IMG_W];
   for (int y = 0; y < LCD_IMG_H; y++) {
@@ -1286,7 +1288,10 @@ static void handleImageLine(const char* line) {
   if (gFsReady) {
     if (receiveImageToFlash((size_t)size, &checksum, &err, 15000)) {
       Serial.printf("[LCD] image checksum=0x%08lX\n", (unsigned long)checksum);
-      bool shown = displayLcdImageFromFlash();
+      bool shown = displayLcdImageFromFlash(false);
+      if (!shown) {
+        shown = displayLcdImageFromFlash(true);
+      }
       releaseLcdImageBuffer();
       char ack[128];
       snprintf(
@@ -1328,7 +1333,7 @@ static void handleImageLine(const char* line) {
   checksum = checksumBytes((const uint8_t*)lcdImageBuf, LCD_IMG_BYTES);
   Serial.printf("[LCD] image checksum=0x%08lX\n", (unsigned long)checksum);
   bool persisted = saveLcdImageToFlash();
-  displayLCDImage565(lcdImageBuf);
+  displayLCDImage565(lcdImageBuf, false);
   if (persisted) {
     releaseLcdImageBuffer();
   }
@@ -1480,12 +1485,18 @@ static void handleLcdLine(const char* line) {
   decodeUnderscore(cmdBuf);
 
   if (strEqNoCase(cmdBuf, "on")) {
-    bool hasStoredImage = gLcdImageStored || lcdImageBuf;
     setLcdPower(true);
+    prepareLcdController(false);
+    tft.display();
+    bool restored = false;
     if (lcdImageBuf) {
-      displayLCDImage565(lcdImageBuf);
-    } else if (gLcdImageStored && displayLcdImageFromFlash()) {
-      hasStoredImage = true;
+      displayLCDImage565(lcdImageBuf, false);
+      restored = true;
+    } else if (gLcdImageStored) {
+      restored = displayLcdImageFromFlash(false);
+      if (!restored) {
+        restored = displayLcdImageFromFlash(true);
+      }
     } else {
       showLCDPlaceholder();
     }
@@ -1493,7 +1504,7 @@ static void handleLcdLine(const char* line) {
       releaseLcdImageBuffer();
     }
     char ack[96];
-    snprintf(ack, sizeof(ack), "ACKLCD seq=%ld ok=1 state=on lcd_image=%d\n", seq, hasStoredImage ? 1 : 0);
+    snprintf(ack, sizeof(ack), "ACKLCD seq=%ld ok=1 state=on lcd_image=%d\n", seq, restored ? 1 : 0);
     sendRawToPi(ack);
     return;
   }

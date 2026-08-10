@@ -2750,15 +2750,15 @@ class DashboardWindow(QWidget):
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
 
-        manual_title = QLabel("Manual LCD Control - All Devices", self.upd_left)
+        manual_title = QLabel("Manual LCD Control - Selected Device", self.upd_left)
         manual_title.setGeometry(22, 520, 260, 22)
         manual_title.setStyleSheet("font-size: 15px; font-weight: 800; color: white;")
 
-        self.btn_lcd_on = QPushButton("All LCDs ON", self.upd_left)
+        self.btn_lcd_on = QPushButton("Selected LCD ON", self.upd_left)
         self.btn_lcd_on.setGeometry(22, 550, 150, 40)
         self.btn_lcd_on.setStyleSheet(self.primary_btn_style())
 
-        self.btn_lcd_off = QPushButton("All LCDs OFF", self.upd_left)
+        self.btn_lcd_off = QPushButton("Selected LCD OFF", self.upd_left)
         self.btn_lcd_off.setGeometry(184, 550, 150, 40)
         self.btn_lcd_off.setStyleSheet(self.secondary_btn_style())
 
@@ -3015,8 +3015,8 @@ class DashboardWindow(QWidget):
         self.btn_preview.clicked.connect(self.update_preview)
         self.btn_send_text.clicked.connect(self.send_text_update)
         self.upd_target.currentIndexChanged.connect(lambda _index: self.on_update_target_changed())
-        self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on", "all"))
-        self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off", "all"))
+        self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
+        self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
         self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
         self.btn_refresh_approvals.clicked.connect(self.load_approvals)
         self.approval_table.cellClicked.connect(lambda row, _col: self.show_approval_detail(row))
@@ -7057,11 +7057,16 @@ class DashboardWindow(QWidget):
             body = result["body"]
             success = result["status_code"] == 200 and not (isinstance(body, dict) and body.get("ok") is False)
             responses = [{"device_id": "all", "status_code": result["status_code"], "body": result["body"]}]
-            message = (
-                f"Global LCD schedule saved for {len(devices)} device(s)."
-                if success
-                else self.result_error_message(result, "Global LCD schedule failed.")
-            )
+            if success:
+                message = f"Global LCD schedule saved for {len(devices)} device(s)."
+                if isinstance(body, dict):
+                    if body.get("server_time"):
+                        message += f"\nPi local time: {body.get('server_time')}"
+                    due_result = body.get("due_result") or {}
+                    if isinstance(due_result, dict) and due_result.get("fired"):
+                        message += f"\nImmediate LCD {str(due_result.get('command') or '').upper()} command fired."
+            else:
+                message = self.result_error_message(result, "Global LCD schedule failed.")
         except Exception as e:
             success = False
             responses = [{"device_id": "all", "error": str(e)}]
