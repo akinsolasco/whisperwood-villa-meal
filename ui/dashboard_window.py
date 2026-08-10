@@ -4883,7 +4883,16 @@ class DashboardWindow(QWidget):
         except Exception as exc:
             raise RuntimeError("pyserial is not installed. Install/update the desktop app before provisioning ESP32 WiFi.") from exc
         try:
-            ser = serial.Serial(port=port, baudrate=115200, timeout=0.45, write_timeout=4)
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = 115200
+            ser.timeout = 0.45
+            ser.write_timeout = 4
+            # Set modem lines before opening so Windows is less likely to reset
+            # the ESP32 before the provisioning command is sent.
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
         except Exception as exc:
             detail = str(exc)
             lowered = detail.lower()
@@ -4931,7 +4940,8 @@ class DashboardWindow(QWidget):
             time.sleep(1.2)
         raise RuntimeError(
             "Windows opened the USB serial port, but the ESP32 did not accept the command. "
-            "Flash the latest provisioning firmware or select the correct ESP32 COM port."
+            "Close Arduino Serial Monitor/Plotter and try again. If the port only shows ESP-ROM boot text, "
+            "reflash the ESP32 with USB CDC On Boot enabled so the app can see WWREADY and WWSCAN over USB."
         ) from last_error
 
     def _read_esp32_lines(self, ser, end_markers, timeout_s=12):
@@ -4953,10 +4963,36 @@ class DashboardWindow(QWidget):
     def _esp32_serial_transaction(self, command, end_markers, timeout_s=12, ready_timeout_s=8):
         with self._open_esp32_serial() as ser:
             boot_lines = self._wait_for_esp32_usb_ready(ser, timeout_s=ready_timeout_s)
-            ser.reset_input_buffer()
-            self._write_esp32_command(ser, command)
-            response_lines = self._read_esp32_lines(ser, end_markers, timeout_s=timeout_s)
+            try:
+                ser.reset_input_buffer()
+                self._write_esp32_command(ser, command)
+                response_lines = self._read_esp32_lines(ser, end_markers, timeout_s=timeout_s)
+            except Exception as exc:
+                boot_text = " | ".join(boot_lines[-6:])
+                if any(line.startswith("ESP-ROM") or "SPI_FAST_FLASH_BOOT" in line for line in boot_lines):
+                    raise RuntimeError(
+                        "COM port opened, but the Whisperwood ESP32 provisioning prompt was not available. "
+                        "The port is showing ESP32 boot text instead of WWREADY/WWCFG. Reflash the ESP32 firmware "
+                        "with USB CDC On Boot enabled, then close Arduino Serial Monitor before scanning. "
+                        f"Last USB text: {boot_text or exc}"
+                    ) from exc
+                raise
         return boot_lines + response_lines
+
+    def _friendly_esp32_serial_error(self, exc):
+        detail = str(exc or "").strip()
+        lowered = detail.lower()
+        if "wwready" in lowered or "wwcfg" in lowered or "esp-rom" in lowered or "usb cdc" in lowered:
+            return detail
+        if "write timeout" in lowered or "did not accept the command" in lowered:
+            return (
+                "The ESP32 USB port opened, but it did not accept the provisioning command. "
+                "Close Arduino Serial Monitor/Plotter and try again. If COM9 shows only ESP-ROM boot text, "
+                "reflash the ESP32 with USB CDC On Boot enabled."
+            )
+        if "access is denied" in lowered or "permission" in lowered or "busy" in lowered:
+            return detail
+        return detail or "The ESP32 did not respond over USB."
 
     def _serial_value(self, value):
         from urllib.parse import quote
@@ -4967,7 +5003,7 @@ class DashboardWindow(QWidget):
         self.set_esp32_provisioning_busy(True)
         self.set_esp32_wifi_status("Scanning WiFi from ESP32 over USB... keep the board plugged in.", "pending")
         try:
-            lines = self._esp32_serial_transaction("WWSCAN\n", ("WWEND", "WWERR"), timeout_s=22, ready_timeout_s=8)
+            lines = self._esp32_serial_transaction("WWSCAN\n", ("WWEND", "WWERR"), timeout_s=22, ready_timeout_s=12)
             err_line = next((line for line in lines if line.startswith("WWERR")), "")
             if err_line:
                 raise RuntimeError(f"The ESP32 returned an error during WiFi scan. {err_line}")
@@ -5000,7 +5036,7 @@ class DashboardWindow(QWidget):
                     "The ESP32 did not return any WiFi networks. Keep it plugged in, confirm the latest ESP32 firmware is flashed, then try Scan WiFi again."
                 )
         except Exception as exc:
-            message = friendly_error_message(str(exc))
+            message = self._friendly_esp32_serial_error(exc)
             self.set_esp32_wifi_status(f"WiFi scan failed. {message}", "error")
             self.show_error("WiFi Scan Failed", message)
         finally:
@@ -5035,7 +5071,7 @@ class DashboardWindow(QWidget):
         self.set_esp32_provisioning_busy(True)
         self.set_esp32_wifi_status(f"Saving WiFi '{ssid}' to ESP32 and waiting for acknowledgement...", "pending")
         try:
-            lines = self._esp32_serial_transaction(command, ("WWOK", "WWERR"), timeout_s=16, ready_timeout_s=8)
+            lines = self._esp32_serial_transaction(command, ("WWOK", "WWERR"), timeout_s=16, ready_timeout_s=12)
             ok = any(line.startswith("WWOK") for line in lines)
             detail = " | ".join(lines[-4:]) if lines else "No response from ESP32."
             if ok:
@@ -5047,7 +5083,7 @@ class DashboardWindow(QWidget):
                 self.set_esp32_wifi_status(message, "error")
                 self.show_error("ESP32 WiFi", message)
         except Exception as exc:
-            message = friendly_error_message(str(exc))
+            message = self._friendly_esp32_serial_error(exc)
             self.set_esp32_wifi_status(f"Provision failed. {message}", "error")
             self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Failed", message)
             self.show_error("ESP32 WiFi Failed", message)
