@@ -1220,7 +1220,7 @@ def health():
     return {
         "ok": True,
         "service": "control",
-        "version": "0.6.2",
+        "version": "0.6.3",
         "hostname": platform.node(),
         "time": now(),
         "uptime": f"{uptime_s}s",
@@ -2202,7 +2202,7 @@ def bootstrap_info(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     return {
         "ok": True,
-        "version": "0.6.2",
+        "version": "0.6.3",
         "database_user": "whisperwood_app",
         "default_users": [
             {"username": "admin", "password": "admin123", "role": "admin"},
