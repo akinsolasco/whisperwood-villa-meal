@@ -88,3 +88,11 @@ class GatewayClient:
         except Exception:
             body = {"raw": r.text}
         return {"status_code": r.status_code, "body": body}
+
+    def delete_schedule(self, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        r = self.session.delete(f"{base_url.rstrip('/')}/schedule", json=payload, timeout=8)
+        try:
+            body = r.json()
+        except Exception:
+            body = {"raw": r.text}
+        return {"status_code": r.status_code, "body": body}

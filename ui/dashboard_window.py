@@ -69,6 +69,7 @@ class DashboardWindow(QWidget):
         self.selected_audit_log: Optional[Dict[str, Any]] = None
         self.rules: List[HighlightRule] = []
         self.global_schedule_enabled = False
+        self.global_schedule_saved = False
         self.global_schedule_on = "07:00"
         self.global_schedule_off = "20:00"
         self.global_schedule_sleep_if_no_image = False
@@ -2911,6 +2912,10 @@ class DashboardWindow(QWidget):
         self.btn_save_schedule.setGeometry(18, 102, 190, 40)
         self.btn_save_schedule.setStyleSheet(self.primary_btn_style())
 
+        self.btn_delete_schedule = QPushButton("Delete Schedule", self.schedule_panel)
+        self.btn_delete_schedule.setGeometry(18, 148, 190, 36)
+        self.btn_delete_schedule.setStyleSheet(self.secondary_btn_style())
+
         self.schedule_table = QTableWidget(self.schedule_panel)
         self.schedule_table.setGeometry(225, 96, 370, 88)
         self.schedule_table.setColumnCount(4)
@@ -3018,6 +3023,7 @@ class DashboardWindow(QWidget):
         self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
         self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
         self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
+        self.btn_delete_schedule.clicked.connect(self.delete_lcd_schedule)
         self.btn_refresh_approvals.clicked.connect(self.load_approvals)
         self.approval_table.cellClicked.connect(lambda row, _col: self.show_approval_detail(row))
         self.btn_approve_request.clicked.connect(lambda: self.review_selected_request("APPROVED"))
@@ -3124,6 +3130,32 @@ class DashboardWindow(QWidget):
 
     def schedule_off_time(self):
         return self.schedule_off.time().toString("HH:mm")
+
+    def sync_global_schedule_from_backend(self):
+        if not self.server_mode or not getattr(self, "control_service_online", False):
+            return
+        try:
+            rows = self.db.get_schedule_rows()
+        except Exception:
+            return
+        global_row = next(
+            (
+                row for row in rows
+                if str(row.get("device_id") or "").strip().lower() == "all"
+                and row.get("id") in (None, "", 0)
+            ),
+            None,
+        )
+        if not global_row:
+            self.global_schedule_saved = False
+            self.global_schedule_enabled = False
+            return
+
+        self.global_schedule_saved = True
+        self.global_schedule_enabled = bool(global_row.get("lcd_schedule_enabled") or global_row.get("enabled"))
+        self.global_schedule_on = str(global_row.get("lcd_on_time") or self.global_schedule_on or "07:00")
+        self.global_schedule_off = str(global_row.get("lcd_off_time") or self.global_schedule_off or "20:00")
+        self.global_schedule_sleep_if_no_image = self.truthy(global_row.get("sleep_if_no_image"))
 
     def current_resident_uid(self):
         return self.txt_uid.text().strip() or None
@@ -3464,6 +3496,7 @@ class DashboardWindow(QWidget):
             "btn_lcd_on": device_write,
             "btn_lcd_off": device_write,
             "btn_save_schedule": device_write,
+            "btn_delete_schedule": device_write,
             "btn_approve_request": self.is_nurse_admin(),
             "btn_reject_request": self.is_nurse_admin(),
             "btn_mark_verified": self.is_nurse_admin() or self.is_verifier(),
@@ -3633,6 +3666,7 @@ class DashboardWindow(QWidget):
     def load_schedule_view(self):
         if not hasattr(self, "schedule_resident"):
             return
+        self.sync_global_schedule_from_backend()
         self.schedule_resident.blockSignals(True)
         self.schedule_resident.clear()
         devices = self.safe_get_devices()
@@ -3646,9 +3680,13 @@ class DashboardWindow(QWidget):
         self.schedule_off.setTime(QTime.fromString(self.global_schedule_off, "HH:mm"))
 
         self.schedule_table.setRowCount(len(devices))
-        enabled_text = "Enabled" if self.global_schedule_enabled else "Off"
-        rule_text = "Sleep if no image" if self.global_schedule_sleep_if_no_image else "No forced sleep"
-        time_text = f"{enabled_text}: {self.global_schedule_on} - {self.global_schedule_off}"
+        if self.global_schedule_saved:
+            enabled_text = "Enabled" if self.global_schedule_enabled else "Disabled"
+            rule_text = "Sleep if no image" if self.global_schedule_sleep_if_no_image else "No forced sleep"
+            time_text = f"{enabled_text}: {self.global_schedule_on} - {self.global_schedule_off}"
+        else:
+            rule_text = "No saved schedule"
+            time_text = "No saved schedule"
         for r, row in enumerate(devices):
             values = [
                 row.get("device_id") or "",
@@ -7036,6 +7074,7 @@ class DashboardWindow(QWidget):
             return
 
         self.global_schedule_enabled = self.chk_schedule_enabled.isChecked()
+        self.global_schedule_saved = True
         self.global_schedule_on = self.schedule_on_time()
         self.global_schedule_off = self.schedule_off_time()
         self.global_schedule_sleep_if_no_image = self.chk_sleep_no_image.isChecked()
@@ -7090,6 +7129,63 @@ class DashboardWindow(QWidget):
                 "device_ids": [d.get("device_id") for d in devices],
             },
             responses,
+            success,
+            message,
+        )
+        self.load_schedule_view()
+        self.refresh_dashboard_summary()
+        self.load_recent_logs()
+        if success:
+            self.show_info("Schedule", message)
+        else:
+            self.show_error("Schedule", message)
+
+    def delete_lcd_schedule(self):
+        if not self.require_network_for_write("Deleting LCD schedule"):
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Delete LCD Schedule",
+            "Delete the saved global LCD schedule from the Raspberry Pi and backend database?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        payload = {"resident_id": None, "device_id": "all"}
+        busy = self.begin_button_busy(getattr(self, "btn_delete_schedule", None), "Deleting...")
+        try:
+            result = self.gateway.delete_schedule(self.base_url(), payload)
+            body = result["body"]
+            success = result["status_code"] == 200 and not (isinstance(body, dict) and body.get("ok") is False)
+            message = (
+                "Global LCD schedule deleted."
+                if success
+                else self.result_error_message(result, "Delete schedule failed.")
+            )
+        except Exception as e:
+            success = False
+            body = {"error": str(e)}
+            message = f"Global LCD schedule could not be deleted. {friendly_error_message(str(e))}"
+        finally:
+            self.end_button_busy(busy)
+
+        if success:
+            self.global_schedule_saved = False
+            self.global_schedule_enabled = False
+            self.chk_schedule_enabled.setChecked(False)
+
+        self.db.log_update(
+            "delete_schedule",
+            None,
+            "GLOBAL",
+            "ALL",
+            self.current_user.get("id"),
+            self.current_user.get("username"),
+            payload,
+            body,
             success,
             message,
         )

@@ -11,7 +11,7 @@ from email.message import EmailMessage
 from pathlib import Path
 import hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time
 
-app = FastAPI(title="Whisperwood Control Service", version="0.6.2")
+app = FastAPI(title="Whisperwood Control Service", version="0.6.3")
 STARTED_AT = datetime.utcnow()
 
 app.add_middleware(
@@ -500,7 +500,7 @@ def create_backup_archive(created_by: str = "system", upload_to_drive: bool = Tr
             "created_at": now(),
             "created_by": created_by or "system",
             "hostname": platform.node(),
-            "control_version": "0.6.2",
+            "control_version": "0.6.3",
             "database_url_configured": bool(DATABASE_URL),
         }
         (tmp_path / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -1491,6 +1491,45 @@ def save_schedule(payload: SchedulePayload, x_whisperwood_key: str | None = Head
         """, data)
     return {"ok": True}
 
+
+def delete_schedule_records(resident_id: Optional[int] = None, device_id: Optional[str] = "all") -> int:
+    if resident_id is not None:
+        result = db_exec("DELETE FROM schedules WHERE resident_id=:resident_id", {"resident_id": resident_id})
+        return int(result.rowcount or 0)
+
+    target = str(device_id or "all").strip()
+    if target and target.lower() != "all":
+        result = db_exec(
+            "DELETE FROM schedules WHERE resident_id IS NULL AND device_id=:device_id",
+            {"device_id": target},
+        )
+        return int(result.rowcount or 0)
+
+    result = db_exec("""
+        DELETE FROM schedules
+        WHERE resident_id IS NULL
+          AND COALESCE(device_id, '') IN ('', 'all')
+    """)
+    return int(result.rowcount or 0)
+
+
+@app.delete("/schedules")
+def delete_schedule(payload: Optional[dict] = Body(default=None), x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    data = dict(payload or {})
+    deleted = delete_schedule_records(data.get("resident_id"), data.get("device_id") or "all")
+    log_action(
+        "system",
+        "delete_schedule",
+        str(data.get("device_id") or "all"),
+        "success",
+        f"Deleted {deleted} saved schedule record(s)",
+        payload=data,
+        response={"deleted": deleted},
+    )
+    return {"ok": True, "deleted": deleted}
+
+
 @app.get("/dashboard/summary")
 def dashboard_summary(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
@@ -1988,6 +2027,30 @@ def operation_schedule(payload: Optional[dict] = Body(default=None), x_whisperwo
     except Exception:
         pass
     return result
+
+
+@app.delete("/operation/schedule")
+def operation_delete_schedule(payload: Optional[dict] = Body(default=None), x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    data = dict(payload or {})
+    result = operation_request("DELETE", "/schedule", timeout=15)
+    try:
+        deleted = delete_schedule_records(data.get("resident_id"), data.get("device_id") or "all")
+        result["database_deleted"] = deleted
+        log_action(
+            "system",
+            "delete_schedule",
+            str(data.get("device_id") or "all"),
+            "success",
+            f"Deleted global LCD schedule; database rows removed: {deleted}",
+            payload=data,
+            response=result,
+        )
+    except Exception as exc:
+        result["ok"] = False
+        result["database_delete_error"] = str(exc)
+    return result
+
 
 @app.post("/operation/resident-display")
 def operation_resident_display(payload: Optional[dict] = Body(default=None), x_whisperwood_key: str | None = Header(default=None)):

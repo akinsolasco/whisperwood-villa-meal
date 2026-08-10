@@ -34,7 +34,7 @@ SCHEDULE_TICK_INTERVAL_S = int(os.getenv("WHISPERWOOD_SCHEDULE_TICK_INTERVAL_S",
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
 
-app = FastAPI(title="Whisperwood Operation Manager", version="0.3.8")
+app = FastAPI(title="Whisperwood Operation Manager", version="0.3.9")
 
 
 def utc_now() -> str:
@@ -554,6 +554,19 @@ def save_schedule_state(payload: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
+def delete_schedule_state() -> Dict[str, Any]:
+    global SCHEDULE_STATE, SCHEDULE_LAST_FIRE
+    existed = bool(SCHEDULE_STATE) or os.path.exists(SCHEDULE_FILE)
+    SCHEDULE_STATE = {}
+    SCHEDULE_LAST_FIRE = ""
+    try:
+        if os.path.exists(SCHEDULE_FILE):
+            os.remove(SCHEDULE_FILE)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not delete saved LCD schedule: {exc}") from exc
+    return {"ok": True, "deleted": existed, "message": "Global LCD schedule deleted in Operation Manager"}
+
+
 def parse_schedule_time(value: Any) -> Optional[str]:
     raw = str(value or "").strip().lower().replace(".", "")
     if not raw:
@@ -1008,7 +1021,7 @@ def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "service": "operation",
-        "version": "0.3.8",
+        "version": "0.3.9",
         "time": utc_now(),
         "local_time": local_now().isoformat(timespec="seconds"),
         "tcp_host": HOST,
@@ -1055,6 +1068,13 @@ def schedule(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, A
         "due_result": due_result,
         "message": "Global LCD schedule saved in Operation Manager",
     }
+
+
+@app.delete("/schedule")
+def delete_schedule() -> Dict[str, Any]:
+    result = delete_schedule_state()
+    result["server_time"] = local_now().isoformat(timespec="seconds")
+    return result
 
 
 @app.post("/firmware/ota")

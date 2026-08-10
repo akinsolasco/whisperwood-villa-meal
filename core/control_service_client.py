@@ -268,6 +268,9 @@ class ControlServiceClient:
     def save_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/schedules", payload)
 
+    def delete_schedule(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("DELETE", "/schedules", payload or {})
+
     def get_dropdown_options(self) -> Dict[str, Any]:
         primary = self._request("GET", "/resident-dropdown-options")
         if primary.get("ok") or primary.get("status_code") not in {404, 405}:
@@ -371,6 +374,9 @@ class ControlServiceClient:
 
     def operation_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/operation/schedule", payload)
+
+    def operation_delete_schedule(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("DELETE", "/operation/schedule", payload or {})
 
     def operation_resident_display(self, resident_id: int, device_id: str = "") -> Dict[str, Any]:
         return self._request("POST", "/operation/resident-display", {

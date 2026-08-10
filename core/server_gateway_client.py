@@ -95,6 +95,15 @@ class ServerGatewayClient:
             "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},
         }
 
+    def delete_schedule(self, _base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.client(timeout=12.0).operation_delete_schedule(payload)
+        if not result.get("ok") and result.get("status_code") in {404, 405}:
+            result = self.client(timeout=8.0).delete_schedule(payload)
+        return {
+            "status_code": result.get("status_code") or (200 if result.get("ok") else 500),
+            "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},
+        }
+
     def send_resident_display(self, _base_url: str, resident_id: int, device_id: str = "") -> Dict[str, Any]:
         result = self.client(timeout=160.0).operation_resident_display(resident_id, device_id)
         return {
