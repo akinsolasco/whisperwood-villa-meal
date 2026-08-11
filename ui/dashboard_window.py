@@ -2752,15 +2752,15 @@ class DashboardWindow(QWidget):
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
 
-        manual_title = QLabel("Manual LCD Control - Selected Device", self.upd_left)
-        manual_title.setGeometry(22, 520, 260, 22)
+        manual_title = QLabel("Manual LCD Control", self.upd_left)
+        manual_title.setGeometry(22, 520, 220, 22)
         manual_title.setStyleSheet("font-size: 15px; font-weight: 800; color: white;")
 
-        self.btn_lcd_on = QPushButton("Selected LCD ON", self.upd_left)
+        self.btn_lcd_on = QPushButton("Turn LCD ON", self.upd_left)
         self.btn_lcd_on.setGeometry(22, 550, 150, 40)
         self.btn_lcd_on.setStyleSheet(self.primary_btn_style())
 
-        self.btn_lcd_off = QPushButton("Selected LCD OFF", self.upd_left)
+        self.btn_lcd_off = QPushButton("Turn LCD OFF", self.upd_left)
         self.btn_lcd_off.setGeometry(184, 550, 150, 40)
         self.btn_lcd_off.setStyleSheet(self.secondary_btn_style())
 
@@ -2881,52 +2881,54 @@ class DashboardWindow(QWidget):
         schedule_hint.setGeometry(18, 34, 500, 18)
         schedule_hint.setStyleSheet("font-size: 12px; color: #64748b;")
 
+        self.schedule_scope_label = QLabel("All LCD devices", self.schedule_panel)
+        self.schedule_scope_label.setGeometry(18, 62, 150, 22)
+        self.schedule_scope_label.setStyleSheet("font-size: 13px; color: #334155; font-weight: 800; background: transparent; border: none;")
+
         self.schedule_resident = QComboBox(self.schedule_panel)
-        self.schedule_resident.setGeometry(18, 58, 190, 38)
-        self.schedule_resident.setStyleSheet(self.input_style())
         self.schedule_resident.addItem("All LCD devices", "all")
-        self.schedule_resident.setEnabled(False)
+        self.schedule_resident.hide()
 
         self.chk_schedule_enabled = QCheckBox("Enabled", self.schedule_panel)
-        self.chk_schedule_enabled.setGeometry(220, 65, 84, 24)
+        self.chk_schedule_enabled.setGeometry(18, 88, 120, 24)
         self.chk_schedule_enabled.setStyleSheet(self.chk_active.styleSheet())
 
         on_label = QLabel("ON", self.schedule_panel)
-        on_label.setGeometry(314, 36, 30, 18)
+        on_label.setGeometry(166, 56, 30, 18)
         on_label.setStyleSheet(self.label_style())
 
         self.schedule_on = QTimeEdit(self.schedule_panel)
-        self.schedule_on.setGeometry(314, 58, 80, 38)
+        self.schedule_on.setGeometry(166, 78, 86, 38)
         self.schedule_on.setDisplayFormat("HH:mm")
         self.schedule_on.setTime(QTime(7, 0))
         self.schedule_on.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.schedule_on.setStyleSheet(self.input_style())
 
         off_label = QLabel("OFF", self.schedule_panel)
-        off_label.setGeometry(404, 36, 36, 18)
+        off_label.setGeometry(266, 56, 36, 18)
         off_label.setStyleSheet(self.label_style())
 
         self.schedule_off = QTimeEdit(self.schedule_panel)
-        self.schedule_off.setGeometry(404, 58, 80, 38)
+        self.schedule_off.setGeometry(266, 78, 86, 38)
         self.schedule_off.setDisplayFormat("HH:mm")
         self.schedule_off.setTime(QTime(20, 0))
         self.schedule_off.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.schedule_off.setStyleSheet(self.input_style())
 
         self.btn_add_schedule = QPushButton("Add Time", self.schedule_panel)
-        self.btn_add_schedule.setGeometry(496, 58, 100, 38)
+        self.btn_add_schedule.setGeometry(366, 78, 110, 38)
         self.btn_add_schedule.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_schedule = QPushButton("Save All Times", self.schedule_panel)
-        self.btn_save_schedule.setGeometry(18, 112, 150, 38)
+        self.btn_save_schedule.setGeometry(18, 126, 150, 38)
         self.btn_save_schedule.setStyleSheet(self.primary_btn_style())
 
         self.btn_delete_schedule = QPushButton("Delete Selected", self.schedule_panel)
-        self.btn_delete_schedule.setGeometry(178, 112, 150, 38)
+        self.btn_delete_schedule.setGeometry(178, 126, 150, 38)
         self.btn_delete_schedule.setStyleSheet(self.secondary_btn_style())
 
         self.schedule_table = QTableWidget(self.schedule_panel)
-        self.schedule_table.setGeometry(18, 164, 578, 104)
+        self.schedule_table.setGeometry(18, 178, 578, 90)
         self.schedule_table.setColumnCount(5)
         self.schedule_table.setHorizontalHeaderLabels(["Schedule", "Status", "ON", "OFF", "Rule"])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -3742,6 +3744,8 @@ class DashboardWindow(QWidget):
         self.schedule_resident.addItem(f"All LCD devices ({len(devices)})", "all")
         self.schedule_resident.setCurrentIndex(0)
         self.schedule_resident.blockSignals(False)
+        if hasattr(self, "schedule_scope_label"):
+            self.schedule_scope_label.setText(f"All LCD devices ({len(devices)})")
 
         self.chk_schedule_enabled.setChecked(bool(self.global_schedule_enabled))
         self.chk_sleep_no_image.setChecked(bool(self.global_schedule_sleep_if_no_image))
