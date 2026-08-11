@@ -322,7 +322,9 @@ class ServerDataService:
             resident = residents.get(str(row.get("resident_id")), {})
             out.append({
                 **row,
+                "schedule_id": row.get("id"),
                 "id": row.get("resident_id"),
+                "resident_id": row.get("resident_id"),
                 "resident_uid": resident.get("resident_uid"),
                 "full_name": resident.get("full_name"),
                 "lcd_schedule_enabled": bool(row.get("enabled")),

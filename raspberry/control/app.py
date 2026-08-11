@@ -11,7 +11,7 @@ from email.message import EmailMessage
 from pathlib import Path
 import hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time
 
-app = FastAPI(title="Whisperwood Control Service", version="0.6.3")
+app = FastAPI(title="Whisperwood Control Service", version="0.6.4")
 STARTED_AT = datetime.utcnow()
 
 app.add_middleware(
@@ -500,7 +500,7 @@ def create_backup_archive(created_by: str = "system", upload_to_drive: bool = Tr
             "created_at": now(),
             "created_by": created_by or "system",
             "hostname": platform.node(),
-            "control_version": "0.6.3",
+            "control_version": "0.6.4",
             "database_url_configured": bool(DATABASE_URL),
         }
         (tmp_path / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -1220,7 +1220,7 @@ def health():
     return {
         "ok": True,
         "service": "control",
-        "version": "0.6.3",
+        "version": "0.6.4",
         "hostname": platform.node(),
         "time": now(),
         "uptime": f"{uptime_s}s",
@@ -1467,7 +1467,32 @@ def unpair_device(payload: UnpairPayload, x_whisperwood_key: str | None = Header
 @app.get("/schedules")
 def schedules(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
-    return {"ok": True, "schedules": db_all("SELECT * FROM schedules ORDER BY id DESC")}
+    return {"ok": True, "schedules": db_all("SELECT * FROM schedules ORDER BY lcd_on_time ASC, id ASC")}
+
+
+def insert_schedule_record(payload: SchedulePayload) -> None:
+    data = {**payload.dict(), "t": now()}
+    db_exec("""
+        INSERT INTO schedules(resident_id,device_id,enabled,lcd_on_time,lcd_off_time,sleep_if_no_image,created_at,updated_at)
+        VALUES(:resident_id,:device_id,:enabled,:lcd_on_time,:lcd_off_time,:sleep_if_no_image,:t,:t)
+    """, data)
+
+
+def replace_global_schedule_records(entries: list[dict[str, Any]]) -> int:
+    delete_schedule_records(None, "all")
+    saved = 0
+    for entry in entries:
+        schedule_payload = SchedulePayload(**{
+            "resident_id": None,
+            "device_id": "all",
+            "enabled": bool(entry.get("enabled")),
+            "lcd_on_time": entry.get("lcd_on_time") or "07:00",
+            "lcd_off_time": entry.get("lcd_off_time") or "20:00",
+            "sleep_if_no_image": bool(entry.get("sleep_if_no_image", True)),
+        })
+        insert_schedule_record(schedule_payload)
+        saved += 1
+    return saved
 
 @app.post("/schedules")
 def save_schedule(payload: SchedulePayload, x_whisperwood_key: str | None = Header(default=None)):
@@ -2011,6 +2036,28 @@ def operation_lcd(payload: Optional[dict] = Body(default=None), x_whisperwood_ke
 def operation_schedule(payload: Optional[dict] = Body(default=None), x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     data = dict(payload or {})
+    if isinstance(data.get("schedules"), list):
+        for entry in data.get("schedules") or []:
+            if isinstance(entry, dict) and not entry.get("device_id"):
+                entry["device_id"] = "all"
+        result = operation_request("POST", "/schedule", json=data, timeout=15)
+        try:
+            saved = replace_global_schedule_records([entry for entry in data.get("schedules") or [] if isinstance(entry, dict)])
+            result["database_saved"] = saved
+            log_action(
+                "system",
+                "save_schedule",
+                "all",
+                "success",
+                f"Saved {saved} global LCD schedule entry/entries",
+                payload=data,
+                response=result,
+            )
+        except Exception as exc:
+            result["ok"] = False
+            result["database_save_error"] = str(exc)
+        return result
+
     if not data.get("device_id"):
         data["device_id"] = "all"
     result = operation_request("POST", "/schedule", json=data, timeout=15)
@@ -2033,7 +2080,7 @@ def operation_schedule(payload: Optional[dict] = Body(default=None), x_whisperwo
 def operation_delete_schedule(payload: Optional[dict] = Body(default=None), x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     data = dict(payload or {})
-    result = operation_request("DELETE", "/schedule", timeout=15)
+    result = operation_request("DELETE", "/schedule", json=data, timeout=15)
     try:
         deleted = delete_schedule_records(data.get("resident_id"), data.get("device_id") or "all")
         result["database_deleted"] = deleted
@@ -2202,7 +2249,7 @@ def bootstrap_info(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     return {
         "ok": True,
-        "version": "0.6.3",
+        "version": "0.6.4",
         "database_user": "whisperwood_app",
         "default_users": [
             {"username": "admin", "password": "admin123", "role": "admin"},

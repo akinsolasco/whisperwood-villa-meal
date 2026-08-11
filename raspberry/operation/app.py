@@ -34,7 +34,7 @@ SCHEDULE_TICK_INTERVAL_S = int(os.getenv("WHISPERWOOD_SCHEDULE_TICK_INTERVAL_S",
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
 
-app = FastAPI(title="Whisperwood Operation Manager", version="0.3.10")
+app = FastAPI(title="Whisperwood Operation Manager", version="0.3.11")
 
 
 def utc_now() -> str:
@@ -253,7 +253,7 @@ SEQ = 1
 SERVER_STARTED = False
 SERVER_SOCKET: Optional[socket.socket] = None
 SCHEDULE_STATE: Dict[str, Any] = {}
-SCHEDULE_LAST_FIRE = ""
+SCHEDULE_LAST_FIRE: set[str] = set()
 
 
 def next_seq() -> int:
@@ -527,46 +527,6 @@ def heartbeat_loop() -> None:
                 close_conn(st, f"ping failed {exc}")
 
 
-def load_schedule_state() -> Dict[str, Any]:
-    if not os.path.exists(SCHEDULE_FILE):
-        return {}
-    try:
-        with open(SCHEDULE_FILE, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except Exception:
-        return {}
-
-
-def save_schedule_state(payload: Dict[str, Any]) -> Dict[str, Any]:
-    global SCHEDULE_STATE
-    state = {
-        "enabled": bool(payload.get("enabled")),
-        "lcd_on_time": payload.get("lcd_on_time") or payload.get("on_time") or "07:00",
-        "lcd_off_time": payload.get("lcd_off_time") or payload.get("off_time") or "20:00",
-        "sleep_if_no_image": bool(payload.get("sleep_if_no_image", True)),
-        "device_id": payload.get("device_id") or payload.get("id") or "all",
-        "resident_id": payload.get("resident_id"),
-        "updated_at": utc_now(),
-    }
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=2)
-    SCHEDULE_STATE = state
-    return state
-
-
-def delete_schedule_state() -> Dict[str, Any]:
-    global SCHEDULE_STATE, SCHEDULE_LAST_FIRE
-    existed = bool(SCHEDULE_STATE) or os.path.exists(SCHEDULE_FILE)
-    SCHEDULE_STATE = {}
-    SCHEDULE_LAST_FIRE = ""
-    try:
-        if os.path.exists(SCHEDULE_FILE):
-            os.remove(SCHEDULE_FILE)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not delete saved LCD schedule: {exc}") from exc
-    return {"ok": True, "deleted": existed, "message": "Global LCD schedule deleted in Operation Manager"}
-
-
 def parse_schedule_time(value: Any) -> Optional[str]:
     raw = str(value or "").strip().lower().replace(".", "")
     if not raw:
@@ -579,60 +539,199 @@ def parse_schedule_time(value: Any) -> Optional[str]:
     return None
 
 
-def schedule_due_command(state: Dict[str, Any], now_dt: Optional[datetime] = None) -> Optional[str]:
+def normalize_schedule_entry(payload: Dict[str, Any], index: int = 0) -> Dict[str, Any]:
+    schedule_id = payload.get("schedule_id") or payload.get("entry_id") or ""
+    if not schedule_id:
+        schedule_id = f"sch-{int(time.time() * 1000)}-{index + 1}"
+    on_time = parse_schedule_time(payload.get("lcd_on_time") or payload.get("on_time")) or "07:00"
+    off_time = parse_schedule_time(payload.get("lcd_off_time") or payload.get("off_time")) or "20:00"
+    return {
+        "schedule_id": str(schedule_id),
+        "label": str(payload.get("label") or f"Schedule {index + 1}"),
+        "enabled": bool(payload.get("enabled")),
+        "lcd_on_time": on_time,
+        "lcd_off_time": off_time,
+        "sleep_if_no_image": bool(payload.get("sleep_if_no_image", True)),
+        "device_id": payload.get("device_id") or payload.get("id") or "all",
+        "resident_id": payload.get("resident_id"),
+        "updated_at": payload.get("updated_at") or utc_now(),
+    }
+
+
+def normalize_schedule_state(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+
+    if isinstance(raw.get("schedules"), list):
+        entries = [
+            normalize_schedule_entry(entry, index)
+            for index, entry in enumerate(raw.get("schedules") or [])
+            if isinstance(entry, dict)
+        ]
+    else:
+        entries = [normalize_schedule_entry(raw, 0)] if raw.get("lcd_on_time") or raw.get("lcd_off_time") else []
+
+    if not entries:
+        return {}
+
+    state = {
+        "version": 2,
+        "enabled": any(bool(entry.get("enabled")) for entry in entries),
+        "schedules": entries,
+        "updated_at": raw.get("updated_at") or utc_now(),
+    }
+    first = entries[0]
+    state.update({
+        "lcd_on_time": first.get("lcd_on_time"),
+        "lcd_off_time": first.get("lcd_off_time"),
+        "sleep_if_no_image": first.get("sleep_if_no_image"),
+        "device_id": first.get("device_id"),
+        "resident_id": first.get("resident_id"),
+    })
+    return state
+
+
+def load_schedule_state() -> Dict[str, Any]:
+    if not os.path.exists(SCHEDULE_FILE):
+        return {}
+    try:
+        with open(SCHEDULE_FILE, "r", encoding="utf-8") as fh:
+            return normalize_schedule_state(json.load(fh))
+    except Exception:
+        return {}
+
+
+def write_schedule_state(state: Dict[str, Any]) -> None:
+    with open(SCHEDULE_FILE, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+
+
+def save_schedule_state(payload: Dict[str, Any]) -> Dict[str, Any]:
+    global SCHEDULE_STATE
+    state = normalize_schedule_state(payload)
+    if state:
+        state["updated_at"] = utc_now()
+        for index, entry in enumerate(state.get("schedules") or []):
+            entry["label"] = entry.get("label") or f"Schedule {index + 1}"
+            entry["updated_at"] = state["updated_at"]
+        write_schedule_state(state)
+    else:
+        if os.path.exists(SCHEDULE_FILE):
+            os.remove(SCHEDULE_FILE)
+    SCHEDULE_STATE = state
+    return state
+
+
+def delete_schedule_state(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    global SCHEDULE_STATE, SCHEDULE_LAST_FIRE
+    payload = payload or {}
+    schedule_id = str(payload.get("schedule_id") or payload.get("entry_id") or "").strip()
+    state = SCHEDULE_STATE or load_schedule_state()
+    existed = bool(state) or os.path.exists(SCHEDULE_FILE)
+
+    if schedule_id and state.get("schedules"):
+        before = len(state.get("schedules") or [])
+        entries = [entry for entry in state.get("schedules") or [] if str(entry.get("schedule_id")) != schedule_id]
+        deleted = before - len(entries)
+        if entries:
+            state = normalize_schedule_state({"schedules": entries, "updated_at": utc_now()})
+            write_schedule_state(state)
+            SCHEDULE_STATE = state
+        else:
+            SCHEDULE_STATE = {}
+            if os.path.exists(SCHEDULE_FILE):
+                os.remove(SCHEDULE_FILE)
+        return {"ok": True, "deleted": bool(deleted), "deleted_count": deleted, "schedule": SCHEDULE_STATE}
+
+    SCHEDULE_STATE = {}
+    SCHEDULE_LAST_FIRE = set()
+    try:
+        if os.path.exists(SCHEDULE_FILE):
+            os.remove(SCHEDULE_FILE)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not delete saved LCD schedule: {exc}") from exc
+    return {"ok": True, "deleted": existed, "message": "Global LCD schedule deleted in Operation Manager"}
+
+
+def schedule_due_commands(state: Dict[str, Any], now_dt: Optional[datetime] = None) -> List[Tuple[Dict[str, Any], str]]:
     now_dt = now_dt or local_now()
     now_hm = now_dt.strftime("%H:%M")
-    if parse_schedule_time(state.get("lcd_on_time")) == now_hm:
-        return "on"
-    if parse_schedule_time(state.get("lcd_off_time")) == now_hm:
-        return "off"
-    return None
+    due: List[Tuple[Dict[str, Any], str]] = []
+    for entry in state.get("schedules") or []:
+        if not entry.get("enabled"):
+            continue
+        if parse_schedule_time(entry.get("lcd_on_time")) == now_hm:
+            due.append((entry, "on"))
+        if parse_schedule_time(entry.get("lcd_off_time")) == now_hm:
+            due.append((entry, "off"))
+    return due
 
 
 def fire_schedule_if_due(state: Dict[str, Any], reason: str = "timer") -> Optional[Dict[str, Any]]:
     global SCHEDULE_LAST_FIRE
-    if not state.get("enabled"):
+    if not state or not state.get("schedules"):
         return None
 
     now_dt = local_now()
-    command = schedule_due_command(state, now_dt)
-    if not command:
+    due = schedule_due_commands(state, now_dt)
+    if not due:
         return None
 
-    fire_key = f"{now_dt.strftime('%Y-%m-%d')}:{now_dt.strftime('%H:%M')}:{command}"
-    with LOCK:
-        if fire_key == SCHEDULE_LAST_FIRE:
-            return {"ok": True, "skipped": True, "reason": "already fired this minute", "fire_key": fire_key}
-        SCHEDULE_LAST_FIRE = fire_key
+    today = now_dt.strftime("%Y-%m-%d")
+    results: List[Dict[str, Any]] = []
+    for entry, command in due:
+        target = entry.get("device_id") or "all"
+        schedule_id = entry.get("schedule_id") or f"{target}-{entry.get('lcd_on_time')}-{entry.get('lcd_off_time')}"
+        fire_key = f"{today}:{now_dt.strftime('%H:%M')}:{schedule_id}:{target}:{command}"
+        with LOCK:
+            SCHEDULE_LAST_FIRE = {key for key in SCHEDULE_LAST_FIRE if key.startswith(f"{today}:")}
+            if fire_key in SCHEDULE_LAST_FIRE:
+                results.append({"ok": True, "skipped": True, "reason": "already fired this minute", "fire_key": fire_key})
+                continue
+            SCHEDULE_LAST_FIRE.add(fire_key)
 
-    target = state.get("device_id") or "all"
-    try:
-        result = send_lcd_to_target(target, command)
-        print(
-            f"[{wall_time()}] schedule fired command={command} target={target} reason={reason} "
-            f"local_time={now_dt.isoformat(timespec='seconds')}",
-            flush=True,
-        )
-        return {
-            "ok": True,
-            "fired": True,
-            "command": command,
-            "target": target,
-            "reason": reason,
-            "server_time": now_dt.isoformat(timespec="seconds"),
-            "result": result,
-        }
-    except Exception as exc:
-        print(f"[{wall_time()}] schedule LCD {command} failed: {exc}", flush=True)
-        return {
-            "ok": False,
-            "fired": True,
-            "command": command,
-            "target": target,
-            "reason": reason,
-            "server_time": now_dt.isoformat(timespec="seconds"),
-            "error": str(exc),
-        }
+        try:
+            result = send_lcd_to_target(target, command)
+            print(
+                f"[{wall_time()}] schedule fired id={schedule_id} command={command} target={target} "
+                f"reason={reason} local_time={now_dt.isoformat(timespec='seconds')}",
+                flush=True,
+            )
+            results.append({
+                "ok": True,
+                "fired": True,
+                "schedule_id": schedule_id,
+                "command": command,
+                "target": target,
+                "reason": reason,
+                "server_time": now_dt.isoformat(timespec="seconds"),
+                "result": result,
+            })
+        except Exception as exc:
+            print(f"[{wall_time()}] schedule LCD {command} failed: {exc}", flush=True)
+            results.append({
+                "ok": False,
+                "fired": True,
+                "schedule_id": schedule_id,
+                "command": command,
+                "target": target,
+                "reason": reason,
+                "server_time": now_dt.isoformat(timespec="seconds"),
+                "error": str(exc),
+            })
+
+    fired_results = [item for item in results if item.get("fired")]
+    if not fired_results:
+        return {"ok": True, "skipped": True, "results": results}
+    return {
+        "ok": all(bool(item.get("ok")) for item in fired_results),
+        "fired": True,
+        "command": fired_results[0].get("command"),
+        "commands": [item.get("command") for item in fired_results],
+        "reason": reason,
+        "server_time": now_dt.isoformat(timespec="seconds"),
+        "results": results,
+    }
 
 
 def schedule_loop() -> None:
@@ -1036,7 +1135,7 @@ def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "service": "operation",
-        "version": "0.3.10",
+        "version": "0.3.11",
         "time": utc_now(),
         "local_time": local_now().isoformat(timespec="seconds"),
         "tcp_host": HOST,
@@ -1086,8 +1185,8 @@ def schedule(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, A
 
 
 @app.delete("/schedule")
-def delete_schedule() -> Dict[str, Any]:
-    result = delete_schedule_state()
+def delete_schedule(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
+    result = delete_schedule_state(body or {})
     result["server_time"] = local_now().isoformat(timespec="seconds")
     return result
 
@@ -1108,7 +1207,7 @@ async def firmware_ota(
 @app.get("/schedules")
 def schedules() -> Dict[str, Any]:
     state = SCHEDULE_STATE or load_schedule_state()
-    return {"ok": True, "schedules": [state] if state else []}
+    return {"ok": True, "schedules": state.get("schedules", []) if state else []}
 
 
 @app.post("/resident_display")

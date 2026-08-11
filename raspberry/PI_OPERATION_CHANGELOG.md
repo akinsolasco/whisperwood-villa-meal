@@ -54,6 +54,13 @@
 - Operation Manager `0.3.10` queues a safe LCD `on` refresh after a successful user photo upload so the saved image is restored if the LCD controller wakes to white.
 - ESP32 firmware `fw=23` restores the full LCD SPI reclaim path: release LCD bus, idle shared SCLK/MOSI/DC pins, reinitialize the LCD bus/controller, then perform a settled second repaint after image upload.
 
+## Multiple global LCD schedules
+
+- Operation Manager `0.3.11` supports multiple global LCD ON/OFF schedule entries in `/opt/whisperwood/data/lcd_schedule.json`.
+- Existing single-schedule JSON is migrated in memory and preserved as the first schedule entry when the desktop app saves again.
+- Control Service `0.6.4` mirrors each global schedule entry as its own row in the `schedules` table.
+- Desktop app `2.1.7` shows schedule rows as time entries instead of device rows.
+
 ## Online/offline detection
 
 - Operation Manager keeps last-known devices after disconnect instead of removing them from `/devices`.
