@@ -51,6 +51,8 @@
 - LCD resident photos are sent manually from the desktop "Send Photo Only" action.
 - Operation Manager rejects LCD photo uploads while e-paper text is still pending/busy, and rejects text while a photo upload is pending.
 - ESP32 firmware reports `epaper_busy` in `STATUS` so the Pi and desktop can avoid overlapping screen jobs.
+- Operation Manager `0.3.10` queues a safe LCD `on` refresh after a successful user photo upload so the saved image is restored if the LCD controller wakes to white.
+- ESP32 firmware `fw=22` reclaims the shared display chip-select lines and performs a settled second LCD repaint after image upload.
 
 ## Online/offline detection
 

@@ -34,7 +34,7 @@ SCHEDULE_TICK_INTERVAL_S = int(os.getenv("WHISPERWOOD_SCHEDULE_TICK_INTERVAL_S",
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
 
-app = FastAPI(title="Whisperwood Operation Manager", version="0.3.9")
+app = FastAPI(title="Whisperwood Operation Manager", version="0.3.10")
 
 
 def utc_now() -> str:
@@ -820,6 +820,7 @@ def send_rgb565_to_device(device_id: str, rgb565: bytes, cache_after_ack: bool =
             cache_device_image(device_id, rgb565)
         except Exception as exc:
             print(f"[{wall_time()}] cache image failed for {device_id}: {exc}", flush=True)
+        queue_lcd_photo_refresh(device_id)
     st.lcd_image_cached = True
     return {
         "ok": True,
@@ -847,6 +848,20 @@ def send_cached_image_to_device(device_id: str) -> Dict[str, Any]:
     if not rgb565:
         raise HTTPException(status_code=404, detail="No cached LCD image for device")
     return send_rgb565_to_device(device_id, rgb565, cache_after_ack=False)
+
+
+def queue_lcd_photo_refresh(device_id: str) -> None:
+    def worker() -> None:
+        try:
+            time.sleep(0.3)
+            send_lcd_to_device(device_id, "on")
+            print(f"[{wall_time()}] LCD photo refresh queued after image upload for {device_id}", flush=True)
+        except HTTPException as exc:
+            print(f"[{wall_time()}] LCD photo refresh skipped for {device_id}: {exc.detail}", flush=True)
+        except Exception as exc:
+            print(f"[{wall_time()}] LCD photo refresh failed for {device_id}: {exc}", flush=True)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def firmware_major(st: ConnState) -> Optional[int]:
@@ -1021,7 +1036,7 @@ def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "service": "operation",
-        "version": "0.3.9",
+        "version": "0.3.10",
         "time": utc_now(),
         "local_time": local_now().isoformat(timespec="seconds"),
         "tcp_host": HOST,
