@@ -20,7 +20,7 @@ static const char* DEFAULT_WIFI_SSID = "EPD-GATEWAY";
 static const char* DEFAULT_WIFI_PASS = "epaper123";
 static const char* DEFAULT_PI_HOST = "192.168.4.1";
 static const uint16_t DEFAULT_PI_PORT = 5000;
-static const uint8_t FIRMWARE_VERSION = 20;
+static const uint8_t FIRMWARE_VERSION = 21;
 static const uint32_t WIFI_RETRY_MS = 15000;
 static const uint32_t WIFI_CONNECT_GRACE_MS = 20000;
 static const uint32_t PI_RETRY_MS = 3000;
@@ -1288,9 +1288,9 @@ static void handleImageLine(const char* line) {
   if (gFsReady) {
     if (receiveImageToFlash((size_t)size, &checksum, &err, 15000)) {
       Serial.printf("[LCD] image checksum=0x%08lX\n", (unsigned long)checksum);
-      bool shown = displayLcdImageFromFlash(false);
+      bool shown = displayLcdImageFromFlash(true);
       if (!shown) {
-        shown = displayLcdImageFromFlash(true);
+        shown = displayLcdImageFromFlash(false);
       }
       releaseLcdImageBuffer();
       char ack[128];
@@ -1333,7 +1333,7 @@ static void handleImageLine(const char* line) {
   checksum = checksumBytes((const uint8_t*)lcdImageBuf, LCD_IMG_BYTES);
   Serial.printf("[LCD] image checksum=0x%08lX\n", (unsigned long)checksum);
   bool persisted = saveLcdImageToFlash();
-  displayLCDImage565(lcdImageBuf, false);
+  displayLCDImage565(lcdImageBuf, true);
   if (persisted) {
     releaseLcdImageBuffer();
   }
