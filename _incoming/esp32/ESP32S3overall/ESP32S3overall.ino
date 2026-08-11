@@ -20,7 +20,7 @@ static const char* DEFAULT_WIFI_SSID = "EPD-GATEWAY";
 static const char* DEFAULT_WIFI_PASS = "epaper123";
 static const char* DEFAULT_PI_HOST = "192.168.4.1";
 static const uint16_t DEFAULT_PI_PORT = 5000;
-static const uint8_t FIRMWARE_VERSION = 22;
+static const uint8_t FIRMWARE_VERSION = 23;
 static const uint32_t WIFI_RETRY_MS = 15000;
 static const uint32_t WIFI_CONNECT_GRACE_MS = 20000;
 static const uint32_t PI_RETRY_MS = 3000;
@@ -926,29 +926,37 @@ static void hardResetLcdController() {
   delay(160);
 }
 
-static void deselectSharedDisplayBus() {
-  pinMode(EPD_CS_PIN, OUTPUT);
-  pinMode(LCD_CS_PIN, OUTPUT);
+static void reclaimLcdSpiBus() {
   digitalWrite(EPD_CS_PIN, HIGH);
   digitalWrite(LCD_CS_PIN, HIGH);
-  delayMicroseconds(200);
+  pinMode(EPD_CS_PIN, OUTPUT);
+  pinMode(LCD_CS_PIN, OUTPUT);
+  pinMode(LCD_DC_PIN, OUTPUT);
+  pinMode(SHARED_SPI_SCLK_PIN, OUTPUT);
+  pinMode(SHARED_SPI_MOSI_PIN, OUTPUT);
+  digitalWrite(EPD_CS_PIN, HIGH);
+  digitalWrite(LCD_CS_PIN, HIGH);
+  digitalWrite(LCD_DC_PIN, HIGH);
+  digitalWrite(SHARED_SPI_SCLK_PIN, LOW);
+  digitalWrite(SHARED_SPI_MOSI_PIN, LOW);
+
+  tft.releaseBus();
+  delay(5);
+  tft.initBus();
 }
 
 static void prepareLcdController(bool hardReset) {
-  deselectSharedDisplayBus();
+  reclaimLcdSpiBus();
   if (hardReset) {
     stage("lcd: hard reset");
     hardResetLcdController();
   }
-  if (hardReset || !gLcdPrepared) {
-    tft.init();
-    gLcdPrepared = true;
-  }
+  tft.init();
+  gLcdPrepared = true;
   tft.setRotation(1);
   tft.setSwapBytes(true);
   tft.wakeup();
   tft.setBrightness(255);
-  deselectSharedDisplayBus();
   delay(40);
 }
 
@@ -1209,8 +1217,8 @@ static void displayLCDImage565(const uint16_t* img565, bool hardReset = false) {
   setLcdPower(true);
   prepareLcdController(hardReset);
   stage("lcd: pushImage");
-  deselectSharedDisplayBus();
   tft.startWrite();
+  tft.fillScreen(TFT_BLACK);
   tft.pushImage(0, 0, LCD_IMG_W, LCD_IMG_H, img565);
   tft.endWrite();
   tft.display();
@@ -1231,8 +1239,8 @@ static bool displayLcdImageFromFlash(bool hardReset = false) {
   setLcdPower(true);
   prepareLcdController(hardReset);
   stage("lcd: pushImage flash");
-  deselectSharedDisplayBus();
   tft.startWrite();
+  tft.fillScreen(TFT_BLACK);
 
   uint16_t row[LCD_IMG_W];
   for (int y = 0; y < LCD_IMG_H; y++) {
