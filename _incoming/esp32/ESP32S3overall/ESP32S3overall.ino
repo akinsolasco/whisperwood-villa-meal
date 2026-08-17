@@ -1,28 +1,66 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <Preferences.h>
+#include <FS.h>
+#include <LittleFS.h>
+#include <Wire.h>
 #include "esp_heap_caps.h"
+#include <Update.h>
 #include <LovyanGFX.hpp>
 
+#include "BatteryTelemetry.h"
 #include "EPD_3in6e.h"
 #include "GUI_Paint.h"
 #include "DEV_Config.h"
 #include "fonts.h"
 #include "Font48.h"
 
-// ================= WIFI (Raspberry Pi AP) =================
-static const char* WIFI_SSID = "EPD-GATEWAY";
-static const char* WIFI_PASS = "epaper123";
+// ================= WIFI DEFAULTS / USB PROVISIONING =================
+static const char* DEFAULT_WIFI_SSID = "EPD-GATEWAY";
+static const char* DEFAULT_WIFI_PASS = "epaper123";
+static const char* DEFAULT_PI_HOST = "192.168.4.1";
+static const uint16_t DEFAULT_PI_PORT = 5000;
+static const uint8_t FIRMWARE_VERSION = 23;
+static const uint32_t WIFI_RETRY_MS = 15000;
+static const uint32_t WIFI_CONNECT_GRACE_MS = 20000;
+static const uint32_t PI_RETRY_MS = 3000;
+static const uint32_t STATUS_INTERVAL_MS = 5000;
+static const uint8_t BATTERY_LOW_THRESHOLD_PERCENT = 20;
 
-// ================= RASPBERRY PI SERVER ====================
-static const char* PI_IP = "192.168.4.1";
-static const uint16_t PI_PORT = 5000;
+char gWifiSsid[64] = "EPD-GATEWAY";
+char gWifiPass[96] = "epaper123";
+char gPiHost[64] = "192.168.4.1";
+uint16_t gPiPort = 5000;
 
 WiFiClient client;
 Preferences prefs;
+static bool gFsReady = false;
+static bool gLcdImageStored = false;
+static unsigned long gLastWifiAttemptMs = 0;
+static unsigned long gLastPiAttemptMs = 0;
+static wl_status_t gLastWifiStatus = WL_IDLE_STATUS;
+static bool gPiSessionOnline = false;
+static bool gBatteryGaugeReady = false;
+static void handleSerialProvisioning();
 
-// ================= LCD FROM YOUR UPLOADED CODE =================
-#define LCD_BL_PIN 48
+// ================= VERIFIED SMART LABEL PIN MAP =================
+// Shared SPI bus: LCD and e-paper use the same SCLK/MOSI. Only one CS is active at a time.
+#define SHARED_SPI_SCLK_PIN 12
+#define SHARED_SPI_MOSI_PIN 11
+
+#define LCD_CS_PIN 10
+#define LCD_DC_PIN 9
+#define LCD_RST_PIN 8
+#define LCD_BL_PIN 13
+
+#define BAT_I2C_SDA_PIN 2
+#define BAT_I2C_SCL_PIN 3
+#define BAT_LOW_ALERT_PIN 4
+#define BAT_PLUG_IND_PIN 6
+#define BAT_CHG_IND_PIN 7
+#define LED_FULL_PIN 47
+#define LED_LOW_PIN 48
+#define MAX17048_ADDR 0x36
 
 class LGFX : public lgfx::LGFX_Device {
   lgfx::Panel_ILI9341 _panel;
@@ -31,20 +69,20 @@ class LGFX : public lgfx::LGFX_Device {
 public:
   LGFX() {
     auto cfg = _bus.config();
-    cfg.spi_host = SPI3_HOST;  // separate from e-paper bus
+    cfg.spi_host = SPI3_HOST;
     cfg.spi_mode = 0;
     cfg.freq_write = 10000000;
     cfg.freq_read = 6000000;
-    cfg.pin_sclk = 18;  // LCD SCK
-    cfg.pin_mosi = 17;  // LCD MOSI
-    cfg.pin_miso = -1;  // not used
-    cfg.pin_dc = 15;    // LCD DC
+    cfg.pin_sclk = SHARED_SPI_SCLK_PIN;
+    cfg.pin_mosi = SHARED_SPI_MOSI_PIN;
+    cfg.pin_miso = -1;
+    cfg.pin_dc = LCD_DC_PIN;
     _bus.config(cfg);
     _panel.setBus(&_bus);
 
     auto pcfg = _panel.config();
-    pcfg.pin_cs = 16;   // LCD CS
-    pcfg.pin_rst = 21;  // LCD RST
+    pcfg.pin_cs = LCD_CS_PIN;
+    pcfg.pin_rst = LCD_RST_PIN;
     pcfg.pin_busy = -1;
     pcfg.panel_width = 240;
     pcfg.panel_height = 320;
@@ -63,9 +101,16 @@ LGFX tft;
 #define LCD_IMG_W 320
 #define LCD_IMG_H 240
 #define LCD_IMG_BYTES (LCD_IMG_W * LCD_IMG_H * 2)
+#define LCD_IMAGE_PATH "/lcd_image.rgb565"
+#define LCD_IMAGE_TMP_PATH "/lcd_image.tmp"
+#define LCD_FILE_CHUNK_BYTES 1024
+#define OTA_CHUNK_BYTES 2048
 
 uint16_t* lcdImageBuf = nullptr;
 static bool lcdPowerOn = true;
+static bool gLcdPrepared = false;
+static bool gEpaperActive = false;
+static unsigned long gEpaperGuardUntilMs = 0;
 
 // ================= E-PAPER DISPLAY ============================
 UBYTE* ImageBuffer = nullptr;
@@ -79,6 +124,12 @@ UBYTE* ImageBuffer = nullptr;
 #define SECTION_GAP 14
 #define LINE_SPACING 4
 #define MIN_SPACE_WIDTH 8
+#define VALUE_CONTINUATION_MAX_INDENT 180
+#define DISPLAY_BOTTOM_MARGIN 8
+static const bool EPD_FULL_WHITE_CLEAN_BEFORE_UPDATE = true;
+static const uint32_t EPD_CLEAR_SETTLE_MS = 4000;
+static const uint32_t EPD_DISPLAY_SETTLE_MS = 15000;
+static const uint32_t EPD_LCD_GUARD_MS = 3000;
 
 // ================= DEVICE ID =========================
 char DEVICE_ID[32] = { 0 };
@@ -89,8 +140,10 @@ struct DisplayData {
   char room[24];
   char diet[8][32];
   int dietCount;
-  char allergies[8][32];
-  int allergiesCount;
+  char texture[8][32];
+  int textureCount;
+  char fluids[8][32];
+  int fluidsCount;
   char note[96];
   char drinks[48];
 };
@@ -102,9 +155,10 @@ static long lastAppliedSeq = -1;
 #define SEC_NAME 0
 #define SEC_ROOM 1
 #define SEC_DIET 2
-#define SEC_ALLERGIES 3
-#define SEC_NOTE 4
-#define SEC_DRINKS 5
+#define SEC_TEXTURE 3
+#define SEC_FLUIDS 4
+#define SEC_NOTE 5
+#define SEC_DRINKS 6
 #define SEC_UNKNOWN 255
 
 #define HL_SECTION 0
@@ -146,6 +200,113 @@ static void printHeap(const char* tag) {
   Serial.println(ESP.getMaxAllocHeap());
 }
 
+static bool sendRawToPi(const char* text) {
+  if (!client.connected()) return false;
+  size_t len = strlen(text);
+  size_t sent = client.print(text);
+  if (sent != len) {
+    Serial.println("[TCP] write failed; closing client");
+    client.stop();
+    gPiSessionOnline = false;
+    return false;
+  }
+  return true;
+}
+
+// ================= BATTERY / CHARGER TELEMETRY =================
+static bool max17048Read16(uint8_t reg, uint16_t* out) {
+  if (!out) return false;
+  Wire.beginTransmission(MAX17048_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  uint8_t count = Wire.requestFrom((uint8_t)MAX17048_ADDR, (uint8_t)2);
+  if (count != 2) {
+    return false;
+  }
+  *out = ((uint16_t)Wire.read() << 8) | (uint16_t)Wire.read();
+  return true;
+}
+
+static bool max17048Write16(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(MAX17048_ADDR);
+  Wire.write(reg);
+  Wire.write((uint8_t)(value >> 8));
+  Wire.write((uint8_t)(value & 0xFF));
+  return Wire.endTransmission() == 0;
+}
+
+static void configureBatteryAlertThreshold(uint8_t thresholdPercent) {
+  if (!gBatteryGaugeReady) return;
+  if (thresholdPercent > 31) thresholdPercent = 31;
+  uint16_t config = 0;
+  if (!max17048Read16(0x0C, &config)) {
+    return;
+  }
+  uint8_t athd = 32 - thresholdPercent;
+  config = (config & 0xFFE0) | (athd & 0x1F);
+  max17048Write16(0x0C, config);
+}
+
+static void updateBatteryLeds(bool low, bool full) {
+  digitalWrite(LED_LOW_PIN, low ? HIGH : LOW);
+  digitalWrite(LED_FULL_PIN, full ? HIGH : LOW);
+}
+
+static BatteryTelemetry readBatteryTelemetry() {
+  BatteryTelemetry b;
+  b.ok = false;
+  b.percent = -1;
+  b.rawPercentX10 = -1;
+  b.millivolts = -1;
+  b.alertPinLow = digitalRead(BAT_LOW_ALERT_PIN) == LOW;
+  b.usbPresent = digitalRead(BAT_PLUG_IND_PIN) == LOW;
+  b.charging = digitalRead(BAT_CHG_IND_PIN) == LOW;
+  b.low = b.alertPinLow;
+  b.full = false;
+
+  if (gBatteryGaugeReady) {
+    uint16_t vcellRaw = 0;
+    uint16_t socRaw = 0;
+    if (max17048Read16(0x02, &vcellRaw) && max17048Read16(0x04, &socRaw)) {
+      float volts = (float)vcellRaw * 0.000078125f;
+      float percentRaw = (float)socRaw / 256.0f;
+      int percentRounded = (int)(percentRaw + 0.5f);
+      if (percentRounded < 0) percentRounded = 0;
+      if (percentRounded > 100) percentRounded = 100;
+      b.ok = true;
+      b.percent = percentRounded;
+      b.rawPercentX10 = (int)(percentRaw * 10.0f + 0.5f);
+      b.millivolts = (int)(volts * 1000.0f + 0.5f);
+      b.low = b.alertPinLow || b.percent <= BATTERY_LOW_THRESHOLD_PERCENT;
+      b.full = b.usbPresent && !b.charging && b.percent >= 95;
+    }
+  }
+
+  updateBatteryLeds(b.low, b.full);
+  return b;
+}
+
+static void initBatteryMonitor() {
+  pinMode(BAT_LOW_ALERT_PIN, INPUT_PULLUP);
+  pinMode(BAT_PLUG_IND_PIN, INPUT_PULLUP);
+  pinMode(BAT_CHG_IND_PIN, INPUT_PULLUP);
+  pinMode(LED_FULL_PIN, OUTPUT);
+  pinMode(LED_LOW_PIN, OUTPUT);
+  updateBatteryLeds(false, false);
+
+  Wire.begin(BAT_I2C_SDA_PIN, BAT_I2C_SCL_PIN);
+  Wire.setClock(400000);
+
+  uint16_t version = 0;
+  gBatteryGaugeReady = max17048Read16(0x08, &version);
+  Serial.print("[BAT] MAX17048 ");
+  Serial.println(gBatteryGaugeReady ? "ready" : "not detected");
+  configureBatteryAlertThreshold(BATTERY_LOW_THRESHOLD_PERCENT);
+  readBatteryTelemetry();
+}
+
 // ================= BASIC HELPERS =================
 static void makeDeviceId() {
   uint64_t mac = ESP.getEfuseMac();
@@ -161,6 +322,36 @@ static void makeDeviceId() {
 static void decodeUnderscore(char* s) {
   for (; *s; s++)
     if (*s == '_') *s = ' ';
+}
+
+static int hexVal(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static void decodePercentInPlace(char* s) {
+  char* r = s;
+  char* w = s;
+  while (*r) {
+    if (*r == '%' && r[1] && r[2]) {
+      int hi = hexVal(r[1]);
+      int lo = hexVal(r[2]);
+      if (hi >= 0 && lo >= 0) {
+        *w++ = (char)((hi << 4) | lo);
+        r += 3;
+        continue;
+      }
+    }
+    if (*r == '+') {
+      *w++ = ' ';
+      r++;
+      continue;
+    }
+    *w++ = *r++;
+  }
+  *w = '\0';
 }
 
 static bool getTokenValue(const char* line, const char* key, char* out, size_t outSize) {
@@ -209,7 +400,8 @@ static uint8_t parseSectionCode(const char* s) {
   if (strcmp(s, "NAME") == 0) return SEC_NAME;
   if (strcmp(s, "ROOM") == 0) return SEC_ROOM;
   if (strcmp(s, "DIET") == 0) return SEC_DIET;
-  if (strcmp(s, "ALLERGIES") == 0) return SEC_ALLERGIES;
+  if (strcmp(s, "TEXTURE") == 0 || strcmp(s, "ALLERGIES") == 0) return SEC_TEXTURE;
+  if (strcmp(s, "FLUIDS") == 0 || strcmp(s, "SCHEDULE") == 0) return SEC_FLUIDS;
   if (strcmp(s, "NOTE") == 0) return SEC_NOTE;
   if (strcmp(s, "DRINKS") == 0) return SEC_DRINKS;
   return SEC_UNKNOWN;
@@ -455,7 +647,17 @@ static int drawString(int x, int y, const char* text, sFONT* font, UWORD bgColor
 }
 
 static void drawHighlightBox(int x, int y, int w, int h, UWORD bg) {
-  Paint_DrawRectangle(x, y, x + w, y + h, bg, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+  int x0 = x;
+  int y0 = y;
+  int x1 = x + w;
+  int y1 = y + h;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 >= DISPLAY_WIDTH) x1 = DISPLAY_WIDTH - 1;
+  if (y1 >= DISPLAY_HEIGHT) y1 = DISPLAY_HEIGHT - 1;
+  if (x0 <= x1 && y0 <= y1) {
+    Paint_DrawRectangle(x0, y0, x1, y1, bg, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+  }
 }
 
 static void drawStringWrappedHighlighted(
@@ -469,11 +671,14 @@ static void drawStringWrappedHighlighted(
   uint8_t sectionFgCode) {
   const char* ptr = text;
   while (*ptr) {
+    if (*cy > DISPLAY_HEIGHT - font->Height - DISPLAY_BOTTOM_MARGIN) return;
+
     while (*ptr == ' ') {
       int sw = getCharWidth(' ', font);
       if (*cx + sw > maxX) {
         *cx = wrapX;
         *cy += font->Height + LINE_SPACING;
+        if (*cy > DISPLAY_HEIGHT - font->Height - DISPLAY_BOTTOM_MARGIN) return;
       }
       *cx += sw;
       ptr++;
@@ -492,6 +697,7 @@ static void drawStringWrappedHighlighted(
     if (*cx + wordWidth > maxX && *cx > wrapX) {
       *cx = wrapX;
       *cy += font->Height + LINE_SPACING;
+      if (*cy > DISPLAY_HEIGHT - font->Height - DISPLAY_BOTTOM_MARGIN) return;
     }
 
     char word[64];
@@ -528,6 +734,10 @@ static void drawStringWrappedHighlighted(
 static int renderSection(const char* label, const char* value,
                          uint8_t sectionCode,
                          int startX, int y, int maxX, sFONT* font) {
+  if (y > DISPLAY_HEIGHT - font->Height - DISPLAY_BOTTOM_MARGIN) {
+    return y;
+  }
+
   int currentX = startX, currentY = y;
 
   uint8_t secBg = C_WHITE;
@@ -552,53 +762,145 @@ static int renderSection(const char* label, const char* value,
   return currentY + font->Height + SECTION_GAP;
 }
 
+static bool hasDisplayText(const char* value) {
+  return value && value[0] != '\0';
+}
+
+static int renderSectionIfText(const char* label, const char* value,
+                               uint8_t sectionCode,
+                               int startX, int y, int maxX, sFONT* font) {
+  if (!hasDisplayText(value)) return y;
+  return renderSection(label, value, sectionCode, startX, y, maxX, font);
+}
+
+static bool epaperPinsBusy() {
+  if (gEpaperActive) return true;
+  if (gEpaperGuardUntilMs == 0) return false;
+  return (long)(gEpaperGuardUntilMs - millis()) > 0;
+}
+
+static void beginEpaperBusyGuard() {
+  gEpaperActive = true;
+  gEpaperGuardUntilMs = 0;
+}
+
+static void finishEpaperBusyGuard() {
+  gEpaperActive = false;
+  gEpaperGuardUntilMs = millis() + EPD_LCD_GUARD_MS;
+}
+
+class EpaperBusyScope {
+public:
+  EpaperBusyScope() {
+    beginEpaperBusyGuard();
+  }
+  ~EpaperBusyScope() {
+    finishEpaperBusyGuard();
+  }
+};
+
 // ================= E-PAPER DISPLAY =================
 static void displayFromData(const DisplayData& d) {
+  EpaperBusyScope epaperBusyScope;
   stage("epaper: start");
   printHeap("before epaper");
 
-  EPD_3IN6E_Init();
-  EPD_3IN6E_Clear(EPD_3IN6E_WHITE);
+  if (gLcdImageStored) {
+    releaseLcdImageBuffer();
+  }
+  digitalWrite(LCD_CS_PIN, HIGH);
 
+  stage("epaper: init");
+  EPD_3IN6E_Init();
+  if (!EPD_3IN6E_IsReady()) {
+    stage("epaper: skipped busy timeout");
+    return;
+  }
+
+  if (EPD_FULL_WHITE_CLEAN_BEFORE_UPDATE) {
+    stage("epaper: white clean");
+    EPD_3IN6E_Clear(EPD_3IN6E_WHITE);
+    stage("epaper: clean settle");
+    delay(EPD_CLEAR_SETTLE_MS);
+    if (!EPD_3IN6E_IsReady()) {
+      stage("epaper: white clean busy timeout");
+      return;
+    }
+    delay(300);
+
+    stage("epaper: reinit after clean");
+    EPD_3IN6E_Init();
+    if (!EPD_3IN6E_IsReady()) {
+      stage("epaper: skipped after clean busy timeout");
+      return;
+    }
+  }
+
+  const uint32_t bufBytes = ((uint32_t)DISPLAY_WIDTH * (uint32_t)DISPLAY_HEIGHT) / 2;
+  if (!ImageBuffer) {
+    ImageBuffer = (UBYTE*)heap_caps_malloc(bufBytes, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  }
+  if (!ImageBuffer) {
+    Serial.printf("[EPD] framebuffer alloc failed; need=%u free=%u max=%u\n",
+                  (unsigned)bufBytes,
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap());
+    return;
+  }
+
+  stage("epaper: render");
+  Paint_NewImage(ImageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, 0, EPD_3IN6E_WHITE);
   Paint_SelectImage(ImageBuffer);
-  Paint_Clear(EPD_3IN6E_WHITE);
   Paint_SetScale(6);
+  Paint_Clear(EPD_3IN6E_WHITE);
 
   int startX = MARGIN_LEFT;
   int maxX = DISPLAY_WIDTH - MARGIN_RIGHT;
   int y = START_Y;
 
   char dietLine[200];
-  char allergyLine[200];
+  char textureLine[200];
+  char fluidsLine[200];
   joinListLineLocal((char(*)[32])d.diet, d.dietCount, dietLine, sizeof(dietLine));
-  joinListLineLocal((char(*)[32])d.allergies, d.allergiesCount, allergyLine, sizeof(allergyLine));
+  joinListLineLocal((char(*)[32])d.texture, d.textureCount, textureLine, sizeof(textureLine));
+  joinListLineLocal((char(*)[32])d.fluids, d.fluidsCount, fluidsLine, sizeof(fluidsLine));
 
-  y = renderSection("NAME", d.name, SEC_NAME, startX, y, maxX, &Font48);
-  y = renderSection("ROOM", d.room, SEC_ROOM, startX, y, maxX, &Font48);
-  y = renderSection("DIET", dietLine, SEC_DIET, startX, y, maxX, &Font48);
-  y = renderSection("ALLERGIES", allergyLine, SEC_ALLERGIES, startX, y, maxX, &Font48);
-  y = renderSection("NOTE", d.note, SEC_NOTE, startX, y, maxX, &Font48);
-  y = renderSection("DRINKS", d.drinks, SEC_DRINKS, startX, y, maxX, &Font48);
+  y = renderSectionIfText("NAME", d.name, SEC_NAME, startX, y, maxX, &Font48);
+  y = renderSectionIfText("ROOM", d.room, SEC_ROOM, startX, y, maxX, &Font48);
+  y = renderSectionIfText("DIET", dietLine, SEC_DIET, startX, y, maxX, &Font48);
+  y = renderSectionIfText("TEXTURE", textureLine, SEC_TEXTURE, startX, y, maxX, &Font48);
+  y = renderSectionIfText("FLUIDS", fluidsLine, SEC_FLUIDS, startX, y, maxX, &Font48);
+  y = renderSectionIfText("NOTE", d.note, SEC_NOTE, startX, y, maxX, &Font48);
+  y = renderSectionIfText("DRINKS", d.drinks, SEC_DRINKS, startX, y, maxX, &Font48);
 
   stage("epaper: display");
   EPD_3IN6E_Display(ImageBuffer);
-  EPD_3IN6E_Sleep();
+  stage("epaper: display settle");
+  delay(EPD_DISPLAY_SETTLE_MS);
+  if (EPD_3IN6E_IsReady()) {
+    EPD_3IN6E_Sleep();
+  } else {
+    stage("epaper: display busy timeout");
+  }
 
   stage("epaper: done");
   printHeap("after epaper");
+  releaseEpaperBuffer();
   delay(200);
 }
 
 // ================= LCD DISPLAY =================
+static void hardResetLcdController();
+static void prepareLcdController(bool hardReset);
+
 static void initLCD() {
   stage("lcd: init");
-  tft.init();
-  tft.setRotation(1);
-  tft.setSwapBytes(true);
+  prepareLcdController(true);
   tft.fillScreen(TFT_BLACK);
 }
 
 static void showLCDPlaceholder() {
+  prepareLcdController(false);
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(2);
@@ -609,6 +911,167 @@ static void showLCDPlaceholder() {
 static void setLcdPower(bool on) {
   lcdPowerOn = on;
   digitalWrite(LCD_BL_PIN, on ? HIGH : LOW);
+  if (on) {
+    delay(20);
+  }
+}
+
+static void hardResetLcdController() {
+  digitalWrite(EPD_CS_PIN, HIGH);
+  digitalWrite(LCD_CS_PIN, HIGH);
+  pinMode(LCD_RST_PIN, OUTPUT);
+  digitalWrite(LCD_RST_PIN, LOW);
+  delay(60);
+  digitalWrite(LCD_RST_PIN, HIGH);
+  delay(160);
+}
+
+static void reclaimLcdSpiBus() {
+  digitalWrite(EPD_CS_PIN, HIGH);
+  digitalWrite(LCD_CS_PIN, HIGH);
+  pinMode(EPD_CS_PIN, OUTPUT);
+  pinMode(LCD_CS_PIN, OUTPUT);
+  pinMode(LCD_DC_PIN, OUTPUT);
+  pinMode(SHARED_SPI_SCLK_PIN, OUTPUT);
+  pinMode(SHARED_SPI_MOSI_PIN, OUTPUT);
+  digitalWrite(EPD_CS_PIN, HIGH);
+  digitalWrite(LCD_CS_PIN, HIGH);
+  digitalWrite(LCD_DC_PIN, HIGH);
+  digitalWrite(SHARED_SPI_SCLK_PIN, LOW);
+  digitalWrite(SHARED_SPI_MOSI_PIN, LOW);
+
+  tft.releaseBus();
+  delay(5);
+  tft.initBus();
+}
+
+static void prepareLcdController(bool hardReset) {
+  reclaimLcdSpiBus();
+  if (hardReset) {
+    stage("lcd: hard reset");
+    hardResetLcdController();
+  }
+  tft.init();
+  gLcdPrepared = true;
+  tft.setRotation(1);
+  tft.setSwapBytes(true);
+  tft.wakeup();
+  tft.setBrightness(255);
+  delay(40);
+}
+
+static uint32_t checksumUpdate(uint32_t hash, const uint8_t* data, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    hash ^= data[i];
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
+static uint32_t checksumBytes(const uint8_t* data, size_t len) {
+  return checksumUpdate(2166136261UL, data, len);
+}
+
+static void releaseLcdImageBuffer() {
+  if (lcdImageBuf) {
+    free(lcdImageBuf);
+    lcdImageBuf = nullptr;
+    Serial.println("[LCD] image buffer released");
+  }
+}
+
+static void releaseEpaperBuffer() {
+  if (ImageBuffer) {
+    free(ImageBuffer);
+    ImageBuffer = nullptr;
+    Serial.println("[EPD] framebuffer released");
+  }
+}
+
+static bool ensureLcdImageBuffer() {
+  if (lcdImageBuf) return true;
+  lcdImageBuf = (uint16_t*)heap_caps_malloc(LCD_IMG_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (lcdImageBuf) {
+    Serial.println("[LCD] image buffer allocated in PSRAM");
+    return true;
+  }
+  lcdImageBuf = (uint16_t*)heap_caps_malloc(LCD_IMG_BYTES, MALLOC_CAP_8BIT);
+  if (!lcdImageBuf) {
+    Serial.printf("[LCD] image buffer allocation failed; need=%u free=%u max=%u\n",
+                  (unsigned)LCD_IMG_BYTES,
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap());
+    return false;
+  }
+  Serial.println("[LCD] image buffer allocated in internal RAM");
+  return true;
+}
+
+static void initPersistentFileSystem() {
+  gFsReady = LittleFS.begin(true);
+  if (!gFsReady) {
+    Serial.println("[FS] LittleFS mount failed; LCD image will be RAM-only");
+    gLcdImageStored = false;
+    return;
+  }
+  File f = LittleFS.open(LCD_IMAGE_PATH, "r");
+  gLcdImageStored = f && f.size() == LCD_IMG_BYTES;
+  if (f) f.close();
+  Serial.print("[FS] LittleFS ready, stored LCD image=");
+  Serial.println(gLcdImageStored ? "yes" : "no");
+}
+
+static bool saveLcdImageToFlash() {
+  if (!gFsReady || !lcdImageBuf) return false;
+
+  LittleFS.remove(LCD_IMAGE_TMP_PATH);
+  File f = LittleFS.open(LCD_IMAGE_TMP_PATH, "w");
+  if (!f) {
+    Serial.println("[FS] Could not open LCD image temp file");
+    return false;
+  }
+
+  size_t written = f.write((const uint8_t*)lcdImageBuf, LCD_IMG_BYTES);
+  f.close();
+  if (written != LCD_IMG_BYTES) {
+    LittleFS.remove(LCD_IMAGE_TMP_PATH);
+    Serial.printf("[FS] LCD image write incomplete: %u/%u\n", (unsigned)written, (unsigned)LCD_IMG_BYTES);
+    return false;
+  }
+
+  LittleFS.remove(LCD_IMAGE_PATH);
+  if (!LittleFS.rename(LCD_IMAGE_TMP_PATH, LCD_IMAGE_PATH)) {
+    LittleFS.remove(LCD_IMAGE_TMP_PATH);
+    Serial.println("[FS] LCD image rename failed");
+    return false;
+  }
+
+  gLcdImageStored = true;
+  Serial.println("[FS] LCD image saved to flash");
+  return true;
+}
+
+static bool loadLcdImageFromFlash() {
+  if (!gFsReady || !gLcdImageStored) return false;
+  if (!ensureLcdImageBuffer()) return false;
+
+  File f = LittleFS.open(LCD_IMAGE_PATH, "r");
+  if (!f || f.size() != LCD_IMG_BYTES) {
+    if (f) f.close();
+    gLcdImageStored = false;
+    Serial.println("[FS] Stored LCD image missing or wrong size");
+    return false;
+  }
+
+  size_t readBytes = f.read((uint8_t*)lcdImageBuf, LCD_IMG_BYTES);
+  f.close();
+  if (readBytes != LCD_IMG_BYTES) {
+    Serial.printf("[FS] LCD image read incomplete: %u/%u\n", (unsigned)readBytes, (unsigned)LCD_IMG_BYTES);
+    return false;
+  }
+
+  Serial.println("[FS] LCD image loaded from flash");
+  return true;
 }
 
 static bool receiveExactBytes(uint8_t* dst, size_t totalBytes, uint32_t timeoutMs = 10000) {
@@ -616,7 +1079,10 @@ static bool receiveExactBytes(uint8_t* dst, size_t totalBytes, uint32_t timeoutM
   uint32_t start = millis();
 
   while (received < totalBytes) {
-    if (!client.connected()) return false;
+    if (!client.connected()) {
+      gPiSessionOnline = false;
+      return false;
+    }
 
     int avail = client.available();
     if (avail > 0) {
@@ -626,17 +1092,181 @@ static bool receiveExactBytes(uint8_t* dst, size_t totalBytes, uint32_t timeoutM
         start = millis();
       }
     } else {
-      if (millis() - start > timeoutMs) return false;
+      if (millis() - start > timeoutMs) {
+        client.stop();
+        gPiSessionOnline = false;
+        return false;
+      }
       delay(1);
     }
   }
   return true;
 }
 
-static void displayLCDImage565(const uint16_t* img565) {
+static bool discardExactBytes(size_t totalBytes, uint32_t timeoutMs = 10000) {
+  uint8_t buf[LCD_FILE_CHUNK_BYTES];
+  size_t received = 0;
+  uint32_t start = millis();
+
+  while (received < totalBytes) {
+    if (!client.connected()) {
+      gPiSessionOnline = false;
+      return false;
+    }
+
+    int avail = client.available();
+    if (avail > 0) {
+      size_t want = totalBytes - received;
+      if (want > sizeof(buf)) want = sizeof(buf);
+      if ((size_t)avail < want) want = (size_t)avail;
+      int n = client.read(buf, want);
+      if (n > 0) {
+        received += (size_t)n;
+        start = millis();
+      }
+    } else {
+      if (millis() - start > timeoutMs) {
+        client.stop();
+        gPiSessionOnline = false;
+        return false;
+      }
+      delay(1);
+    }
+  }
+  return true;
+}
+
+static bool receiveImageToFlash(size_t totalBytes, uint32_t* checksumOut, const char** errOut, uint32_t timeoutMs = 15000) {
+  if (checksumOut) *checksumOut = 0;
+  if (errOut) *errOut = "";
+  if (!gFsReady) {
+    if (errOut) *errOut = "nofs";
+    discardExactBytes(totalBytes, timeoutMs);
+    return false;
+  }
+
+  LittleFS.remove(LCD_IMAGE_TMP_PATH);
+  File f = LittleFS.open(LCD_IMAGE_TMP_PATH, "w");
+  if (!f) {
+    if (errOut) *errOut = "fsopen";
+    discardExactBytes(totalBytes, timeoutMs);
+    return false;
+  }
+
+  uint8_t buf[LCD_FILE_CHUNK_BYTES];
+  size_t received = 0;
+  uint32_t start = millis();
+  uint32_t hash = 2166136261UL;
+
+  while (received < totalBytes) {
+    if (!client.connected()) {
+      f.close();
+      LittleFS.remove(LCD_IMAGE_TMP_PATH);
+      gPiSessionOnline = false;
+      if (errOut) *errOut = "disconnect";
+      return false;
+    }
+
+    int avail = client.available();
+    if (avail > 0) {
+      size_t want = totalBytes - received;
+      if (want > sizeof(buf)) want = sizeof(buf);
+      if ((size_t)avail < want) want = (size_t)avail;
+      int n = client.read(buf, want);
+      if (n > 0) {
+        size_t written = f.write(buf, (size_t)n);
+        if (written != (size_t)n) {
+          f.close();
+          LittleFS.remove(LCD_IMAGE_TMP_PATH);
+          discardExactBytes(totalBytes - received - (size_t)n, timeoutMs);
+          if (errOut) *errOut = "fswrite";
+          return false;
+        }
+        hash = checksumUpdate(hash, buf, (size_t)n);
+        received += (size_t)n;
+        start = millis();
+      }
+    } else {
+      if (millis() - start > timeoutMs) {
+        f.close();
+        LittleFS.remove(LCD_IMAGE_TMP_PATH);
+        client.stop();
+        gPiSessionOnline = false;
+        if (errOut) *errOut = "rxtimeout";
+        return false;
+      }
+      delay(1);
+    }
+  }
+
+  f.close();
+  LittleFS.remove(LCD_IMAGE_PATH);
+  if (!LittleFS.rename(LCD_IMAGE_TMP_PATH, LCD_IMAGE_PATH)) {
+    LittleFS.remove(LCD_IMAGE_TMP_PATH);
+    if (errOut) *errOut = "fsrename";
+    return false;
+  }
+
+  gLcdImageStored = true;
+  if (checksumOut) *checksumOut = hash;
+  Serial.println("[FS] LCD image streamed to flash");
+  return true;
+}
+
+static void displayLCDImage565(const uint16_t* img565, bool hardReset = false) {
+  setLcdPower(true);
+  prepareLcdController(hardReset);
   stage("lcd: pushImage");
+  tft.startWrite();
+  tft.fillScreen(TFT_BLACK);
   tft.pushImage(0, 0, LCD_IMG_W, LCD_IMG_H, img565);
+  tft.endWrite();
+  tft.display();
   stage("lcd: done");
+}
+
+static bool displayLcdImageFromFlash(bool hardReset = false) {
+  if (!gFsReady || !gLcdImageStored) return false;
+
+  File f = LittleFS.open(LCD_IMAGE_PATH, "r");
+  if (!f || f.size() != LCD_IMG_BYTES) {
+    if (f) f.close();
+    gLcdImageStored = false;
+    Serial.println("[FS] Stored LCD image missing or wrong size");
+    return false;
+  }
+
+  setLcdPower(true);
+  prepareLcdController(hardReset);
+  stage("lcd: pushImage flash");
+  tft.startWrite();
+  tft.fillScreen(TFT_BLACK);
+
+  uint16_t row[LCD_IMG_W];
+  for (int y = 0; y < LCD_IMG_H; y++) {
+    size_t readBytes = f.read((uint8_t*)row, LCD_IMG_W * 2);
+    if (readBytes != LCD_IMG_W * 2) {
+      tft.endWrite();
+      f.close();
+      Serial.println("[FS] LCD image row read failed");
+      return false;
+    }
+    tft.pushImage(0, y, LCD_IMG_W, 1, row);
+  }
+  tft.endWrite();
+  tft.display();
+
+  f.close();
+  stage("lcd: done");
+  return true;
+}
+
+static bool repaintLcdImageAfterUpload() {
+  bool firstPass = displayLcdImageFromFlash(true);
+  stage("lcd: settle redraw");
+  delay(150);
+  bool secondPass = displayLcdImageFromFlash(false);
+  return firstPass || secondPass;
 }
 
 static void handleImageLine(const char* line) {
@@ -644,11 +1274,11 @@ static void handleImageLine(const char* line) {
   char sizeBuf[16];
 
   if (!getTokenValue(line, "seq", seqBuf, sizeof(seqBuf))) {
-    client.print("ACKIMG seq=0 ok=0 err=parse\n");
+    sendRawToPi("ACKIMG seq=0 ok=0 err=parse\n");
     return;
   }
   if (!getTokenValue(line, "size", sizeBuf, sizeof(sizeBuf))) {
-    client.print("ACKIMG seq=0 ok=0 err=parse\n");
+    sendRawToPi("ACKIMG seq=0 ok=0 err=parse\n");
     return;
   }
 
@@ -656,35 +1286,207 @@ static void handleImageLine(const char* line) {
   long size = atol(sizeBuf);
 
   if (seq <= 0 || size <= 0) {
-    client.print("ACKIMG seq=0 ok=0 err=parse\n");
+    sendRawToPi("ACKIMG seq=0 ok=0 err=parse\n");
     return;
   }
 
   if (size != LCD_IMG_BYTES) {
-    client.printf("ACKIMG seq=%ld ok=0 err=size\n", seq);
+    discardExactBytes((size_t)size, 15000);
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACKIMG seq=%ld ok=0 err=size\n", seq);
+    sendRawToPi(ack);
     return;
   }
 
-  if (!lcdImageBuf) {
-    lcdImageBuf = (uint16_t*)ps_malloc(LCD_IMG_BYTES);
-    if (!lcdImageBuf) {
-      client.printf("ACKIMG seq=%ld ok=0 err=nomem\n", seq);
-      return;
-    }
+  if (epaperPinsBusy()) {
+    discardExactBytes((size_t)size, 15000);
+    char ack[112];
+    snprintf(ack, sizeof(ack), "ACKIMG seq=%ld ok=0 err=epaper_busy\n", seq);
+    sendRawToPi(ack);
+    Serial.printf("[ACKIMG] rejected seq=%ld because e-paper pins are busy\n", seq);
+    return;
   }
 
   Serial.printf("[LCD] expecting %ld bytes\n", size);
-  bool ok = receiveExactBytes((uint8_t*)lcdImageBuf, (size_t)size, 15000);
-  if (!ok) {
-    client.printf("ACKIMG seq=%ld ok=0 err=rx\n", seq);
+  uint32_t checksum = 0;
+  const char* err = "";
+
+  if (gFsReady) {
+    if (receiveImageToFlash((size_t)size, &checksum, &err, 15000)) {
+      Serial.printf("[LCD] image checksum=0x%08lX\n", (unsigned long)checksum);
+      bool shown = repaintLcdImageAfterUpload();
+      releaseLcdImageBuffer();
+      char ack[128];
+      snprintf(
+        ack,
+        sizeof(ack),
+        "ACKIMG seq=%ld ok=1 persisted=1 lcd_on=%d shown=%d checksum=%08lX\n",
+        seq,
+        lcdPowerOn ? 1 : 0,
+        shown ? 1 : 0,
+        (unsigned long)checksum
+      );
+      sendRawToPi(ack);
+      Serial.printf("[ACKIMG] sent seq=%ld\n", seq);
+      return;
+    }
+
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACKIMG seq=%ld ok=0 err=%s\n", seq, err && err[0] ? err : "fs");
+    sendRawToPi(ack);
     return;
   }
 
-  if (lcdPowerOn) {
-    displayLCDImage565(lcdImageBuf);
+  if (!ensureLcdImageBuffer()) {
+    discardExactBytes((size_t)size, 15000);
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACKIMG seq=%ld ok=0 err=nomem\n", seq);
+    sendRawToPi(ack);
+    return;
   }
-  client.printf("ACKIMG seq=%ld ok=1\n", seq);
+
+  bool ok = receiveExactBytes((uint8_t*)lcdImageBuf, (size_t)size, 15000);
+  if (!ok) {
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACKIMG seq=%ld ok=0 err=rx\n", seq);
+    sendRawToPi(ack);
+    return;
+  }
+
+  checksum = checksumBytes((const uint8_t*)lcdImageBuf, LCD_IMG_BYTES);
+  Serial.printf("[LCD] image checksum=0x%08lX\n", (unsigned long)checksum);
+  bool persisted = saveLcdImageToFlash();
+  displayLCDImage565(lcdImageBuf, true);
+  stage("lcd: settle redraw");
+  delay(150);
+  displayLCDImage565(lcdImageBuf, false);
+  if (persisted) {
+    releaseLcdImageBuffer();
+  }
+  char ack[128];
+  snprintf(
+    ack,
+    sizeof(ack),
+    "ACKIMG seq=%ld ok=1 persisted=%d lcd_on=%d checksum=%08lX\n",
+    seq,
+    persisted ? 1 : 0,
+    lcdPowerOn ? 1 : 0,
+    (unsigned long)checksum
+  );
+  sendRawToPi(ack);
   Serial.printf("[ACKIMG] sent seq=%ld\n", seq);
+}
+
+static bool receiveOtaFirmware(size_t size, const char* md5, char* err, size_t errLen) {
+  if (size == 0) {
+    snprintf(err, errLen, "size");
+    return false;
+  }
+  size_t freeSketch = ESP.getFreeSketchSpace();
+  if (freeSketch > 0 && size > freeSketch) {
+    snprintf(err, errLen, "too_large");
+    discardExactBytes(size, 120000);
+    return false;
+  }
+  if (!Update.begin(size)) {
+    snprintf(err, errLen, "begin_%u", Update.getError());
+    discardExactBytes(size, 120000);
+    return false;
+  }
+  if (md5 && md5[0]) {
+    Update.setMD5(md5);
+  }
+
+  uint8_t buf[OTA_CHUNK_BYTES];
+  size_t received = 0;
+  unsigned long lastByteMs = millis();
+  while (received < size) {
+    handleSerialProvisioning();
+    if (!client.connected()) {
+      snprintf(err, errLen, "disconnect");
+      Update.abort();
+      return false;
+    }
+    int avail = client.available();
+    if (avail <= 0) {
+      if (millis() - lastByteMs > 120000) {
+        snprintf(err, errLen, "timeout");
+        Update.abort();
+        return false;
+      }
+      delay(5);
+      continue;
+    }
+    size_t want = size - received;
+    if (want > sizeof(buf)) want = sizeof(buf);
+    if (want > (size_t)avail) want = (size_t)avail;
+    int n = client.read(buf, want);
+    if (n <= 0) {
+      delay(5);
+      continue;
+    }
+    lastByteMs = millis();
+    size_t written = Update.write(buf, (size_t)n);
+    if (written != (size_t)n) {
+      snprintf(err, errLen, "write_%u", Update.getError());
+      Update.abort();
+      discardExactBytes(size - received - (size_t)n, 120000);
+      return false;
+    }
+    received += (size_t)n;
+    if ((received % (64 * 1024)) < sizeof(buf)) {
+      Serial.printf("[OTA] received %u/%u\n", (unsigned)received, (unsigned)size);
+    }
+  }
+
+  if (!Update.end(true)) {
+    snprintf(err, errLen, "end_%u", Update.getError());
+    return false;
+  }
+  if (!Update.isFinished()) {
+    snprintf(err, errLen, "not_finished");
+    return false;
+  }
+  return true;
+}
+
+static void handleOtaLine(const char* line) {
+  char seqBuf[16];
+  char sizeBuf[24];
+  char md5Buf[40] = {0};
+  char versionBuf[40] = {0};
+
+  if (!getTokenValue(line, "seq", seqBuf, sizeof(seqBuf)) || !getTokenValue(line, "size", sizeBuf, sizeof(sizeBuf))) {
+    sendRawToPi("ACKOTA seq=0 ok=0 err=parse\n");
+    return;
+  }
+  getTokenValue(line, "md5", md5Buf, sizeof(md5Buf));
+  getTokenValue(line, "version", versionBuf, sizeof(versionBuf));
+  decodeUnderscore(versionBuf);
+
+  long seq = atol(seqBuf);
+  long sizeLong = atol(sizeBuf);
+  if (seq <= 0 || sizeLong <= 0) {
+    sendRawToPi("ACKOTA seq=0 ok=0 err=parse\n");
+    return;
+  }
+
+  Serial.printf("[OTA] start seq=%ld size=%ld version=%s\n", seq, sizeLong, versionBuf);
+  char err[32] = {0};
+  bool ok = receiveOtaFirmware((size_t)sizeLong, md5Buf, err, sizeof(err));
+  char ack[128];
+  if (ok) {
+    snprintf(ack, sizeof(ack), "ACKOTA seq=%ld ok=1 version=%s size=%ld\n", seq, versionBuf, sizeLong);
+    sendRawToPi(ack);
+    Serial.printf("[ACKOTA] sent seq=%ld; rebooting\n", seq);
+    Serial.flush();
+    delay(1200);
+    ESP.restart();
+  } else {
+    snprintf(ack, sizeof(ack), "ACKOTA seq=%ld ok=0 err=%s\n", seq, err[0] ? err : "update");
+    sendRawToPi(ack);
+    Serial.printf("[ACKOTA] failed seq=%ld err=%s\n", seq, err);
+  }
 }
 
 static void handleLcdLine(const char* line) {
@@ -692,17 +1494,17 @@ static void handleLcdLine(const char* line) {
   char cmdBuf[24];
 
   if (!getTokenValue(line, "seq", seqBuf, sizeof(seqBuf))) {
-    client.print("ACKLCD seq=0 ok=0 err=parse\n");
+    sendRawToPi("ACKLCD seq=0 ok=0 err=parse\n");
     return;
   }
   if (!getTokenValue(line, "cmd", cmdBuf, sizeof(cmdBuf))) {
-    client.print("ACKLCD seq=0 ok=0 err=parse\n");
+    sendRawToPi("ACKLCD seq=0 ok=0 err=parse\n");
     return;
   }
 
   long seq = atol(seqBuf);
   if (seq <= 0) {
-    client.print("ACKLCD seq=0 ok=0 err=parse\n");
+    sendRawToPi("ACKLCD seq=0 ok=0 err=parse\n");
     return;
   }
 
@@ -710,22 +1512,40 @@ static void handleLcdLine(const char* line) {
 
   if (strEqNoCase(cmdBuf, "on")) {
     setLcdPower(true);
+    prepareLcdController(false);
+    tft.display();
+    bool restored = false;
     if (lcdImageBuf) {
-      displayLCDImage565(lcdImageBuf);
+      displayLCDImage565(lcdImageBuf, false);
+      restored = true;
+    } else if (gLcdImageStored) {
+      restored = displayLcdImageFromFlash(false);
+      if (!restored) {
+        restored = displayLcdImageFromFlash(true);
+      }
     } else {
       showLCDPlaceholder();
     }
-    client.printf("ACKLCD seq=%ld ok=1 state=on\n", seq);
+    if (gLcdImageStored) {
+      releaseLcdImageBuffer();
+    }
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACKLCD seq=%ld ok=1 state=on lcd_image=%d\n", seq, restored ? 1 : 0);
+    sendRawToPi(ack);
     return;
   }
 
   if (strEqNoCase(cmdBuf, "off")) {
     setLcdPower(false);
-    client.printf("ACKLCD seq=%ld ok=1 state=off\n", seq);
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACKLCD seq=%ld ok=1 state=off\n", seq);
+    sendRawToPi(ack);
     return;
   }
 
-  client.printf("ACKLCD seq=%ld ok=0 err=badcmd\n", seq);
+  char ack[96];
+  snprintf(ack, sizeof(ack), "ACKLCD seq=%ld ok=0 err=badcmd\n", seq);
+  sendRawToPi(ack);
 }
 
 // ================= SAVE / LOAD =================
@@ -733,7 +1553,6 @@ static void saveStateToFlash() {
   prefs.begin("epdstate", false);
   prefs.putBytes("data", &gData, sizeof(gData));
   prefs.putBytes("hls", &gHighlights, sizeof(gHighlights));
-  prefs.putLong("seq", lastAppliedSeq);
   prefs.end();
   Serial.println("[FLASH] state saved");
 }
@@ -756,60 +1575,286 @@ static bool loadStateFromFlash() {
     clearHighlights();
   }
 
-  lastAppliedSeq = prefs.getLong("seq", -1);
+  lastAppliedSeq = -1;
   prefs.end();
   return ok;
 }
 
-// ================= NETWORK =================
-static void connectWiFi() {
-  stage("wifi: begin");
+static void loadNetworkConfig() {
+  prefs.begin("epdnet", true);
+  String ssid = prefs.getString("ssid", DEFAULT_WIFI_SSID);
+  String pass = prefs.getString("pass", DEFAULT_WIFI_PASS);
+  String host = prefs.getString("pi", DEFAULT_PI_HOST);
+  uint16_t port = prefs.getUShort("port", DEFAULT_PI_PORT);
+  prefs.end();
 
+  ssid.toCharArray(gWifiSsid, sizeof(gWifiSsid));
+  pass.toCharArray(gWifiPass, sizeof(gWifiPass));
+  host.toCharArray(gPiHost, sizeof(gPiHost));
+  gPiPort = port ? port : DEFAULT_PI_PORT;
+}
+
+static void startWifiAttempt(const char* reason);
+
+static void saveNetworkConfig(const char* ssid, const char* pass, const char* piHost, uint16_t piPort) {
+  prefs.begin("epdnet", false);
+  prefs.putString("ssid", ssid ? ssid : "");
+  prefs.putString("pass", pass ? pass : "");
+  prefs.putString("pi", piHost ? piHost : DEFAULT_PI_HOST);
+  prefs.putUShort("port", piPort ? piPort : DEFAULT_PI_PORT);
+  prefs.end();
+}
+
+static void printNetworkConfig() {
+  Serial.print("WWCFG id=");
+  Serial.print(DEVICE_ID);
+  Serial.print(" ssid=");
+  Serial.print(gWifiSsid);
+  Serial.print(" pi=");
+  Serial.print(gPiHost);
+  Serial.print(" port=");
+  Serial.print(gPiPort);
+  Serial.print(" wifi=");
+  Serial.print(WiFi.status() == WL_CONNECTED ? "connected" : "offline");
+  Serial.print(" ip=");
+  Serial.println(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "-");
+}
+
+static void prepareWifiRadioForConfig() {
+  if (client.connected()) client.stop();
+  gPiSessionOnline = false;
+
+  WiFi.setAutoReconnect(false);
+  WiFi.scanDelete();
+  WiFi.disconnect(false, false);
+  delay(150);
+  WiFi.mode(WIFI_OFF);
+  delay(250);
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.setHostname(DEVICE_ID);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  gLastWifiAttemptMs = 0;
+  gLastPiAttemptMs = 0;
+  gLastWifiStatus = WiFi.status();
+}
 
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
-    Serial.print(".");
-    if (millis() - t0 > 20000) {
-      Serial.println("\nWiFi timeout retry...");
-      WiFi.disconnect(true);
-      delay(500);
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
-      t0 = millis();
+static void scanWifiForSerial() {
+  Serial.println("WWSCAN begin=1");
+  prepareWifiRadioForConfig();
+  int count = WiFi.scanNetworks(false, true);
+  if (count < 0) {
+    delay(350);
+    WiFi.scanDelete();
+    count = WiFi.scanNetworks(false, true);
+  }
+  if (count < 0) {
+    Serial.println("WWERR scan_failed");
+    return;
+  }
+  for (int i = 0; i < count; i++) {
+    Serial.print("WWSSID index=");
+    Serial.print(i);
+    Serial.print(" ssid=");
+    Serial.print(WiFi.SSID(i));
+    Serial.print(" rssi=");
+    Serial.print(WiFi.RSSI(i));
+    Serial.print(" enc=");
+    Serial.println((int)WiFi.encryptionType(i));
+  }
+  Serial.print("WWEND count=");
+  Serial.println(count);
+}
+
+static void handleSerialCommandLine(char* line) {
+  if (!line || !line[0]) return;
+  while (*line == ' ') line++;
+
+  if (strcmp(line, "WWCFG?") == 0) {
+    printNetworkConfig();
+    return;
+  }
+
+  if (strcmp(line, "WWSCAN") == 0) {
+    scanWifiForSerial();
+    return;
+  }
+
+  if (strncmp(line, "WWSET ", 6) == 0) {
+    char ssid[64] = {0};
+    char pass[96] = {0};
+    char pi[64] = {0};
+    char portBuf[12] = {0};
+
+    if (!getTokenValue(line, "ssid", ssid, sizeof(ssid))) {
+      Serial.println("WWERR missing_ssid");
+      return;
+    }
+    getTokenValue(line, "pass", pass, sizeof(pass));
+    if (!getTokenValue(line, "pi", pi, sizeof(pi))) {
+      strncpy(pi, DEFAULT_PI_HOST, sizeof(pi) - 1);
+    }
+    getTokenValue(line, "port", portBuf, sizeof(portBuf));
+
+    decodePercentInPlace(ssid);
+    decodePercentInPlace(pass);
+    decodePercentInPlace(pi);
+    uint16_t port = (uint16_t)atoi(portBuf);
+    if (!port) port = DEFAULT_PI_PORT;
+
+    prepareWifiRadioForConfig();
+    saveNetworkConfig(ssid, pass, pi, port);
+    strncpy(gWifiSsid, ssid, sizeof(gWifiSsid) - 1);
+    gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
+    strncpy(gWifiPass, pass, sizeof(gWifiPass) - 1);
+    gWifiPass[sizeof(gWifiPass) - 1] = '\0';
+    strncpy(gPiHost, pi, sizeof(gPiHost) - 1);
+    gPiHost[sizeof(gPiHost) - 1] = '\0';
+    gPiPort = port;
+    Serial.println("WWOK saved=1 reconnecting=1");
+    Serial.flush();
+    startWifiAttempt("provisioned credentials");
+    return;
+  }
+
+  Serial.println("WWERR unknown_command");
+}
+
+static void handleSerialProvisioning() {
+  static char line[256];
+  static size_t len = 0;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      line[len] = '\0';
+      handleSerialCommandLine(line);
+      len = 0;
+      continue;
+    }
+    if (len < sizeof(line) - 1) {
+      line[len++] = c;
+    }
+  }
+}
+
+static void announceSerialProvisioningReady() {
+  Serial.print("WWREADY id=");
+  Serial.print(DEVICE_ID);
+  Serial.print(" fw=");
+  Serial.print(FIRMWARE_VERSION);
+  Serial.print(" ssid=");
+  Serial.print(gWifiSsid);
+  Serial.print(" pi=");
+  Serial.print(gPiHost);
+  Serial.print(" port=");
+  Serial.println(gPiPort);
+}
+
+static void serviceSerialProvisioningWindow(uint32_t windowMs) {
+  announceSerialProvisioningReady();
+  uint32_t start = millis();
+  while (millis() - start < windowMs) {
+    handleSerialProvisioning();
+    delay(20);
+  }
+}
+
+// ================= NETWORK =================
+static void startWifiAttempt(const char* reason) {
+  Serial.print("[WIFI] connect attempt: ");
+  Serial.println(reason);
+  prepareWifiRadioForConfig();
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(gWifiSsid, gWifiPass);
+  gLastWifiAttemptMs = millis();
+}
+
+static bool maintainWiFi() {
+  wl_status_t status = WiFi.status();
+
+  if (status != gLastWifiStatus) {
+    gLastWifiStatus = status;
+    Serial.print("[WIFI] status=");
+    Serial.println((int)status);
+    if (status != WL_CONNECTED) {
+      if (client.connected()) client.stop();
+      gPiSessionOnline = false;
     }
   }
 
-  Serial.println("\nWiFi connected!");
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("Hostname: ");
-  Serial.println(WiFi.getHostname());
-  stage("wifi: connected");
+  if (status == WL_CONNECTED) {
+    return true;
+  }
+
+  if (
+    gLastWifiAttemptMs != 0 &&
+    millis() - gLastWifiAttemptMs < WIFI_CONNECT_GRACE_MS &&
+    (status == WL_IDLE_STATUS || status == WL_DISCONNECTED)
+  ) {
+    return false;
+  }
+
+  if (gLastWifiAttemptMs == 0 || millis() - gLastWifiAttemptMs >= WIFI_RETRY_MS) {
+    startWifiAttempt("offline retry");
+  }
+
+  return false;
+}
+
+static bool waitForWiFi(uint32_t maxWaitMs) {
+  stage("wifi: wait");
+  unsigned long start = millis();
+  startWifiAttempt("boot");
+  while (WiFi.status() != WL_CONNECTED && millis() - start < maxWaitMs) {
+    handleSerialProvisioning();
+    maintainWiFi();
+    delay(100);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WIFI] boot wait timed out; continuing with background reconnect");
+    return false;
+  }
+  Serial.println("[WIFI] connected");
+  return true;
 }
 
 static bool connectToPi() {
   if (client.connected()) return true;
+  if (gPiSessionOnline) {
+    Serial.println("[TCP] Pi session lost; reconnecting");
+  }
+  gPiSessionOnline = false;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  if (gLastPiAttemptMs != 0 && millis() - gLastPiAttemptMs < PI_RETRY_MS) {
+    return false;
+  }
+  gLastPiAttemptMs = millis();
 
   stage("tcp: connect");
   client.setTimeout(1);
 
-  if (!client.connect(PI_IP, PI_PORT)) {
+  if (!client.connect(gPiHost, gPiPort)) {
     Serial.println("Pi connection failed.");
     stage("tcp: failed");
     return false;
   }
 
-  client.print("HELLO id=");
-  client.print(DEVICE_ID);
-  client.print(" fw=2\n");
+  char hello[96];
+  snprintf(hello, sizeof(hello), "HELLO id=%s fw=%u\n", DEVICE_ID, (unsigned)FIRMWARE_VERSION);
+  if (!sendRawToPi(hello)) {
+    stage("tcp: hello failed");
+    return false;
+  }
 
   Serial.println("Connected to Pi. Sent HELLO.");
+  gPiSessionOnline = true;
+  lastAppliedSeq = -1;
   stage("tcp: connected");
   return true;
 }
@@ -837,7 +1882,12 @@ static bool applyUpdateLine(const char* line, long* outSeq) {
     nd.room[sizeof(nd.room) - 1] = '\0';
   }
   if (getTokenValue(line, "diet", tmp, sizeof(tmp))) { splitPipeToList(tmp, nd.diet, &nd.dietCount, 8); }
-  if (getTokenValue(line, "allergies", tmp, sizeof(tmp))) { splitPipeToList(tmp, nd.allergies, &nd.allergiesCount, 8); }
+  if (getTokenValue(line, "texture", tmp, sizeof(tmp)) || getTokenValue(line, "allergies", tmp, sizeof(tmp))) {
+    splitPipeToList(tmp, nd.texture, &nd.textureCount, 8);
+  }
+  if (getTokenValue(line, "fluids", tmp, sizeof(tmp)) || getTokenValue(line, "schedule", tmp, sizeof(tmp))) {
+    splitPipeToList(tmp, nd.fluids, &nd.fluidsCount, 8);
+  }
   if (getTokenValue(line, "note", tmp, sizeof(tmp))) {
     decodeUnderscore(tmp);
     strncpy(nd.note, tmp, sizeof(nd.note) - 1);
@@ -862,12 +1912,16 @@ static bool applyUpdateLine(const char* line, long* outSeq) {
 static void handleUpdateLine(const char* line) {
   long seq = -1;
   if (!applyUpdateLine(line, &seq)) {
-    client.printf("ACK seq=%ld ok=0 err=parse\n", seq);
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACK seq=%ld ok=0 err=parse\n", seq);
+    sendRawToPi(ack);
     return;
   }
 
   if (seq == lastAppliedSeq) {
-    client.printf("ACK seq=%ld ok=1 dup=1\n", seq);
+    char ack[96];
+    snprintf(ack, sizeof(ack), "ACK seq=%ld ok=1 dup=1\n", seq);
+    sendRawToPi(ack);
     return;
   }
 
@@ -875,7 +1929,9 @@ static void handleUpdateLine(const char* line) {
   lastAppliedSeq = seq;
   saveStateToFlash();
 
-  client.printf("ACK seq=%ld ok=1\n", seq);
+  char ack[96];
+  snprintf(ack, sizeof(ack), "ACK seq=%ld ok=1\n", seq);
+  sendRawToPi(ack);
   Serial.printf("[ACK] sent seq=%ld\n", seq);
 }
 
@@ -898,14 +1954,51 @@ static void pollPiMessages() {
       char line[128];
       s.toCharArray(line, sizeof(line));
       handleImageLine(line);
+    } else if (s.startsWith("OTA ")) {
+      char line[160];
+      s.toCharArray(line, sizeof(line));
+      handleOtaLine(line);
     } else if (s.startsWith("LCD ")) {
       char line[128];
       s.toCharArray(line, sizeof(line));
       handleLcdLine(line);
     } else if (s == "PING") {
-      client.print("PONG\n");
+      sendRawToPi("PONG\n");
     }
   }
+}
+
+static void sendStatusIfDue() {
+  static unsigned long lastStatusMs = 0;
+  if (!client.connected()) return;
+  if (millis() - lastStatusMs < STATUS_INTERVAL_MS) return;
+  lastStatusMs = millis();
+
+  BatteryTelemetry battery = readBatteryTelemetry();
+  String ipText = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "-";
+  char line[384];
+  snprintf(
+    line,
+    sizeof(line),
+    "STATUS battery=%d battery_ok=%d battery_mv=%d battery_raw_x10=%d battery_low=%d battery_alert=%d battery_plugged=%d battery_charging=%d battery_full=%d heap=%u wifi=%s ip=%s rssi=%d lcd_image=%d epaper_busy=%d uptime_ms=%lu\n",
+    battery.percent,
+    battery.ok ? 1 : 0,
+    battery.millivolts,
+    battery.rawPercentX10,
+    battery.low ? 1 : 0,
+    battery.alertPinLow ? 1 : 0,
+    battery.usbPresent ? 1 : 0,
+    battery.charging ? 1 : 0,
+    battery.full ? 1 : 0,
+    (unsigned)ESP.getFreeHeap(),
+    WiFi.status() == WL_CONNECTED ? "connected" : "offline",
+    ipText.c_str(),
+    WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+    (lcdImageBuf || gLcdImageStored) ? 1 : 0,
+    epaperPinsBusy() ? 1 : 0,
+    (unsigned long)millis()
+  );
+  sendRawToPi(line);
 }
 
 // ================= DEFAULT SAMPLE =================
@@ -919,9 +2012,10 @@ static void loadSampleData() {
   strncpy(gData.diet[0], "MECHANICAL SOFT", 31);
   strncpy(gData.diet[1], "LOW SODIUM", 31);
   strncpy(gData.diet[2], "DIABETIC", 31);
-  gData.allergiesCount = 2;
-  strncpy(gData.allergies[0], "PEANUTS", 31);
-  strncpy(gData.allergies[1], "SHELLFISH", 31);
+  gData.textureCount = 1;
+  strncpy(gData.texture[0], "MINCED AND MOIST", 31);
+  gData.fluidsCount = 1;
+  strncpy(gData.fluids[0], "MILDLY THICK", 31);
   strncpy(gData.note, "NO FISH", sizeof(gData.note) - 1);
   strncpy(gData.drinks, "COFFEE", sizeof(gData.drinks) - 1);
 }
@@ -932,16 +2026,29 @@ void setup() {
   delay(400);
 
   makeDeviceId();
+  loadNetworkConfig();
   Serial.print("DEVICE_ID: ");
   Serial.println(DEVICE_ID);
+  printNetworkConfig();
+  serviceSerialProvisioningWindow(5000);
 
   printHeap("boot");
+  initBatteryMonitor();
 
   // LCD init
+  pinMode(LCD_CS_PIN, OUTPUT);
+  digitalWrite(LCD_CS_PIN, HIGH);
+  pinMode(EPD_CS_PIN, OUTPUT);
+  digitalWrite(EPD_CS_PIN, HIGH);
   pinMode(LCD_BL_PIN, OUTPUT);
-  setLcdPower(true);
+  setLcdPower(false);
   initLCD();
-  showLCDPlaceholder();
+  initPersistentFileSystem();
+  if (displayLcdImageFromFlash()) {
+    releaseLcdImageBuffer();
+  } else {
+    Serial.println("[LCD] no stored image; LCD backlight kept off");
+  }
 
   // E-paper init memory
   stage("setup: DEV_Module_Init");
@@ -950,16 +2057,6 @@ void setup() {
   const uint32_t bufBytes = ((uint32_t)DISPLAY_WIDTH * (uint32_t)DISPLAY_HEIGHT) / 2;
   Serial.print("Framebuffer bytes (scale=6): ");
   Serial.println(bufBytes);
-
-  ImageBuffer = (UBYTE*)heap_caps_malloc(bufBytes, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-  if (!ImageBuffer) {
-    Serial.println("ERROR: DMA framebuffer alloc failed.");
-    while (1) delay(1000);
-  }
-
-  stage("setup: Paint_NewImage");
-  Paint_NewImage(ImageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, 0, EPD_3IN6E_WHITE);
-  Paint_SetScale(6);
 
   stage("setup: load saved or sample");
   if (!loadStateFromFlash()) {
@@ -970,26 +2067,31 @@ void setup() {
     Serial.println("[FLASH] loaded saved state");
   }
 
-  stage("setup: first epaper display");
-  displayFromData(gData);
-
   stage("setup: connectWiFi");
-  connectWiFi();
+  waitForWiFi(30000);
 
   stage("setup: connectToPi");
   connectToPi();
+
+  stage("setup: first epaper display");
+  displayFromData(gData);
 
   stage("setup: done");
   Serial.println("Waiting for updates...");
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) connectWiFi();
+  handleSerialProvisioning();
+  if (!maintainWiFi()) {
+    delay(100);
+    return;
+  }
   if (!connectToPi()) {
-    delay(800);
+    delay(100);
     return;
   }
 
   pollPiMessages();
+  sendStatusIfDue();
   delay(20);
 }

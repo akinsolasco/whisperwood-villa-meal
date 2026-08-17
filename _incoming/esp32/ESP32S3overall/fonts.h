@@ -70,13 +70,13 @@ typedef struct                                          // 汉字字模数据结
 }CH_CN;
 
 typedef struct
-{    
+{
   const CH_CN *table;
   uint16_t size;
   uint16_t ASCII_Width;
   uint16_t Width;
   uint16_t Height;
-  
+
 }cFONT;
 
 extern sFONT Font48;
@@ -93,7 +93,7 @@ extern cFONT Font24CN;
 #ifdef __cplusplus
 }
 #endif
-  
+
 #endif /* __FONTS_H */
 
 

@@ -7,6 +7,9 @@ on:
       - "demo-v*"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -29,13 +32,13 @@ jobs:
       - name: Verify icon exists
         shell: powershell
         run: |
-          if (!(Test-Path "assets/app_icon.ico")) {
-            Write-Error "Missing assets/app_icon.ico"
+          if (!(Test-Path "assets/enhanced_living_whisperwood_icon.ico")) {
+            Write-Error "Missing assets/enhanced_living_whisperwood_icon.ico"
           }
 
       - name: Build app with PyInstaller
         run: |
-          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVillaDemo --icon assets/app_icon.ico --add-data "assets;assets" main.py
+          pyinstaller --noconfirm --windowed --onedir --name WhisperwoodVillaDemo --icon assets/enhanced_living_whisperwood_icon.ico --add-data "assets;assets" --hidden-import serial --hidden-import serial.tools.list_ports main.py
 
       - name: Install Inno Setup
         shell: powershell

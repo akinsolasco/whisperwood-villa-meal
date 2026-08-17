@@ -4,7 +4,7 @@
   * @author  MCD Application Team
   * @version V1.0.0
   * @date    18-February-2014
-  * @brief   This file provides text Font12 for STM32xx-EVAL's LCD driver. 
+  * @brief   This file provides text Font12 for STM32xx-EVAL's LCD driver.
   ******************************************************************************
   * @attention
   *
@@ -38,15 +38,15 @@
 /* Includes ------------------------------------------------------------------*/
 #include "fonts.h"
 
-// 
+//
 //  Font data for Courier New 12pt
-// 
+//
 
 #ifdef __cplusplus
  extern "C" {
 #endif
 
-const CH_CN Font12CN_Table[] = 
+const CH_CN Font12CN_Table[] =
 {
 /*--  文字:  你  --*/
 /*--  微软雅黑12;  此字体下对应的点阵为：宽x高=16x21   --*/

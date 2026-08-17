@@ -1,6 +1,6 @@
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from config import APP_NAME, ASSETS_DIR
+from config import APP_NAME, APP_VERSION, ASSETS_DIR
 from auth.auth_service import AuthService
 
 
@@ -42,7 +42,7 @@ class LoginWindow(QtWidgets.QWidget):
         self.login_loading_timer.setInterval(220)
         self.login_loading_timer.timeout.connect(self._tick_login_loading)
 
-        self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
+        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo_transparent.png"
         self.photo_path = ASSETS_DIR / "senior-woman-talking-with-her-doctor.jpg"
 
         self.setWindowTitle(f"{APP_NAME} Login")
@@ -107,11 +107,11 @@ class LoginWindow(QtWidgets.QWidget):
         self.right_panel.setStyleSheet("background: transparent;")
 
         self.logo = QtWidgets.QLabel(self.right_panel)
-        self.logo.setGeometry(135, 20, 200, 100)
+        self.logo.setGeometry(50, 8, 370, 118)
         self.logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         if self.logo_path.exists():
             pix = QtGui.QPixmap(str(self.logo_path)).scaled(
-                180, 95,
+                360, 112,
                 QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation
             )
@@ -190,6 +190,11 @@ class LoginWindow(QtWidgets.QWidget):
             }
         """)
         self.login_btn.clicked.connect(self.handle_login)
+
+        self.version_label = QtWidgets.QLabel(f"v{APP_VERSION}", self.right_panel)
+        self.version_label.setGeometry(0, 548, 470, 22)
+        self.version_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.version_label.setStyleSheet("color:#9ca3af;font-size:12px;font-weight:700;")
 
         self.close_btn = QtWidgets.QPushButton("X", self.container)
         self.close_btn.setGeometry(1090, 18, 38, 38)

@@ -3,6 +3,7 @@ import re
 import json
 import secrets
 import string
+import threading
 import time
 from typing import Optional, List, Dict, Any
 
@@ -13,35 +14,47 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
     QComboBox, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
     QFileDialog, QStackedWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu
+    QDialog, QHBoxLayout, QTimeEdit, QAbstractSpinBox, QScrollArea, QStyle, QMenu, QSpinBox,
+    QInputDialog, QApplication, QTabWidget
 )
 
-from config import APP_NAME, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS
+from config import APP_NAME, APP_VERSION, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS, APP_DATA_DIR
 from auth.auth_service import AuthService
 from core.app_settings import APP_MODE_DEMO, APP_MODE_SERVER, AppSettingsStore
-from core.control_service_client import ControlServiceClient
+from core.control_service_client import ControlServiceClient, friendly_error_message
 from core.db_service import DatabaseService, generate_resident_uid
 from core.gateway_client import GatewayClient
 from core.models import HighlightRule, auto_fg_for_bg, PALETTE, SECTIONS
 from core.server_data_service import ServerDataService
 from core.server_gateway_client import ServerGatewayClient
+from core.time_utils import format_elapsed_seconds, format_local_now
 
 
 class DashboardWindow(QWidget):
     logout_requested = pyqtSignal()
+    resident_display_finished = pyqtSignal(dict)
 
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
         self.current_user = current_user or {"id": None, "username": "admin", "role": "ADMIN"}
         self.current_role = self.normalize_role(self.current_user.get("role", "NURSE_ADMIN"))
+        self.dropdown_option_defaults = {
+            "diet": ["Regular", "Diabetic", "Low sodium", "Vegetarian", "High protein", "Texture modified", "Nil by mouth", "Custom"],
+            "texture": ["Regular", "Easy to chew", "Soft and bite-sized", "Minced and moist", "Pureed", "Liquidised", "Thickened", "Custom"],
+            "fluids": ["Regular fluids", "Encourage fluids", "Fluid restriction", "Thickened fluids", "Slightly thick", "Mildly thick", "Moderately thick", "Custom"],
+        }
+        self.dropdown_option_buttons = []
         self.settings = AppSettingsStore()
         self.server_mode = self.current_user.get("data_source") == "server" or self.settings.get_mode() == APP_MODE_SERVER
         self.db = ServerDataService() if self.server_mode else DatabaseService()
         self.db.ensure_tables()
+        self.dropdown_options = self.load_dropdown_options()
         self.gateway = ServerGatewayClient() if self.server_mode else GatewayClient()
         self.gateway_online = False
         self.control_service_online = False
         self.control_last_results: Dict[str, Dict[str, Any]] = {}
+        self.battery_alert_settings = self.default_battery_alert_settings()
+        self.battery_alert_last_popup: Dict[str, float] = {}
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -56,10 +69,12 @@ class DashboardWindow(QWidget):
         self.selected_audit_log: Optional[Dict[str, Any]] = None
         self.rules: List[HighlightRule] = []
         self.global_schedule_enabled = False
+        self.global_schedule_saved = False
         self.global_schedule_on = "07:00"
         self.global_schedule_off = "20:00"
         self.global_schedule_sleep_if_no_image = False
-        self.logo_path = ASSETS_DIR / "Whisperwood-Villa-logo-removebg-preview.png"
+        self.global_schedule_entries: List[Dict[str, Any]] = []
+        self.logo_path = ASSETS_DIR / "enhanced_living_whisperwood_logo_transparent.png"
         self.page_base_width = 1218
 
         self.setWindowTitle(f"{APP_NAME} Dashboard")
@@ -79,6 +94,7 @@ class DashboardWindow(QWidget):
 
         self.build_ui()
         self.bind_events()
+        self.resident_display_finished.connect(self.on_resident_display_finished)
         self.fit_to_screen()
         self.apply_role_permissions()
         self.apply_write_lock()
@@ -103,6 +119,7 @@ class DashboardWindow(QWidget):
         self.control_status_timer.start()
         QTimer.singleShot(0, self.position_window_controls)
         QTimer.singleShot(200, self.refresh_control_connection_status)
+        QTimer.singleShot(650, lambda: self.load_battery_alert_settings())
         if self.current_user.get("password_must_change"):
             QTimer.singleShot(300, self.show_required_password_change)
         elif self.current_user.get("force_password_change_warning"):
@@ -148,6 +165,104 @@ class DashboardWindow(QWidget):
 
     def can_view_technical(self) -> bool:
         return self.current_role == "IT_ADMIN"
+
+    # ---------------------------- battery alert policy ----------------------------
+
+    def default_battery_alert_settings(self) -> Dict[str, Any]:
+        return {
+            "enabled": True,
+            "low_threshold": 20,
+            "critical_threshold": 10,
+            "popup_cooldown_minutes": 30,
+            "recipient_roles": ["IT_ADMIN"],
+            "email_enabled": False,
+            "recipient_emails": [],
+            "email_cooldown_minutes": 60,
+            "email_subject_prefix": "Whisperwood Battery Alert",
+        }
+
+    def normalize_battery_alert_settings(self, raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        settings = self.default_battery_alert_settings()
+        if isinstance(raw, dict):
+            settings.update(raw)
+        try:
+            settings["low_threshold"] = max(1, min(100, int(settings.get("low_threshold", 20))))
+        except Exception:
+            settings["low_threshold"] = 20
+        try:
+            settings["critical_threshold"] = max(1, min(settings["low_threshold"], int(settings.get("critical_threshold", 10))))
+        except Exception:
+            settings["critical_threshold"] = 10
+        try:
+            settings["popup_cooldown_minutes"] = max(1, min(1440, int(settings.get("popup_cooldown_minutes", 30))))
+        except Exception:
+            settings["popup_cooldown_minutes"] = 30
+        roles = settings.get("recipient_roles") or ["IT_ADMIN"]
+        if isinstance(roles, str):
+            roles = [r.strip() for r in roles.split(",")]
+        normalized_roles = []
+        for role in roles:
+            key = self.normalize_role(role)
+            if key in {"IT_ADMIN", "NURSE_ADMIN", "NURSE", "VERIFIER"} and key not in normalized_roles:
+                normalized_roles.append(key)
+        settings["recipient_roles"] = normalized_roles or ["IT_ADMIN"]
+        settings["enabled"] = bool(settings.get("enabled", True))
+        emails = settings.get("recipient_emails") or []
+        if isinstance(emails, str):
+            emails = [part.strip() for part in emails.replace(";", ",").split(",")]
+        seen_emails = set()
+        clean_emails = []
+        for email in emails or []:
+            value = str(email or "").strip()
+            marker = value.lower()
+            if value and "@" in value and marker not in seen_emails:
+                seen_emails.add(marker)
+                clean_emails.append(value)
+        settings["recipient_emails"] = clean_emails
+        settings["email_enabled"] = bool(settings.get("email_enabled", False))
+        try:
+            settings["email_cooldown_minutes"] = max(5, min(1440, int(settings.get("email_cooldown_minutes", 60))))
+        except Exception:
+            settings["email_cooldown_minutes"] = 60
+        settings["email_subject_prefix"] = str(settings.get("email_subject_prefix") or "Whisperwood Battery Alert").strip()
+        return settings
+
+    def role_allows_battery_popup(self) -> bool:
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        return settings.get("enabled", True) and self.current_role in set(settings.get("recipient_roles") or [])
+
+    def truthy(self, value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "ok"}
+
+    def battery_display_text(self, device: Dict[str, Any], compact: bool = False) -> str:
+        level = device.get("battery_level")
+        if level is None or level == "":
+            return "N/A"
+        text = f"{level}%"
+        voltage = device.get("battery_voltage")
+        if voltage not in (None, "") and not compact:
+            try:
+                text += f" | {float(voltage):.2f}V"
+            except Exception:
+                pass
+        if self.truthy(device.get("battery_low")):
+            text += " | LOW" if not compact else " low"
+        return text
+
+    def power_state_text(self, device: Dict[str, Any]) -> str:
+        if self.truthy(device.get("battery_full")):
+            return "Fully charged"
+        if self.truthy(device.get("battery_charging")):
+            return "Charging"
+        if self.truthy(device.get("battery_plugged")):
+            return "Plugged in"
+        if device.get("battery_ok") is False or str(device.get("battery_ok")).lower() == "false":
+            return "Gauge not detected"
+        return "On battery"
 
     # ---------------------------- styles ----------------------------
 
@@ -196,7 +311,7 @@ class DashboardWindow(QWidget):
 
     def input_style(self):
         return """
-            QLineEdit, QTextEdit, QComboBox, QTimeEdit {
+            QLineEdit, QTextEdit, QComboBox, QTimeEdit, QSpinBox {
                 background-color: #ffffff;
                 color: #0f172a;
                 border: 1px solid #cbd5e1;
@@ -204,10 +319,10 @@ class DashboardWindow(QWidget):
                 padding: 10px 12px;
                 font-size: 14px;
             }
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QTimeEdit:focus {
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QTimeEdit:focus, QSpinBox:focus {
                 border: 1px solid #0f766e;
             }
-            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QTimeEdit:disabled {
+            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QTimeEdit:disabled, QSpinBox:disabled {
                 background-color: #f1f5f9;
                 color: #94a3b8;
                 border: 1px solid #d8e1ea;
@@ -216,6 +331,205 @@ class DashboardWindow(QWidget):
 
     def label_style(self):
         return "font-size: 13px; font-weight: 700; color: #334155; background: transparent; border: none;"
+
+    def checkbox_style(self):
+        return """
+            QCheckBox {
+                color: #0f172a;
+                font-size: 13px;
+                font-weight: 700;
+                spacing: 8px;
+                background: transparent;
+                border: none;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 5px;
+                border: 1px solid #94a3b8;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0f766e;
+                border: 1px solid #0f766e;
+            }
+        """
+
+    def dropdown_options_file(self):
+        return APP_DATA_DIR / "resident_dropdown_options.json"
+
+    def normalize_option_list(self, values):
+        seen = set()
+        out = []
+        for value in values or []:
+            text = str(value or "").strip()
+            key = text.lower()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
+
+    def load_local_dropdown_options(self):
+        stored = {}
+        path = self.dropdown_options_file()
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    stored = json.load(fh)
+            except Exception:
+                stored = {}
+        return stored if isinstance(stored, dict) else {}
+
+    def load_shared_dropdown_options(self):
+        if not hasattr(self, "db") or not hasattr(self.db, "get_dropdown_options"):
+            return None
+        try:
+            options = self.db.get_dropdown_options()
+        except Exception:
+            return None
+        return options if isinstance(options, dict) else None
+
+    def load_dropdown_options(self):
+        local_options = self.load_local_dropdown_options()
+        shared_options = self.load_shared_dropdown_options()
+        stored = shared_options if shared_options is not None else local_options
+        merged = {
+            key: self.normalize_option_list(
+                list(defaults) +
+                list(stored.get(key, [])) +
+                list(local_options.get(key, []))
+            )
+            for key, defaults in self.dropdown_option_defaults.items()
+        }
+        if shared_options is not None and merged != shared_options:
+            self.save_shared_dropdown_options(merged, notify=False)
+        return merged
+
+    def save_local_dropdown_options(self):
+        path = self.dropdown_options_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(self.dropdown_options, fh, indent=2)
+
+    def save_shared_dropdown_options(self, options, notify=True):
+        if not hasattr(self, "db") or not hasattr(self.db, "save_dropdown_options"):
+            return False
+        try:
+            self.db.save_dropdown_options(options)
+            return True
+        except Exception as exc:
+            if notify:
+                self.show_error(
+                    "Shared dropdown not saved",
+                    f"The option was saved locally, but could not be shared with other users yet.\n\n{exc}",
+                )
+            return False
+
+    def save_dropdown_options(self, notify=True):
+        self.save_local_dropdown_options()
+        self.save_shared_dropdown_options(self.dropdown_options, notify=notify)
+
+    def editable_dropdown(self, parent, options, placeholder="Select or type custom"):
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        combo.addItems(options)
+        combo.setCurrentIndex(-1)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.InsertAtBottom)
+        if combo.lineEdit():
+            combo.lineEdit().setPlaceholderText(placeholder)
+        combo.setStyleSheet(self.input_style())
+        return combo
+
+    def create_dropdown_option_buttons(self, parent, combo, add_x, y, delete_x):
+        add_btn = QPushButton("+", parent)
+        add_btn.setGeometry(add_x, y, 38, 42)
+        add_btn.setToolTip("Add the typed value to this dropdown")
+        add_btn.setStyleSheet(self.secondary_btn_style())
+        add_btn.clicked.connect(lambda: self.add_dropdown_option(combo))
+
+        delete_btn = QPushButton("Del", parent)
+        delete_btn.setGeometry(delete_x, y, 50, 42)
+        delete_btn.setToolTip("Delete the selected option from this dropdown")
+        delete_btn.setStyleSheet(self.secondary_btn_style())
+        delete_btn.clicked.connect(lambda: self.delete_dropdown_option(combo))
+
+        self.dropdown_option_buttons.extend([add_btn, delete_btn])
+        return add_btn, delete_btn
+
+    def add_dropdown_option(self, combo):
+        option_key = combo.property("option_key")
+        text = combo.currentText().strip()
+        if not text:
+            text, ok = QInputDialog.getText(self, "Add dropdown option", "Option name:")
+            text = text.strip()
+            if not ok or not text:
+                return
+        if combo.findText(text, Qt.MatchFlag.MatchFixedString) < 0:
+            combo.addItem(text)
+        combo.setCurrentText(text)
+        if option_key:
+            self.dropdown_options[option_key] = self.normalize_option_list(
+                [combo.itemText(i) for i in range(combo.count())]
+            )
+            self.save_dropdown_options()
+        self.refresh_token_list()
+        self.update_preview()
+
+    def delete_dropdown_option(self, combo):
+        option_key = combo.property("option_key")
+        text = combo.currentText().strip()
+        idx = combo.findText(text, Qt.MatchFlag.MatchFixedString)
+        if idx < 0:
+            self.show_error("Delete option", "Select an existing dropdown option to delete.")
+            return
+        if combo.count() <= 1:
+            self.show_error("Delete option", "At least one option must remain in the dropdown.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete dropdown option",
+            f"Delete '{text}' from this dropdown?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        combo.removeItem(idx)
+        combo.setCurrentIndex(-1)
+        combo.setEditText("")
+        if option_key:
+            self.dropdown_options[option_key] = self.normalize_option_list(
+                [combo.itemText(i) for i in range(combo.count())]
+            )
+            self.save_dropdown_options()
+        self.refresh_token_list()
+        self.update_preview()
+
+    def field_text(self, widget) -> str:
+        if isinstance(widget, QComboBox):
+            return widget.currentText().strip()
+        if isinstance(widget, QLineEdit):
+            return widget.text().strip()
+        return ""
+
+    def set_field_text(self, widget, value):
+        value = str(value or "")
+        if isinstance(widget, QComboBox):
+            idx = widget.findText(value, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                widget.setCurrentIndex(idx)
+            else:
+                widget.setEditText(value)
+            return
+        widget.setText(value)
+
+    def clear_field_text(self, widget):
+        if isinstance(widget, QComboBox):
+            widget.setCurrentIndex(-1)
+            widget.setEditText("")
+            return
+        widget.clear()
 
     # ---------------------------- window helpers ----------------------------
 
@@ -259,12 +573,12 @@ class DashboardWindow(QWidget):
         self.apply_frame_style(self.sidebar, "background-color: #ffffff; border-radius: 10px; border: 1px solid #d8e1ea;")
 
         self.logo = QLabel(self.sidebar)
-        self.logo.setGeometry(22, 20, 200, 82)
+        self.logo.setGeometry(10, 12, 224, 98)
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if self.logo_path.exists():
             self.logo.setPixmap(
                 QPixmap(str(self.logo_path)).scaled(
-                    175, 78,
+                    216, 92,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
@@ -423,6 +737,11 @@ class DashboardWindow(QWidget):
         self.btn_logout.setGeometry(18, 805, 208, 42)
         self.btn_logout.setStyleSheet(self.secondary_btn_style())
 
+        self.sidebar_version = QLabel(f"v{APP_VERSION}", self.sidebar)
+        self.sidebar_version.setGeometry(18, 856, 208, 22)
+        self.sidebar_version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sidebar_version.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 800;")
+
         # Title area
         self.title = QLabel(f"{APP_NAME} Control Center", self.container)
         self.title.setGeometry(280, 22, 850, 32)
@@ -431,6 +750,11 @@ class DashboardWindow(QWidget):
         self.subtitle = QLabel("Hospital-grade resident display operations, approvals, verification, and technical health", self.container)
         self.subtitle.setGeometry(280, 56, 860, 18)
         self.subtitle.setStyleSheet("font-size: 13px; color: #475569;")
+
+        self.version_badge = QLabel(f"v{APP_VERSION}", self.container)
+        self.version_badge.setGeometry(1140, 56, 180, 24)
+        self.version_badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.version_badge.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 800;")
 
         self.base_url_edit = QLineEdit(self.container)
         self.base_url_edit.setGeometry(0, 0, 1, 1)
@@ -564,6 +888,7 @@ class DashboardWindow(QWidget):
         if self.btn_profile_settings.isVisible():
             controls.append((self.btn_profile_settings, 42, 10))
         controls.append((self.btn_logout, 42, 0))
+        controls.append((self.sidebar_version, 22, 0))
 
         controls_height = sum(height + gap for _widget, height, gap in controls)
         controls_y = max(nav_y + 14, sidebar_h - controls_height - 18)
@@ -577,6 +902,7 @@ class DashboardWindow(QWidget):
         self.close_btn.move(right, 24)
         self.max_btn.move(right - 45, 24)
         self.min_btn.move(right - 90, 24)
+        self.version_badge.setGeometry(max(280, right - 280), 56, 230, 24)
         self.base_url_edit.setVisible(False)
 
         available_width = max(640, self.container.width() - 302)
@@ -743,6 +1069,8 @@ class DashboardWindow(QWidget):
         # Render text labels as plain text (no visible container box).
         protected_labels = {
             getattr(self, "user_avatar", None),
+            getattr(self, "lcd_empty_state", None),
+            getattr(self, "upd_lcd_empty_state", None),
         }
         for label in self.findChildren(QLabel):
             if label in protected_labels:
@@ -909,7 +1237,7 @@ class DashboardWindow(QWidget):
         page.setStyleSheet("background: transparent;")
 
         self.residents_panel = QFrame(page)
-        self.residents_panel.setGeometry(0, 0, 330, 940)
+        self.residents_panel.setGeometry(0, 0, 330, 1110)
         self.apply_frame_style(self.residents_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         title = QLabel("Residents", self.residents_panel)
@@ -922,7 +1250,7 @@ class DashboardWindow(QWidget):
         self.search_resident.setStyleSheet(self.input_style())
 
         self.resident_list = QListWidget(self.residents_panel)
-        self.resident_list.setGeometry(18, 110, 294, 812)
+        self.resident_list.setGeometry(18, 110, 294, 982)
         self.resident_list.setStyleSheet("""
             QListWidget {
                 background-color: transparent;
@@ -950,7 +1278,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.form_panel = QFrame(page)
-        self.form_panel.setGeometry(345, 0, 420, 940)
+        self.form_panel.setGeometry(345, 0, 420, 1110)
         self.apply_frame_style(self.form_panel, "background-color: #121212; border-radius: 22px; border: 1px solid #1f1f1f;")
 
         self.form_heading = QLabel("Resident Information", self.form_panel)
@@ -1001,90 +1329,122 @@ class DashboardWindow(QWidget):
         self.lbl_room.setStyleSheet(self.label_style())
 
         self.txt_room = QLineEdit(self.form_panel)
-        self.txt_room.setGeometry(22, 227, 120, 42)
+        self.txt_room.setGeometry(22, 227, 180, 42)
         self.txt_room.setStyleSheet(self.input_style())
 
-        self.lbl_alert = QLabel("Alert / Status", self.form_panel)
-        self.lbl_alert.setGeometry(160, 205, 90, 18)
-        self.lbl_alert.setStyleSheet(self.label_style())
-
         self.cmb_alert = QComboBox(self.form_panel)
-        self.cmb_alert.setGeometry(160, 227, 160, 42)
+        self.cmb_alert.setGeometry(-1000, -1000, 1, 1)
         self.cmb_alert.addItems(["Stable", "Needs Attention", "Fall Risk", "Emergency"])
         self.cmb_alert.setStyleSheet(self.input_style())
+        self.cmb_alert.hide()
 
-        self.lbl_diet = QLabel("Diet (comma list)", self.form_panel)
+        self.lbl_diet = QLabel("Diet", self.form_panel)
         self.lbl_diet.setGeometry(22, 280, 120, 18)
         self.lbl_diet.setStyleSheet(self.label_style())
 
-        self.txt_diet = QLineEdit(self.form_panel)
-        self.txt_diet.setGeometry(22, 302, 376, 42)
-        self.txt_diet.setStyleSheet(self.input_style())
+        self.txt_diet = self.editable_dropdown(
+            self.form_panel,
+            self.dropdown_options["diet"],
+            "Select diet or type custom",
+        )
+        self.txt_diet.setProperty("option_key", "diet")
+        self.txt_diet.setGeometry(22, 302, 266, 42)
+        self.btn_add_diet_option, self.btn_delete_diet_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_diet, 298, 302, 348)
 
-        self.lbl_allergies = QLabel("Allergies (comma list)", self.form_panel)
+        self.lbl_allergies = QLabel("Texture", self.form_panel)
         self.lbl_allergies.setGeometry(22, 355, 140, 18)
         self.lbl_allergies.setStyleSheet(self.label_style())
 
-        self.txt_allergies = QLineEdit(self.form_panel)
-        self.txt_allergies.setGeometry(22, 377, 376, 42)
-        self.txt_allergies.setStyleSheet(self.input_style())
+        self.txt_allergies = self.editable_dropdown(
+            self.form_panel,
+            self.dropdown_options["texture"],
+            "Select texture or type custom",
+        )
+        self.txt_allergies.setProperty("option_key", "texture")
+        self.txt_allergies.setGeometry(22, 377, 266, 42)
+        self.btn_add_texture_option, self.btn_delete_texture_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_allergies, 298, 377, 348)
+
+        self.lbl_schedule = QLabel("Fluids", self.form_panel)
+        self.lbl_schedule.setGeometry(22, 430, 80, 18)
+        self.lbl_schedule.setStyleSheet(self.label_style())
+
+        self.txt_schedule = self.editable_dropdown(
+            self.form_panel,
+            self.dropdown_options["fluids"],
+            "Select fluids or type custom",
+        )
+        self.txt_schedule.setProperty("option_key", "fluids")
+        self.txt_schedule.setGeometry(22, 452, 266, 42)
+        self.btn_add_fluids_option, self.btn_delete_fluids_option = self.create_dropdown_option_buttons(self.form_panel, self.txt_schedule, 298, 452, 348)
 
         self.lbl_note = QLabel("Note", self.form_panel)
-        self.lbl_note.setGeometry(22, 430, 60, 18)
+        self.lbl_note.setGeometry(22, 505, 60, 18)
         self.lbl_note.setStyleSheet(self.label_style())
 
         self.txt_note = QTextEdit(self.form_panel)
-        self.txt_note.setGeometry(22, 452, 376, 58)
+        self.txt_note.setGeometry(22, 527, 376, 58)
         self.txt_note.setStyleSheet(self.input_style())
 
         self.lbl_drinks = QLabel("Drinks", self.form_panel)
-        self.lbl_drinks.setGeometry(22, 520, 60, 18)
+        self.lbl_drinks.setGeometry(22, 595, 60, 18)
         self.lbl_drinks.setStyleSheet(self.label_style())
 
         self.txt_drinks = QLineEdit(self.form_panel)
-        self.txt_drinks.setGeometry(22, 542, 180, 42)
+        self.txt_drinks.setGeometry(22, 617, 376, 42)
         self.txt_drinks.setStyleSheet(self.input_style())
 
-        self.lbl_schedule = QLabel("Schedule", self.form_panel)
-        self.lbl_schedule.setGeometry(218, 520, 80, 18)
-        self.lbl_schedule.setStyleSheet(self.label_style())
-
-        self.txt_schedule = QLineEdit(self.form_panel)
-        self.txt_schedule.setGeometry(218, 542, 180, 42)
-        self.txt_schedule.setPlaceholderText("Meals, care, reminders")
-        self.txt_schedule.setStyleSheet(self.input_style())
-
         self.lbl_source = QLabel("Source document", self.form_panel)
-        self.lbl_source.setGeometry(22, 586, 120, 18)
+        self.lbl_source.setGeometry(22, 670, 120, 18)
         self.lbl_source.setStyleSheet(self.label_style())
 
         self.btn_attach_source = QPushButton("Attach Document", self.form_panel)
-        self.btn_attach_source.setGeometry(22, 608, 150, 36)
+        self.btn_attach_source.setGeometry(22, 692, 150, 36)
         self.btn_attach_source.setStyleSheet(self.secondary_btn_style())
 
         self.source_doc_label = QLabel("No source document attached", self.form_panel)
-        self.source_doc_label.setGeometry(182, 608, 216, 36)
+        self.source_doc_label.setGeometry(182, 692, 216, 36)
         self.source_doc_label.setWordWrap(True)
         self.source_doc_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
 
+        self.lbl_resident_photo = QLabel("Resident photo for LCD", self.form_panel)
+        self.lbl_resident_photo.setGeometry(22, 734, 180, 18)
+        self.lbl_resident_photo.setStyleSheet(self.label_style())
+
+        self.btn_attach_resident_photo = QPushButton("Attach Photo", self.form_panel)
+        self.btn_attach_resident_photo.setGeometry(22, 756, 128, 36)
+        self.btn_attach_resident_photo.setStyleSheet(self.secondary_btn_style())
+
+        self.btn_clear_resident_photo = QPushButton("Clear Photo", self.form_panel)
+        self.btn_clear_resident_photo.setGeometry(158, 756, 110, 36)
+        self.btn_clear_resident_photo.setStyleSheet(self.secondary_btn_style())
+
+        self.btn_send_resident_photo = QPushButton("Send Photo", self.form_panel)
+        self.btn_send_resident_photo.setGeometry(278, 756, 120, 36)
+        self.btn_send_resident_photo.setStyleSheet(self.secondary_btn_style())
+
+        self.resident_photo_label = QLabel("No resident photo attached", self.form_panel)
+        self.resident_photo_label.setGeometry(22, 796, 376, 18)
+        self.resident_photo_label.setWordWrap(True)
+        self.resident_photo_label.setStyleSheet("font-size: 11px; color: #a7a7a7;")
+
         self.chk_safety_review = QCheckBox("Needs safety review", self.form_panel)
-        self.chk_safety_review.setGeometry(22, 650, 160, 24)
+        self.chk_safety_review.setGeometry(22, 820, 160, 24)
         self.chk_safety_review.setStyleSheet(self.chk_active.styleSheet())
 
         self.btn_new_resident = QPushButton("New Resident", self.form_panel)
-        self.btn_new_resident.setGeometry(22, 686, 120, 42)
+        self.btn_new_resident.setGeometry(22, 856, 120, 42)
         self.btn_new_resident.setStyleSheet(self.secondary_btn_style())
 
         self.btn_save_resident = QPushButton("Save Resident", self.form_panel)
-        self.btn_save_resident.setGeometry(152, 686, 120, 42)
+        self.btn_save_resident.setGeometry(152, 856, 120, 42)
         self.btn_save_resident.setStyleSheet(self.primary_btn_style())
 
         self.btn_clear_fields = QPushButton("Clear Form", self.form_panel)
-        self.btn_clear_fields.setGeometry(282, 686, 116, 42)
+        self.btn_clear_fields.setGeometry(282, 856, 116, 42)
         self.btn_clear_fields.setStyleSheet(self.secondary_btn_style())
 
         self.btn_delete_resident = QPushButton("Delete Resident", self.form_panel)
-        self.btn_delete_resident.setGeometry(22, 736, 376, 38)
+        self.btn_delete_resident.setGeometry(22, 906, 376, 38)
         self.btn_delete_resident.setStyleSheet("""
             QPushButton {
                 background-color: #fff1f2;
@@ -1100,16 +1460,16 @@ class DashboardWindow(QWidget):
         """)
 
         review_label = QLabel("Staff review note", self.form_panel)
-        review_label.setGeometry(22, 790, 150, 18)
+        review_label.setGeometry(22, 958, 150, 18)
         review_label.setStyleSheet(self.label_style())
 
         self.nurse_review_comment = QTextEdit(self.form_panel)
-        self.nurse_review_comment.setGeometry(22, 814, 376, 72)
+        self.nurse_review_comment.setGeometry(22, 982, 376, 68)
         self.nurse_review_comment.setPlaceholderText("Write what needs review, the source checked, or the observation to verify.")
         self.nurse_review_comment.setStyleSheet(self.input_style())
 
         self.btn_submit_review_request = QPushButton("Submit for Admin Review", self.form_panel)
-        self.btn_submit_review_request.setGeometry(22, 898, 376, 38)
+        self.btn_submit_review_request.setGeometry(22, 1054, 376, 38)
         self.btn_submit_review_request.setStyleSheet(self.primary_btn_style())
 
         self.preview_panel = QFrame(page)
@@ -1125,7 +1485,7 @@ class DashboardWindow(QWidget):
         self.btn_go_pairing_after_save.setStyleSheet(self.secondary_btn_style())
 
         self.epaper_card = QFrame(self.preview_panel)
-        self.epaper_card.setGeometry(22, 60, 394, 185)
+        self.epaper_card.setGeometry(22, 60, 394, 210)
         self.apply_frame_style(self.epaper_card, "background-color: #efefef; border-radius: 18px;")
 
         ep_title = QLabel("E-Paper Preview", self.epaper_card)
@@ -1144,17 +1504,21 @@ class DashboardWindow(QWidget):
         self.ep_diet.setGeometry(16, 98, 300, 22)
         self.ep_diet.setStyleSheet("color: #111111; font-size: 14px;")
 
-        self.ep_allergies = QLabel("Allergies: ---", self.epaper_card)
+        self.ep_allergies = QLabel("Texture: ---", self.epaper_card)
         self.ep_allergies.setGeometry(16, 124, 350, 22)
         self.ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
+        self.ep_fluids = QLabel("Fluids: ---", self.epaper_card)
+        self.ep_fluids.setGeometry(16, 148, 350, 22)
+        self.ep_fluids.setStyleSheet("color: #111111; font-size: 14px;")
+
         self.ep_note = QLabel("Note: ---", self.epaper_card)
-        self.ep_note.setGeometry(16, 148, 350, 30)
+        self.ep_note.setGeometry(16, 172, 350, 30)
         self.ep_note.setWordWrap(True)
         self.ep_note.setStyleSheet("color: #111111; font-size: 13px;")
 
         self.lcd_card = QFrame(self.preview_panel)
-        self.lcd_card.setGeometry(22, 268, 394, 210)
+        self.lcd_card.setGeometry(22, 288, 394, 210)
         self.apply_frame_style(self.lcd_card, "background-color: #0a1831; border-radius: 18px; border: 2px solid #20457b;")
 
         lcd_title = QLabel("LCD Preview", self.lcd_card)
@@ -1171,6 +1535,22 @@ class DashboardWindow(QWidget):
             }
         """)
         self.lcd_image.hide()
+
+        self.lcd_empty_state = QLabel("Add a resident image to preview the LCD display.", self.lcd_card)
+        self.lcd_empty_state.setGeometry(28, 54, 338, 112)
+        self.lcd_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lcd_empty_state.setWordWrap(True)
+        self.lcd_empty_state.setStyleSheet("""
+            QLabel {
+                background-color: #f8fafc;
+                color: #0f766e;
+                border: 1px dashed #7dd3fc;
+                border-radius: 8px;
+                padding: 16px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+        """)
 
         self.lcd_name = QLabel("Resident Name", self.lcd_card)
         self.lcd_name.setGeometry(20, 42, 354, 28)
@@ -1202,7 +1582,7 @@ class DashboardWindow(QWidget):
         self.lcd_note.setStyleSheet("color: #eef2f7; font-size: 13px;")
 
         self.overview_panel = QFrame(self.preview_panel)
-        self.overview_panel.setGeometry(22, 500, 394, 260)
+        self.overview_panel.setGeometry(22, 520, 394, 260)
         self.apply_frame_style(self.overview_panel, "background-color: #1a1a1a; border-radius: 16px; border: 1px solid #262626;")
 
         overview_title = QLabel("Overall Dashboard", self.overview_panel)
@@ -1228,7 +1608,7 @@ class DashboardWindow(QWidget):
         self.record_summary_labels["database_mode"].setAlignment(Qt.AlignmentFlag.AlignRight)
         self.record_summary_labels["database_mode"].setStyleSheet("font-size: 12px; color: #2dd4bf;")
 
-        return self.wrap_scroll_page(page, 980)
+        return self.wrap_scroll_page(page, 1160)
 
     # ---------------------------- approvals page ----------------------------
 
@@ -1447,7 +1827,7 @@ class DashboardWindow(QWidget):
         subtitle.setGeometry(24, 56, 760, 22)
         subtitle.setStyleSheet("font-size: 13px; color: #475569;")
 
-        self.control_header_status = QLabel("Demo Mode - No Raspberry Pi Connected", header)
+        self.control_header_status = QLabel("No Raspberry Pi Connected", header)
         self.control_header_status.setGeometry(820, 30, 360, 34)
         self.control_header_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.control_header_status.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 700;")
@@ -1480,7 +1860,7 @@ class DashboardWindow(QWidget):
         """)
 
         self.it_control_stack = QStackedWidget(page)
-        self.it_control_stack.setGeometry(0, 145, 1218, 895)
+        self.it_control_stack.setGeometry(0, 145, 1218, 1040)
         self.it_control_stack.setStyleSheet("background: transparent;")
 
         sections = [
@@ -1499,7 +1879,7 @@ class DashboardWindow(QWidget):
 
         self.it_control_stack.setCurrentIndex(0)
         self.load_control_dashboard_placeholder()
-        return self.wrap_scroll_page(page, 1080)
+        return self.wrap_scroll_page(page, 1225)
 
     def control_section_icon(self, key):
         icon_map = {
@@ -1529,7 +1909,13 @@ class DashboardWindow(QWidget):
         elif index == 1:
             self.load_control_services()
         elif index == 2:
+            self.load_battery_alert_settings(timeout=3.0)
             self.load_control_devices()
+        elif index == 3:
+            self.load_control_devices()
+            self.load_ota_releases()
+        elif index == 4:
+            self.load_control_backups()
         elif index == 5:
             self.load_it_audit_logs()
 
@@ -1798,18 +2184,184 @@ class DashboardWindow(QWidget):
             value.setStyleSheet("font-size: 24px; color: #0f172a; font-weight: 800;")
             self.control_device_summary[key] = value
 
-        message = QLabel("ESP32 Registry Pending Operation Manager Integration", page)
+        message = QLabel("ESP32 registry is refreshed from the Operation Manager in real time.", page)
         message.setGeometry(0, 166, 600, 26)
         message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
 
         self.it_device_table = QTableWidget(page)
-        self.it_device_table.setGeometry(0, 210, 955, 500)
-        self.it_device_table.setColumnCount(7)
-        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Last Seen"])
+        self.it_device_table.setGeometry(0, 205, 955, 220)
+        self.it_device_table.setColumnCount(8)
+        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Power", "Last Seen"])
         self.it_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.it_device_table.verticalHeader().setVisible(False)
         self.it_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.it_device_table.setStyleSheet(self.table_style())
+
+        battery_panel = QFrame(page)
+        battery_panel.setGeometry(0, 445, 955, 220)
+        self.apply_frame_style(battery_panel, self.card_style())
+
+        battery_title = QLabel("Battery Alert Policy", battery_panel)
+        battery_title.setGeometry(22, 16, 230, 24)
+        battery_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+
+        self.chk_battery_alert_enabled = QCheckBox("Enable popups", battery_panel)
+        self.chk_battery_alert_enabled.setGeometry(22, 52, 145, 26)
+        self.chk_battery_alert_enabled.setStyleSheet(self.checkbox_style())
+
+        low_label = QLabel("Low at", battery_panel)
+        low_label.setGeometry(178, 48, 75, 18)
+        low_label.setStyleSheet(self.label_style())
+        self.spin_battery_low = QSpinBox(battery_panel)
+        self.spin_battery_low.setGeometry(178, 70, 112, 38)
+        self.spin_battery_low.setRange(1, 100)
+        self.spin_battery_low.setSuffix("%")
+        self.spin_battery_low.setStyleSheet(self.input_style())
+
+        critical_label = QLabel("Critical at", battery_panel)
+        critical_label.setGeometry(310, 48, 95, 18)
+        critical_label.setStyleSheet(self.label_style())
+        self.spin_battery_critical = QSpinBox(battery_panel)
+        self.spin_battery_critical.setGeometry(310, 70, 112, 38)
+        self.spin_battery_critical.setRange(1, 100)
+        self.spin_battery_critical.setSuffix("%")
+        self.spin_battery_critical.setStyleSheet(self.input_style())
+        self.spin_battery_low.valueChanged.connect(lambda value: self.spin_battery_critical.setMaximum(max(1, value)))
+        self.spin_battery_critical.setMaximum(self.spin_battery_low.value())
+
+        cooldown_label = QLabel("Popup cooldown", battery_panel)
+        cooldown_label.setGeometry(442, 48, 130, 18)
+        cooldown_label.setStyleSheet(self.label_style())
+        self.spin_battery_cooldown = QSpinBox(battery_panel)
+        self.spin_battery_cooldown.setGeometry(442, 70, 136, 38)
+        self.spin_battery_cooldown.setRange(1, 1440)
+        self.spin_battery_cooldown.setSuffix(" min")
+        self.spin_battery_cooldown.setStyleSheet(self.input_style())
+
+        role_label = QLabel("Notify", battery_panel)
+        role_label.setGeometry(600, 48, 70, 18)
+        role_label.setStyleSheet(self.label_style())
+        self.chk_battery_role_it = QCheckBox("IT Admin", battery_panel)
+        self.chk_battery_role_it.setGeometry(600, 70, 95, 26)
+        self.chk_battery_role_admin = QCheckBox("Admin", battery_panel)
+        self.chk_battery_role_admin.setGeometry(702, 70, 82, 26)
+        self.chk_battery_role_staff = QCheckBox("Staff", battery_panel)
+        self.chk_battery_role_staff.setGeometry(784, 70, 75, 26)
+        self.chk_battery_role_verifier = QCheckBox("Verifier", battery_panel)
+        self.chk_battery_role_verifier.setGeometry(860, 70, 86, 26)
+        for checkbox in [
+            self.chk_battery_role_it,
+            self.chk_battery_role_admin,
+            self.chk_battery_role_staff,
+            self.chk_battery_role_verifier,
+        ]:
+            checkbox.setStyleSheet(self.checkbox_style())
+
+        self.chk_battery_email_enabled = QCheckBox("Send email alerts", battery_panel)
+        self.chk_battery_email_enabled.setGeometry(22, 118, 170, 26)
+        self.chk_battery_email_enabled.setStyleSheet(self.checkbox_style())
+
+        email_label = QLabel("Email recipients", battery_panel)
+        email_label.setGeometry(205, 112, 140, 18)
+        email_label.setStyleSheet(self.label_style())
+        self.txt_battery_emails = QLineEdit(battery_panel)
+        self.txt_battery_emails.setGeometry(205, 136, 390, 38)
+        self.txt_battery_emails.setPlaceholderText("it@example.com, manager@example.com")
+        self.txt_battery_emails.setStyleSheet(self.input_style())
+
+        email_cooldown_label = QLabel("Email cooldown", battery_panel)
+        email_cooldown_label.setGeometry(615, 112, 120, 18)
+        email_cooldown_label.setStyleSheet(self.label_style())
+        self.spin_battery_email_cooldown = QSpinBox(battery_panel)
+        self.spin_battery_email_cooldown.setGeometry(615, 136, 136, 38)
+        self.spin_battery_email_cooldown.setRange(5, 1440)
+        self.spin_battery_email_cooldown.setSuffix(" min")
+        self.spin_battery_email_cooldown.setStyleSheet(self.input_style())
+
+        self.btn_test_battery_email = QPushButton("Test Email", battery_panel)
+        self.btn_test_battery_email.setGeometry(768, 136, 112, 38)
+        self.btn_test_battery_email.setStyleSheet(self.secondary_btn_style())
+        self.btn_test_battery_email.clicked.connect(self.send_battery_test_email)
+
+        self.btn_save_battery_alerts = QPushButton("Save Policy", battery_panel)
+        self.btn_save_battery_alerts.setGeometry(808, 18, 124, 38)
+        self.btn_save_battery_alerts.setStyleSheet(self.primary_btn_style())
+        self.btn_save_battery_alerts.clicked.connect(self.save_battery_alert_settings_from_ui)
+
+        self.battery_alert_status = QLabel("Battery popups use the latest ESP32 status sent through the Raspberry Pi.", battery_panel)
+        self.battery_alert_status.setGeometry(22, 184, 900, 28)
+        self.battery_alert_status.setWordWrap(True)
+        self.battery_alert_status.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 700;")
+
+        wifi_panel = QFrame(page)
+        wifi_panel.setGeometry(0, 690, 955, 260)
+        self.apply_frame_style(wifi_panel, self.card_style())
+
+        wifi_title = QLabel("ESP32 WiFi Provisioning", wifi_panel)
+        wifi_title.setGeometry(22, 18, 260, 24)
+        wifi_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+
+        wifi_hint = QLabel("Plug the ESP32 into this laptop by USB, choose the COM port, scan/select WiFi, then save credentials to the device.", wifi_panel)
+        wifi_hint.setGeometry(22, 48, 850, 22)
+        wifi_hint.setStyleSheet("font-size: 12px; color: #64748b;")
+
+        port_label = QLabel("USB / COM Port", wifi_panel)
+        port_label.setGeometry(22, 84, 140, 18)
+        port_label.setStyleSheet(self.label_style())
+        self.esp32_serial_port = QComboBox(wifi_panel)
+        self.esp32_serial_port.setGeometry(22, 108, 250, 40)
+        self.esp32_serial_port.setStyleSheet(self.input_style())
+
+        self.btn_refresh_esp32_ports = QPushButton("Refresh Ports", wifi_panel)
+        self.btn_refresh_esp32_ports.setGeometry(288, 108, 132, 40)
+        self.btn_refresh_esp32_ports.setStyleSheet(self.secondary_btn_style())
+        self.btn_refresh_esp32_ports.clicked.connect(self.refresh_esp32_serial_ports)
+
+        self.btn_scan_esp32_wifi = QPushButton("Scan WiFi", wifi_panel)
+        self.btn_scan_esp32_wifi.setGeometry(435, 108, 112, 40)
+        self.btn_scan_esp32_wifi.setStyleSheet(self.secondary_btn_style())
+        self.btn_scan_esp32_wifi.clicked.connect(self.scan_esp32_wifi_networks)
+
+        ssid_label = QLabel("WiFi Network", wifi_panel)
+        ssid_label.setGeometry(22, 160, 140, 18)
+        ssid_label.setStyleSheet(self.label_style())
+        self.esp32_wifi_ssid = QComboBox(wifi_panel)
+        self.esp32_wifi_ssid.setEditable(True)
+        self.esp32_wifi_ssid.setGeometry(22, 184, 250, 40)
+        self.esp32_wifi_ssid.setStyleSheet(self.input_style())
+
+        pass_label = QLabel("WiFi Password", wifi_panel)
+        pass_label.setGeometry(288, 160, 140, 18)
+        pass_label.setStyleSheet(self.label_style())
+        self.esp32_wifi_password = QLineEdit(wifi_panel)
+        self.esp32_wifi_password.setGeometry(288, 184, 210, 40)
+        self.esp32_wifi_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.esp32_wifi_password.setStyleSheet(self.input_style())
+
+        host_label = QLabel("Pi Host", wifi_panel)
+        host_label.setGeometry(514, 160, 120, 18)
+        host_label.setStyleSheet(self.label_style())
+        self.esp32_pi_host = QLineEdit(wifi_panel)
+        self.esp32_pi_host.setGeometry(514, 184, 180, 40)
+        self.esp32_pi_host.setPlaceholderText("172.20.0.240")
+        self.esp32_pi_host.setStyleSheet(self.input_style())
+
+        port2_label = QLabel("TCP Port", wifi_panel)
+        port2_label.setGeometry(710, 160, 100, 18)
+        port2_label.setStyleSheet(self.label_style())
+        self.esp32_pi_port = QLineEdit(wifi_panel)
+        self.esp32_pi_port.setGeometry(710, 184, 80, 40)
+        self.esp32_pi_port.setText("5000")
+        self.esp32_pi_port.setStyleSheet(self.input_style())
+
+        self.btn_apply_esp32_wifi = QPushButton("Save To ESP32", wifi_panel)
+        self.btn_apply_esp32_wifi.setGeometry(806, 184, 126, 40)
+        self.btn_apply_esp32_wifi.setStyleSheet(self.primary_btn_style())
+        self.btn_apply_esp32_wifi.clicked.connect(self.provision_esp32_wifi)
+
+        self.esp32_wifi_status = QLabel("Connect ESP32 over USB, then refresh ports.", wifi_panel)
+        self.esp32_wifi_status.setGeometry(570, 112, 360, 28)
+        self.esp32_wifi_status.setStyleSheet("font-size: 12px; color: #475569; font-weight: 700;")
         return page
 
     def build_control_ota_section(self):
@@ -1818,30 +2370,71 @@ class DashboardWindow(QWidget):
         title = QLabel("OTA", page)
         title.setGeometry(0, 0, 260, 28)
         title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
-        message = QLabel("OTA Framework Reserved For Future ESP32 Firmware Updates", page)
-        message.setGeometry(0, 48, 620, 24)
+        message = QLabel("Upload a compiled ESP32 .bin, then release it to one connected device or all online devices.", page)
+        message.setGeometry(0, 48, 780, 24)
         message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
 
-        upload = QPushButton("Upload Firmware", page)
-        upload.setGeometry(0, 92, 170, 44)
-        upload.setStyleSheet(self.secondary_btn_style())
-        upload.setEnabled(False)
-        upload.setToolTip("Available after backend implementation.")
+        file_label = QLabel("Firmware .bin", page)
+        file_label.setGeometry(0, 88, 120, 18)
+        file_label.setStyleSheet(self.label_style())
+        self.ota_firmware_path = QLineEdit(page)
+        self.ota_firmware_path.setGeometry(0, 112, 430, 40)
+        self.ota_firmware_path.setReadOnly(True)
+        self.ota_firmware_path.setPlaceholderText("Choose compiled ESP32 firmware .bin")
+        self.ota_firmware_path.setStyleSheet(self.input_style())
 
-        release = QPushButton("Release Firmware", page)
-        release.setGeometry(190, 92, 170, 44)
-        release.setStyleSheet(self.secondary_btn_style())
-        release.setEnabled(False)
-        release.setToolTip("Available after backend implementation.")
+        self.btn_choose_ota_firmware = QPushButton("Choose", page)
+        self.btn_choose_ota_firmware.setGeometry(445, 112, 105, 40)
+        self.btn_choose_ota_firmware.setStyleSheet(self.secondary_btn_style())
+        self.btn_choose_ota_firmware.clicked.connect(self.choose_ota_firmware)
 
-        table = QTableWidget(page)
-        table.setGeometry(0, 165, 955, 430)
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(["Version", "Target", "Released By", "Status"])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setStyleSheet(self.table_style())
+        version_label = QLabel("Version", page)
+        version_label.setGeometry(570, 88, 100, 18)
+        version_label.setStyleSheet(self.label_style())
+        self.ota_version = QLineEdit(page)
+        self.ota_version.setGeometry(570, 112, 130, 40)
+        self.ota_version.setPlaceholderText("fw18")
+        self.ota_version.setStyleSheet(self.input_style())
+
+        self.btn_upload_ota_firmware = QPushButton("Upload Firmware", page)
+        self.btn_upload_ota_firmware.setGeometry(720, 112, 170, 40)
+        self.btn_upload_ota_firmware.setStyleSheet(self.primary_btn_style())
+        self.btn_upload_ota_firmware.clicked.connect(self.upload_ota_firmware)
+
+        notes_label = QLabel("Release notes", page)
+        notes_label.setGeometry(0, 170, 130, 18)
+        notes_label.setStyleSheet(self.label_style())
+        self.ota_notes = QTextEdit(page)
+        self.ota_notes.setGeometry(0, 194, 550, 70)
+        self.ota_notes.setPlaceholderText("What changed in this firmware...")
+        self.ota_notes.setStyleSheet(self.input_style())
+
+        target_label = QLabel("Target", page)
+        target_label.setGeometry(570, 170, 90, 18)
+        target_label.setStyleSheet(self.label_style())
+        self.ota_target = QComboBox(page)
+        self.ota_target.setGeometry(570, 194, 210, 40)
+        self.ota_target.setStyleSheet(self.input_style())
+        self.ota_target.addItem("All online ESP32 devices", "all")
+
+        self.btn_release_ota_firmware = QPushButton("Release Selected", page)
+        self.btn_release_ota_firmware.setGeometry(800, 194, 150, 40)
+        self.btn_release_ota_firmware.setStyleSheet(self.secondary_btn_style())
+        self.btn_release_ota_firmware.clicked.connect(self.release_selected_ota_firmware)
+
+        self.ota_status = QLabel("OTA requires devices running the OTA-capable firmware once by USB first.", page)
+        self.ota_status.setGeometry(570, 242, 380, 22)
+        self.ota_status.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 700;")
+
+        self.ota_table = QTableWidget(page)
+        self.ota_table.setGeometry(0, 292, 955, 390)
+        self.ota_table.setColumnCount(6)
+        self.ota_table.setHorizontalHeaderLabels(["ID", "Version", "File", "Size", "Status", "Released"])
+        self.ota_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.ota_table.verticalHeader().setVisible(False)
+        self.ota_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.ota_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.ota_table.setStyleSheet(self.table_style())
         return page
 
     def build_control_backups_section(self):
@@ -1850,30 +2443,45 @@ class DashboardWindow(QWidget):
         title = QLabel("Backups", page)
         title.setGeometry(0, 0, 260, 28)
         title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
-        message = QLabel("Backup API Pending Backend Implementation", page)
-        message.setGeometry(0, 48, 520, 24)
+        message = QLabel("Create a Raspberry Pi recovery bundle: database, residents, documents, display images, schedules, firmware files, and service configuration.", page)
+        message.setGeometry(0, 42, 930, 42)
+        message.setWordWrap(True)
         message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
 
-        create_btn = QPushButton("Create Backup", page)
-        create_btn.setGeometry(0, 92, 170, 44)
-        create_btn.setStyleSheet(self.secondary_btn_style())
-        create_btn.setEnabled(False)
-        create_btn.setToolTip("Available after backend implementation.")
+        drive_help = QLabel("Google Drive is optional. The Pi always saves a local bundle first, then uploads the same file to the rclone target configured in Settings > Integrations.", page)
+        drive_help.setGeometry(0, 86, 930, 38)
+        drive_help.setWordWrap(True)
+        drive_help.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 700;")
 
-        restore_btn = QPushButton("Restore Backup", page)
-        restore_btn.setGeometry(190, 92, 170, 44)
-        restore_btn.setStyleSheet(self.secondary_btn_style())
-        restore_btn.setEnabled(False)
-        restore_btn.setToolTip("Available after backend implementation.")
+        self.btn_create_backup = QPushButton("Create Backup Now", page)
+        self.btn_create_backup.setGeometry(0, 140, 180, 44)
+        self.btn_create_backup.setStyleSheet(self.primary_btn_style())
+        self.btn_create_backup.clicked.connect(self.create_control_backup)
 
-        table = QTableWidget(page)
-        table.setGeometry(0, 165, 955, 430)
-        table.setColumnCount(5)
-        table.setHorizontalHeaderLabels(["Created", "Type", "Size", "Created By", "Status"])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setStyleSheet(self.table_style())
+        self.btn_refresh_backups = QPushButton("Refresh Backups", page)
+        self.btn_refresh_backups.setGeometry(198, 140, 155, 44)
+        self.btn_refresh_backups.setStyleSheet(self.secondary_btn_style())
+        self.btn_refresh_backups.clicked.connect(self.load_control_backups)
+
+        self.btn_restore_backup = QPushButton("Restore Selected", page)
+        self.btn_restore_backup.setGeometry(371, 140, 155, 44)
+        self.btn_restore_backup.setStyleSheet(self.secondary_btn_style())
+        self.btn_restore_backup.clicked.connect(self.restore_selected_backup)
+
+        self.backup_status = QLabel("Restore requires exact typed confirmation and creates a pre-restore bundle first.", page)
+        self.backup_status.setGeometry(545, 142, 390, 42)
+        self.backup_status.setWordWrap(True)
+        self.backup_status.setStyleSheet("font-size: 12px; color: #b45309; font-weight: 800;")
+
+        self.backup_table = QTableWidget(page)
+        self.backup_table.setGeometry(0, 212, 955, 385)
+        self.backup_table.setColumnCount(5)
+        self.backup_table.setHorizontalHeaderLabels(["Created", "Bundle", "Size", "Scope", "Status"])
+        self.backup_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.backup_table.verticalHeader().setVisible(False)
+        self.backup_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.backup_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.backup_table.setStyleSheet(self.table_style())
         return page
 
     def build_control_logs_section(self):
@@ -2131,34 +2739,40 @@ class DashboardWindow(QWidget):
         self.btn_choose_image = QPushButton("Choose LCD Image", self.upd_left)
         self.btn_choose_image.setGeometry(22, 488, 150, 42)
         self.btn_choose_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_choose_image.setEnabled(False)
+        self.btn_choose_image.hide()
 
-        self.btn_send_image = QPushButton("Send Image", self.upd_left)
-        self.btn_send_image.setGeometry(182, 488, 120, 42)
+        self.btn_send_image = QPushButton("Send Photo Only", self.upd_left)
+        self.btn_send_image.setGeometry(360, 444, 152, 42)
         self.btn_send_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_send_image.setEnabled(False)
+        self.btn_send_image.hide()
 
         self.btn_clear_image = QPushButton("Clear Image", self.upd_left)
         self.btn_clear_image.setGeometry(312, 488, 120, 42)
         self.btn_clear_image.setStyleSheet(self.secondary_btn_style())
+        self.btn_clear_image.setEnabled(False)
+        self.btn_clear_image.hide()
 
-        self.image_path_label = QLabel("No image selected", self.upd_left)
-        self.image_path_label.setGeometry(22, 540, 490, 44)
+        self.image_path_label = QLabel("Resident photos are managed in Resident Records. This page controls LCD power and global schedule only.", self.upd_left)
+        self.image_path_label.setGeometry(22, 456, 490, 34)
         self.image_path_label.setWordWrap(True)
         self.image_path_label.setStyleSheet("font-size: 12px; color: #a7a7a7;")
 
         manual_title = QLabel("Manual LCD Control", self.upd_left)
-        manual_title.setGeometry(22, 566, 180, 22)
+        manual_title.setGeometry(22, 520, 220, 22)
         manual_title.setStyleSheet("font-size: 15px; font-weight: 800; color: white;")
 
         self.btn_lcd_on = QPushButton("Turn LCD ON", self.upd_left)
-        self.btn_lcd_on.setGeometry(22, 596, 150, 40)
+        self.btn_lcd_on.setGeometry(22, 550, 150, 40)
         self.btn_lcd_on.setStyleSheet(self.primary_btn_style())
 
         self.btn_lcd_off = QPushButton("Turn LCD OFF", self.upd_left)
-        self.btn_lcd_off.setGeometry(184, 596, 150, 40)
+        self.btn_lcd_off.setGeometry(184, 550, 150, 40)
         self.btn_lcd_off.setStyleSheet(self.secondary_btn_style())
 
         self.chk_sleep_no_image = QCheckBox("Keep LCD asleep if no image exists", self.upd_left)
-        self.chk_sleep_no_image.setGeometry(22, 644, 300, 24)
+        self.chk_sleep_no_image.setGeometry(22, 598, 300, 24)
         self.chk_sleep_no_image.setStyleSheet(self.chk_active.styleSheet())
 
         self.upd_right = QFrame(page)
@@ -2175,22 +2789,26 @@ class DashboardWindow(QWidget):
 
         self.upd_ep_name = QLabel("Resident Name", self.upd_epaper_card)
         self.upd_ep_name.setGeometry(18, 44, 320, 30)
-        self.upd_ep_name.setStyleSheet("color: #111111; font-size: 24px; font-weight: 700;")
+        self.upd_ep_name.setStyleSheet("color: #111111; font-size: 22px; font-weight: 700;")
 
         self.upd_ep_room = QLabel("Room ---", self.upd_epaper_card)
         self.upd_ep_room.setGeometry(18, 80, 250, 24)
-        self.upd_ep_room.setStyleSheet("color: #111111; font-size: 15px;")
+        self.upd_ep_room.setStyleSheet("color: #111111; font-size: 14px;")
 
         self.upd_ep_diet = QLabel("Diet: ---", self.upd_epaper_card)
         self.upd_ep_diet.setGeometry(18, 112, 400, 24)
         self.upd_ep_diet.setStyleSheet("color: #111111; font-size: 14px;")
 
-        self.upd_ep_allergies = QLabel("Allergies: ---", self.upd_epaper_card)
+        self.upd_ep_allergies = QLabel("Texture: ---", self.upd_epaper_card)
         self.upd_ep_allergies.setGeometry(18, 144, 500, 24)
         self.upd_ep_allergies.setStyleSheet("color: #111111; font-size: 14px;")
 
+        self.upd_ep_fluids = QLabel("Fluids: ---", self.upd_epaper_card)
+        self.upd_ep_fluids.setGeometry(18, 172, 500, 24)
+        self.upd_ep_fluids.setStyleSheet("color: #111111; font-size: 14px;")
+
         self.upd_ep_note = QLabel("Note: ---", self.upd_epaper_card)
-        self.upd_ep_note.setGeometry(18, 172, 560, 30)
+        self.upd_ep_note.setGeometry(18, 196, 560, 24)
         self.upd_ep_note.setWordWrap(True)
         self.upd_ep_note.setStyleSheet("color: #111111; font-size: 13px;")
 
@@ -2212,6 +2830,22 @@ class DashboardWindow(QWidget):
             }
         """)
         self.upd_lcd_image.hide()
+
+        self.upd_lcd_empty_state = QLabel("No LCD image selected. Choose a resident image to preview the exact screen artwork.", self.upd_lcd_card)
+        self.upd_lcd_empty_state.setGeometry(38, 58, 538, 112)
+        self.upd_lcd_empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.upd_lcd_empty_state.setWordWrap(True)
+        self.upd_lcd_empty_state.setStyleSheet("""
+            QLabel {
+                background-color: #f8fafc;
+                color: #0f766e;
+                border: 1px dashed #7dd3fc;
+                border-radius: 8px;
+                padding: 18px;
+                font-size: 14px;
+                font-weight: 700;
+            }
+        """)
 
         self.upd_lcd_name = QLabel("Resident Name", self.upd_lcd_card)
         self.upd_lcd_name.setGeometry(20, 48, 574, 30)
@@ -2243,56 +2877,71 @@ class DashboardWindow(QWidget):
         self.upd_lcd_note.setStyleSheet("color: #eef2f7; font-size: 14px;")
 
         self.schedule_panel = QFrame(self.upd_right)
-        self.schedule_panel.setGeometry(22, 472, 614, 196)
+        self.schedule_panel.setGeometry(22, 472, 614, 286)
         self.apply_frame_style(self.schedule_panel, self.card_style())
 
-        schedule_title = QLabel("Global LCD Schedule", self.schedule_panel)
-        schedule_title.setGeometry(18, 12, 220, 24)
+        schedule_title = QLabel("Global LCD Schedules", self.schedule_panel)
+        schedule_title.setGeometry(18, 12, 230, 24)
         schedule_title.setStyleSheet("font-size: 16px; color: white; font-weight: 800;")
 
+        schedule_hint = QLabel("Add each ON/OFF time pair, then save all entries to the Raspberry Pi.", self.schedule_panel)
+        schedule_hint.setGeometry(18, 34, 500, 18)
+        schedule_hint.setStyleSheet("font-size: 12px; color: #64748b;")
+
+        self.schedule_scope_label = QLabel("All LCD devices", self.schedule_panel)
+        self.schedule_scope_label.setGeometry(18, 62, 150, 22)
+        self.schedule_scope_label.setStyleSheet("font-size: 13px; color: #334155; font-weight: 800; background: transparent; border: none;")
+
         self.schedule_resident = QComboBox(self.schedule_panel)
-        self.schedule_resident.setGeometry(18, 46, 290, 38)
-        self.schedule_resident.setStyleSheet(self.input_style())
         self.schedule_resident.addItem("All LCD devices", "all")
-        self.schedule_resident.setEnabled(False)
+        self.schedule_resident.hide()
 
         self.chk_schedule_enabled = QCheckBox("Enabled", self.schedule_panel)
-        self.chk_schedule_enabled.setGeometry(320, 53, 84, 24)
+        self.chk_schedule_enabled.setGeometry(18, 88, 120, 24)
         self.chk_schedule_enabled.setStyleSheet(self.chk_active.styleSheet())
 
         on_label = QLabel("ON", self.schedule_panel)
-        on_label.setGeometry(414, 24, 30, 18)
+        on_label.setGeometry(166, 56, 30, 18)
         on_label.setStyleSheet(self.label_style())
 
         self.schedule_on = QTimeEdit(self.schedule_panel)
-        self.schedule_on.setGeometry(414, 46, 80, 38)
+        self.schedule_on.setGeometry(166, 78, 86, 38)
         self.schedule_on.setDisplayFormat("HH:mm")
         self.schedule_on.setTime(QTime(7, 0))
         self.schedule_on.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.schedule_on.setStyleSheet(self.input_style())
 
         off_label = QLabel("OFF", self.schedule_panel)
-        off_label.setGeometry(504, 24, 36, 18)
+        off_label.setGeometry(266, 56, 36, 18)
         off_label.setStyleSheet(self.label_style())
 
         self.schedule_off = QTimeEdit(self.schedule_panel)
-        self.schedule_off.setGeometry(504, 46, 80, 38)
+        self.schedule_off.setGeometry(266, 78, 86, 38)
         self.schedule_off.setDisplayFormat("HH:mm")
         self.schedule_off.setTime(QTime(20, 0))
         self.schedule_off.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.schedule_off.setStyleSheet(self.input_style())
 
-        self.btn_save_schedule = QPushButton("Save Schedule to All LCDs", self.schedule_panel)
-        self.btn_save_schedule.setGeometry(18, 102, 190, 40)
+        self.btn_add_schedule = QPushButton("Add Time", self.schedule_panel)
+        self.btn_add_schedule.setGeometry(366, 78, 110, 38)
+        self.btn_add_schedule.setStyleSheet(self.secondary_btn_style())
+
+        self.btn_save_schedule = QPushButton("Save All Times", self.schedule_panel)
+        self.btn_save_schedule.setGeometry(18, 126, 150, 38)
         self.btn_save_schedule.setStyleSheet(self.primary_btn_style())
 
+        self.btn_delete_schedule = QPushButton("Delete Selected", self.schedule_panel)
+        self.btn_delete_schedule.setGeometry(178, 126, 150, 38)
+        self.btn_delete_schedule.setStyleSheet(self.secondary_btn_style())
+
         self.schedule_table = QTableWidget(self.schedule_panel)
-        self.schedule_table.setGeometry(225, 96, 370, 88)
-        self.schedule_table.setColumnCount(4)
-        self.schedule_table.setHorizontalHeaderLabels(["Device", "Status", "Rule", "Times"])
+        self.schedule_table.setGeometry(18, 178, 578, 90)
+        self.schedule_table.setColumnCount(5)
+        self.schedule_table.setHorizontalHeaderLabels(["Schedule", "Status", "ON", "OFF", "Rule"])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.schedule_table.verticalHeader().setVisible(False)
         self.schedule_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.schedule_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.schedule_table.setStyleSheet(self.table_style())
 
         return self.wrap_scroll_page(page, 820)
@@ -2366,6 +3015,9 @@ class DashboardWindow(QWidget):
         self.btn_delete_resident.clicked.connect(self.delete_selected_resident)
         self.btn_go_pairing_after_save.clicked.connect(lambda: self.switch_page(self.page_pairing, self.btn_menu_pairing))
         self.btn_attach_source.clicked.connect(self.attach_source_document)
+        self.btn_attach_resident_photo.clicked.connect(self.attach_resident_photo)
+        self.btn_clear_resident_photo.clicked.connect(self.clear_lcd_image)
+        self.btn_send_resident_photo.clicked.connect(lambda: self.send_image(self.btn_send_resident_photo))
         self.btn_submit_review_request.clicked.connect(self.submit_resident_review_request)
 
         self.search_resident.textChanged.connect(self.filter_residents)
@@ -2386,12 +3038,12 @@ class DashboardWindow(QWidget):
 
         self.btn_preview.clicked.connect(self.update_preview)
         self.btn_send_text.clicked.connect(self.send_text_update)
-        self.btn_choose_image.clicked.connect(self.choose_image)
-        self.btn_send_image.clicked.connect(self.send_image)
-        self.btn_clear_image.clicked.connect(self.clear_lcd_image)
+        self.upd_target.currentIndexChanged.connect(lambda _index: self.on_update_target_changed())
         self.btn_lcd_on.clicked.connect(lambda: self.send_lcd_command("on"))
         self.btn_lcd_off.clicked.connect(lambda: self.send_lcd_command("off"))
+        self.btn_add_schedule.clicked.connect(self.add_lcd_schedule_entry)
         self.btn_save_schedule.clicked.connect(self.save_lcd_schedule)
+        self.btn_delete_schedule.clicked.connect(self.delete_lcd_schedule)
         self.btn_refresh_approvals.clicked.connect(self.load_approvals)
         self.approval_table.cellClicked.connect(lambda row, _col: self.show_approval_detail(row))
         self.btn_approve_request.clicked.connect(lambda: self.review_selected_request("APPROVED"))
@@ -2412,10 +3064,15 @@ class DashboardWindow(QWidget):
         self.btn_view_log.clicked.connect(self.show_selected_log_detail)
         self.btn_export_logs_pdf.clicked.connect(self.export_logs_pdf)
 
-        for w in [self.txt_name, self.txt_room, self.txt_diet, self.txt_allergies, self.txt_drinks, self.txt_schedule]:
+        for w in [self.txt_name, self.txt_room, self.txt_drinks]:
             w.textChanged.connect(self.refresh_token_list)
+            w.textChanged.connect(lambda _text: self.update_preview())
+        for combo in [self.txt_diet, self.txt_allergies, self.txt_schedule]:
+            combo.currentTextChanged.connect(lambda _text: self.refresh_token_list())
+            combo.currentTextChanged.connect(lambda _text: self.update_preview())
 
         self.txt_note.textChanged.connect(self.refresh_token_list)
+        self.txt_note.textChanged.connect(self.update_preview)
 
     # ---------------------------- page switching ----------------------------
 
@@ -2466,6 +3123,7 @@ class DashboardWindow(QWidget):
         elif page == self.page_updates:
             self.load_update_targets()
             self.load_schedule_view()
+            self.on_update_target_changed()
             self.update_preview()
         elif page == self.page_verification:
             self.load_verification_page()
@@ -2493,20 +3151,125 @@ class DashboardWindow(QWidget):
     def schedule_off_time(self):
         return self.schedule_off.time().toString("HH:mm")
 
+    def make_schedule_entry(self, on_time=None, off_time=None, enabled=None, sleep_if_no_image=None, schedule_id=None, label=None):
+        entry_id = schedule_id or f"local-{int(time.time() * 1000)}-{len(self.global_schedule_entries) + 1}"
+        return {
+            "schedule_id": str(entry_id),
+            "label": label or f"Schedule {len(self.global_schedule_entries) + 1}",
+            "resident_id": None,
+            "device_id": "all",
+            "enabled": self.chk_schedule_enabled.isChecked() if enabled is None else bool(enabled),
+            "lcd_on_time": on_time or self.schedule_on_time(),
+            "lcd_off_time": off_time or self.schedule_off_time(),
+            "sleep_if_no_image": self.chk_sleep_no_image.isChecked() if sleep_if_no_image is None else bool(sleep_if_no_image),
+        }
+
+    def normalize_schedule_entries_for_save(self):
+        entries = []
+        source = self.global_schedule_entries or [self.make_schedule_entry()]
+        for index, entry in enumerate(source):
+            normalized = self.make_schedule_entry(
+                on_time=entry.get("lcd_on_time") or "07:00",
+                off_time=entry.get("lcd_off_time") or "20:00",
+                enabled=self.chk_schedule_enabled.isChecked(),
+                sleep_if_no_image=self.chk_sleep_no_image.isChecked(),
+                schedule_id=entry.get("schedule_id"),
+                label=entry.get("label") or f"Schedule {index + 1}",
+            )
+            normalized["label"] = f"Schedule {index + 1}"
+            entries.append(normalized)
+        return entries
+
+    def add_lcd_schedule_entry(self):
+        entry = self.make_schedule_entry()
+        duplicate = any(
+            e.get("lcd_on_time") == entry["lcd_on_time"] and e.get("lcd_off_time") == entry["lcd_off_time"]
+            for e in self.global_schedule_entries
+        )
+        if duplicate:
+            self.show_error("Schedule", "That ON/OFF time pair is already in the schedule list.")
+            return
+        self.global_schedule_entries.append(entry)
+        self.global_schedule_saved = True
+        self.load_schedule_view(sync=False)
+
+    def sync_global_schedule_from_backend(self):
+        if not self.server_mode or not getattr(self, "control_service_online", False):
+            return
+        try:
+            rows = self.db.get_schedule_rows()
+        except Exception:
+            return
+        global_rows = [
+            row for row in rows
+            if str(row.get("device_id") or "").strip().lower() == "all"
+            and row.get("resident_id") in (None, "", 0)
+            and row.get("id") in (None, "", 0)
+        ]
+        if not global_rows:
+            self.global_schedule_saved = False
+            self.global_schedule_enabled = False
+            self.global_schedule_entries = []
+            return
+
+        entries = []
+        for index, row in enumerate(global_rows):
+            entries.append({
+                "schedule_id": str(row.get("schedule_id") or row.get("row_id") or f"backend-{index + 1}"),
+                "label": f"Schedule {index + 1}",
+                "resident_id": None,
+                "device_id": "all",
+                "enabled": bool(row.get("lcd_schedule_enabled") or row.get("enabled")),
+                "lcd_on_time": str(row.get("lcd_on_time") or "07:00"),
+                "lcd_off_time": str(row.get("lcd_off_time") or "20:00"),
+                "sleep_if_no_image": self.truthy(row.get("sleep_if_no_image")),
+            })
+
+        self.global_schedule_saved = True
+        self.global_schedule_entries = entries
+        self.global_schedule_enabled = any(bool(entry.get("enabled")) for entry in entries)
+        first = entries[0]
+        self.global_schedule_on = str(first.get("lcd_on_time") or self.global_schedule_on or "07:00")
+        self.global_schedule_off = str(first.get("lcd_off_time") or self.global_schedule_off or "20:00")
+        self.global_schedule_sleep_if_no_image = self.truthy(first.get("sleep_if_no_image"))
+
     def current_resident_uid(self):
         return self.txt_uid.text().strip() or None
 
+    def display_path_label(self, path, empty_text):
+        if not path:
+            return empty_text
+        return os.path.basename(path) if os.path.isfile(str(path)) else str(path)
+
+    def sync_resident_photo_labels(self):
+        form_text = self.display_path_label(self.selected_image_path, "No resident photo attached")
+        if hasattr(self, "resident_photo_label"):
+            self.resident_photo_label.setText(form_text)
+        if hasattr(self, "image_path_label"):
+            self.image_path_label.setText(
+                "Resident photos are managed in Resident Records. This page controls LCD power and global schedule only."
+            )
+
+    def set_resident_photo_path(self, path):
+        self.selected_image_path = path or None
+        self.sync_resident_photo_labels()
+        self.update_lcd_image_preview()
+
     def collect_resident_payload(self):
+        texture = self.field_text(self.txt_allergies)
+        fluids = self.field_text(self.txt_schedule)
         return {
             "resident_uid": self.txt_uid.text().strip(),
             "full_name": self.txt_name.text().strip(),
             "room": self.txt_room.text().strip(),
-            "status_alert": self.cmb_alert.currentText(),
-            "diet": self.txt_diet.text().strip(),
-            "allergies": self.txt_allergies.text().strip(),
+            "status_alert": "Stable",
+            "diet": self.field_text(self.txt_diet),
+            "texture": texture,
+            "allergies": texture,
             "note": self.txt_note.toPlainText().strip(),
             "drinks": self.txt_drinks.text().strip(),
-            "schedule": self.txt_schedule.text().strip(),
+            "fluids": fluids,
+            "schedule": fluids,
             "source_document": self.selected_source_document,
             "safety_review_note": "Pending safety review" if self.chk_safety_review.isChecked() else "",
             "needs_safety_review": self.chk_safety_review.isChecked(),
@@ -2521,25 +3284,153 @@ class DashboardWindow(QWidget):
     def resident_audit_snapshot(self, row_or_payload):
         if not row_or_payload:
             return None
+        texture = row_or_payload.get("texture") or row_or_payload.get("allergies")
+        fluids = row_or_payload.get("fluids") or row_or_payload.get("schedule")
         return {
             "resident_uid": row_or_payload.get("resident_uid"),
             "full_name": row_or_payload.get("full_name"),
             "room": row_or_payload.get("room"),
             "diet": row_or_payload.get("diet"),
-            "allergies": row_or_payload.get("allergies"),
+            "texture": texture,
             "note": row_or_payload.get("note"),
             "drinks": row_or_payload.get("drinks"),
-            "schedule": row_or_payload.get("schedule"),
+            "fluids": fluids,
             "source_document": row_or_payload.get("source_document"),
+            "lcd_image_path": row_or_payload.get("lcd_image_path"),
             "needs_safety_review": bool(row_or_payload.get("needs_safety_review", False)),
             "active": bool(row_or_payload.get("active", True)),
         }
 
+    def resident_field_label(self, key):
+        labels = {
+            "resident_uid": "Resident UID",
+            "full_name": "Full Name",
+            "room": "Room",
+            "diet": "Diet",
+            "texture": "Texture",
+            "allergies": "Texture",
+            "note": "Note",
+            "drinks": "Drinks",
+            "fluids": "Fluids",
+            "schedule": "Fluids",
+            "source_document": "Source Document",
+            "lcd_image_path": "Resident Photo",
+            "needs_safety_review": "Needs Safety Review",
+            "active": "Active",
+        }
+        return labels.get(str(key), str(key).replace("_", " ").title())
+
+    def resident_field_value(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item) for item in value if str(item).strip())
+        if isinstance(value, dict):
+            nested = self.format_resident_snapshot(value)
+            if nested:
+                return "\n" + "\n".join(f"  {line}" if line else "" for line in nested.splitlines())
+            return self.pretty_json(value)
+        return str(value)
+
+    def format_resident_snapshot(self, snapshot):
+        if not snapshot:
+            return ""
+        if isinstance(snapshot, str):
+            try:
+                snapshot = json.loads(snapshot)
+            except Exception:
+                return snapshot
+        if not isinstance(snapshot, dict):
+            return self.pretty_json(snapshot)
+        snapshot = dict(snapshot)
+        if "texture" not in snapshot and "allergies" in snapshot:
+            snapshot["texture"] = snapshot.get("allergies")
+        if "fluids" not in snapshot and "schedule" in snapshot:
+            snapshot["fluids"] = snapshot.get("schedule")
+
+        ordered_keys = [
+            "resident_uid",
+            "full_name",
+            "room",
+            "diet",
+            "texture",
+            "fluids",
+            "drinks",
+            "note",
+            "source_document",
+            "lcd_image_path",
+            "needs_safety_review",
+            "active",
+        ]
+        lines = []
+        seen = set()
+        for key in ordered_keys:
+            if key not in snapshot:
+                continue
+            seen.add(key)
+            value = self.resident_field_value(snapshot.get(key))
+            if value != "":
+                lines.append(f"{self.resident_field_label(key)}: {value}")
+        for key, raw_value in snapshot.items():
+            if key in seen:
+                continue
+            if key == "allergies" and "texture" in snapshot:
+                continue
+            if key == "schedule" and "fluids" in snapshot:
+                continue
+            value = self.resident_field_value(raw_value)
+            if value != "":
+                lines.append(f"{self.resident_field_label(key)}: {value}")
+        return "\n".join(lines)
+
     def show_error(self, title, text):
-        QMessageBox.critical(self, title, text)
+        QMessageBox.critical(self, title, friendly_error_message(str(text or "")))
 
     def show_info(self, title, text):
         QMessageBox.information(self, title, text)
+
+    def begin_button_busy(self, button, busy_text):
+        if button is None:
+            return None
+        state = {
+            "button": button,
+            "text": button.text(),
+            "enabled": button.isEnabled(),
+        }
+        button.setText(busy_text)
+        button.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        return state
+
+    def end_button_busy(self, state):
+        if not state:
+            return
+        button = state.get("button")
+        if button is not None:
+            button.setText(state.get("text") or button.text())
+            button.setEnabled(bool(state.get("enabled", True)))
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
+        QApplication.processEvents()
+
+    def result_error_message(self, result, fallback="The request could not be completed."):
+        status_code = result.get("status_code") if isinstance(result, dict) else None
+        body = result.get("body") if isinstance(result, dict) else None
+        message = fallback
+        if isinstance(body, dict):
+            value = body.get("message") or body.get("error") or body.get("err") or body.get("detail")
+            if isinstance(value, dict):
+                value = value.get("message") or value.get("error") or value.get("err") or value.get("line")
+            if value:
+                message = str(value)
+        elif body:
+            message = str(body)
+        return friendly_error_message(message, status_code=status_code, data=body)
 
     def set_gateway_state(self, online: bool):
         self.gateway_online = bool(online)
@@ -2553,7 +3444,7 @@ class DashboardWindow(QWidget):
         if self.server_mode:
             self.gateway_online = self.control_service_online
         if not profile.get("host"):
-            text = "Gateway: Demo Mode"
+            text = "Gateway: Offline Mode"
             color = "#64748b"
             background = "#f8fafc"
             border = "#d8e1ea"
@@ -2608,12 +3499,16 @@ class DashboardWindow(QWidget):
         self.update_control_network_labels(result)
         if hasattr(self, "control_dashboard_labels"):
             self.control_dashboard_labels["service"].setText(self.control_status_text(result))
-            self.control_dashboard_labels["refreshed"].setText(time.strftime("%Y-%m-%d %H:%M:%S"))
+            self.control_dashboard_labels["refreshed"].setText(format_local_now())
         self.load_control_services()
 
     def refresh_all(self):
-        self.refresh_control_connection_status()
-        self.refresh_devices()
+        busy = self.begin_button_busy(getattr(self, "btn_refresh_devices", None), "Refreshing...")
+        try:
+            self.refresh_control_connection_status()
+            self.refresh_devices()
+        finally:
+            self.end_button_busy(busy)
 
     def apply_role_permissions(self):
         access = {
@@ -2641,9 +3536,12 @@ class DashboardWindow(QWidget):
             self.txt_name, self.txt_room, self.cmb_alert, self.txt_diet,
             self.txt_allergies, self.txt_note, self.txt_drinks, self.txt_schedule,
             self.chk_active, self.chk_safety_review, self.btn_attach_source,
-            self.btn_choose_image, self.btn_clear_image,
+            self.btn_attach_resident_photo, self.btn_clear_resident_photo,
+            self.btn_send_resident_photo,
         ]
         for widget in field_widgets:
+            widget.setEnabled(self.can_edit_residents())
+        for widget in getattr(self, "dropdown_option_buttons", []):
             widget.setEnabled(self.can_edit_residents())
 
         if hasattr(self, "nurse_review_comment"):
@@ -2666,14 +3564,16 @@ class DashboardWindow(QWidget):
             "btn_save_resident": resident_write,
             "btn_clear_fields": resident_write or self.is_nurse(),
             "btn_delete_resident": resident_write,
+            "btn_send_resident_photo": device_write,
             "btn_go_pairing_after_save": resident_write,
             "btn_pair_selected": device_write,
             "btn_unpair_selected": device_write,
             "btn_send_text": device_write,
-            "btn_send_image": device_write,
             "btn_lcd_on": device_write,
             "btn_lcd_off": device_write,
+            "btn_add_schedule": device_write,
             "btn_save_schedule": device_write,
+            "btn_delete_schedule": device_write,
             "btn_approve_request": self.is_nurse_admin(),
             "btn_reject_request": self.is_nurse_admin(),
             "btn_mark_verified": self.is_nurse_admin() or self.is_verifier(),
@@ -2691,7 +3591,12 @@ class DashboardWindow(QWidget):
             return True
         if not self.server_mode and self.gateway_online:
             return True
-        self.show_error("Network Required", f"{action_name} requires an active Raspberry Pi Control Service connection.")
+        self.show_error(
+            "Facility Network Required",
+            f"{action_name} needs the Raspberry Pi Control Service. "
+            "Connect this computer to the dedicated facility network, then try again. "
+            "If you are already connected, ask IT to check the Raspberry Pi and Control Service."
+        )
         return False
 
     def safe_get_devices(self) -> List[Dict[str, Any]]:
@@ -2728,18 +3633,18 @@ class DashboardWindow(QWidget):
         self.txt_uid.clear()
         self.txt_name.clear()
         self.txt_room.clear()
-        self.txt_diet.clear()
-        self.txt_allergies.clear()
+        self.clear_field_text(self.txt_diet)
+        self.clear_field_text(self.txt_allergies)
         self.txt_note.clear()
         self.txt_drinks.clear()
-        self.txt_schedule.clear()
+        self.clear_field_text(self.txt_schedule)
 
         self.chk_active.setChecked(True)
         self.chk_safety_review.setChecked(False)
         self.cmb_alert.setCurrentIndex(0)
 
         self.selected_image_path = None
-        self.image_path_label.setText("No image selected")
+        self.sync_resident_photo_labels()
         self.selected_source_document = None
         self.source_doc_label.setText("No source document attached")
 
@@ -2798,7 +3703,7 @@ class DashboardWindow(QWidget):
             if self.server_mode:
                 mode = "Server Mode Connected" if self.control_service_online else "Server Mode Offline"
             else:
-                mode = "Offline Demo Mode"
+                mode = "Offline Mode"
             self.record_summary_labels["database_mode"].setText(f"Data store: {mode}")
 
         overview_values = {
@@ -2815,7 +3720,7 @@ class DashboardWindow(QWidget):
             if self.server_mode:
                 mode = "Server Mode Connected" if self.control_service_online else "Server Mode Offline"
             else:
-                mode = "Offline Demo Mode"
+                mode = "Offline Mode"
             gateway_text = self.connection_badge.text().replace("Gateway: ", "")
             self.overview_status.setText(f"Data store: {mode}\nGateway: {gateway_text}\nAuto-refresh: {'on' if self.auto_refresh.isChecked() else 'off'}")
         if hasattr(self, "overview_device_table"):
@@ -2828,38 +3733,58 @@ class DashboardWindow(QWidget):
             values = [
                 d.get("device_id") or "",
                 "Online" if d.get("is_online") else "Offline",
-                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A",
+                self.battery_display_text(d, compact=True),
                 ("Assigned" if d.get("resident_name") else "Unassigned") if self.is_it_admin() else (d.get("resident_name") or "Unassigned"),
-                str(d.get("last_seen_s") or ""),
+                format_elapsed_seconds(d.get("last_seen_s")),
             ]
             for c, value in enumerate(values):
                 self.overview_device_table.setItem(r, c, QTableWidgetItem(str(value)))
 
-    def load_schedule_view(self):
+    def load_schedule_view(self, sync=True):
         if not hasattr(self, "schedule_resident"):
             return
+        if sync:
+            self.sync_global_schedule_from_backend()
         self.schedule_resident.blockSignals(True)
         self.schedule_resident.clear()
         devices = self.safe_get_devices()
         self.schedule_resident.addItem(f"All LCD devices ({len(devices)})", "all")
         self.schedule_resident.setCurrentIndex(0)
         self.schedule_resident.blockSignals(False)
+        if hasattr(self, "schedule_scope_label"):
+            self.schedule_scope_label.setText(f"All LCD devices ({len(devices)})")
 
         self.chk_schedule_enabled.setChecked(bool(self.global_schedule_enabled))
         self.chk_sleep_no_image.setChecked(bool(self.global_schedule_sleep_if_no_image))
-        self.schedule_on.setTime(QTime.fromString(self.global_schedule_on, "HH:mm"))
-        self.schedule_off.setTime(QTime.fromString(self.global_schedule_off, "HH:mm"))
+        if self.global_schedule_entries:
+            first = self.global_schedule_entries[0]
+            self.global_schedule_on = str(first.get("lcd_on_time") or self.global_schedule_on)
+            self.global_schedule_off = str(first.get("lcd_off_time") or self.global_schedule_off)
+        on_time = QTime.fromString(self.global_schedule_on, "HH:mm")
+        off_time = QTime.fromString(self.global_schedule_off, "HH:mm")
+        if on_time.isValid():
+            self.schedule_on.setTime(on_time)
+        if off_time.isValid():
+            self.schedule_off.setTime(off_time)
 
-        self.schedule_table.setRowCount(len(devices))
-        enabled_text = "Enabled" if self.global_schedule_enabled else "Off"
-        rule_text = "Sleep if no image" if self.global_schedule_sleep_if_no_image else "No forced sleep"
-        time_text = f"{enabled_text}: {self.global_schedule_on} - {self.global_schedule_off}"
-        for r, row in enumerate(devices):
+        entries = list(self.global_schedule_entries)
+        if not entries:
+            self.schedule_table.setRowCount(1)
+            values = ["No saved schedule", "-", "-", "-", "Add a time pair, then save."]
+            for c, value in enumerate(values):
+                self.schedule_table.setItem(0, c, QTableWidgetItem(str(value)))
+            return
+
+        self.schedule_table.setRowCount(len(entries))
+        for r, entry in enumerate(entries):
+            status = "Enabled" if entry.get("enabled") else "Disabled"
+            rule_text = "Sleep if no image" if entry.get("sleep_if_no_image") else "No forced sleep"
             values = [
-                row.get("device_id") or "",
-                "Online" if row.get("is_online") else "Offline",
+                entry.get("label") or f"Schedule {r + 1}",
+                status,
+                entry.get("lcd_on_time") or "",
+                entry.get("lcd_off_time") or "",
                 rule_text,
-                time_text,
             ]
             for c, value in enumerate(values):
                 self.schedule_table.setItem(r, c, QTableWidgetItem(str(value)))
@@ -2923,9 +3848,8 @@ class DashboardWindow(QWidget):
             "",
             "Resident Snapshot:",
         ]
-        for key in ["full_name", "room", "diet", "allergies", "note", "drinks", "schedule"]:
-            if payload.get(key):
-                fields.append(f"{key.replace('_', ' ').title()}: {payload.get(key)}")
+        snapshot = self.format_resident_snapshot(payload)
+        fields.append(snapshot or "No resident information in request.")
         if request.get("review_note"):
             fields.extend(["", "Admin Decision:", request.get("review_note")])
         self.approval_detail.setPlainText("\n".join(fields))
@@ -3087,15 +4011,15 @@ class DashboardWindow(QWidget):
             f"Message: {audit.get('message') or ''}",
             "",
             "Previous Information:",
-            self.pretty_json(before) or "No previous snapshot recorded.",
+            self.format_resident_snapshot(before) or "No previous snapshot recorded.",
             "",
             "Present / Proposed Information:",
-            self.pretty_json(after) or "No present snapshot recorded.",
+            self.format_resident_snapshot(after) or "No present snapshot recorded.",
         ]
         if audit.get("action_type") in {"resident_review_request", "resident_review_decision"}:
-            lines.extend(["", "Review Payload:", self.pretty_json(payload)])
+            lines.extend(["", "Review Payload:", self.format_resident_snapshot(payload) or self.pretty_json(payload)])
             if response:
-                lines.extend(["", "Review Result:", self.pretty_json(response)])
+                lines.extend(["", "Review Result:", self.format_resident_snapshot(response) or self.pretty_json(response)])
         self.resident_audit_detail.setPlainText("\n".join(lines))
         self.btn_open_audit_document.setEnabled(bool(document_path))
 
@@ -3146,9 +4070,9 @@ class DashboardWindow(QWidget):
             f"Device Status: {'Online' if row.get('paired_device_online') else 'Offline'}",
             "",
             f"Diet: {row.get('diet') or ''}",
-            f"Allergies: {row.get('allergies') or ''}",
+            f"Texture: {row.get('texture') or row.get('allergies') or ''}",
             f"Drinks: {row.get('drinks') or ''}",
-            f"Schedule: {row.get('schedule') or ''}",
+            f"Fluids: {row.get('fluids') or row.get('schedule') or ''}",
             "",
             "Display Note:",
             row.get("note") or "",
@@ -3228,6 +4152,184 @@ class DashboardWindow(QWidget):
             timeout=timeout,
         )
 
+    def load_local_battery_alert_settings(self) -> Dict[str, Any]:
+        try:
+            settings = self.settings.load().get("battery_alert_settings") or {}
+        except Exception:
+            settings = {}
+        return self.normalize_battery_alert_settings(settings)
+
+    def save_local_battery_alert_settings(self, settings: Dict[str, Any]):
+        data = self.settings.load()
+        data["battery_alert_settings"] = self.normalize_battery_alert_settings(settings)
+        self.settings.save(data)
+
+    def load_battery_alert_settings(self, quiet: bool = True, timeout: float = 1.0):
+        settings = self.load_local_battery_alert_settings()
+        if self.server_mode:
+            result = self.control_client(timeout=timeout).get_battery_alert_settings()
+            if result.get("ok"):
+                payload = result.get("data") or {}
+                settings = self.normalize_battery_alert_settings(payload.get("settings") or payload)
+                self.save_local_battery_alert_settings(settings)
+            elif not quiet and hasattr(self, "battery_alert_status"):
+                self.battery_alert_status.setText(f"Using local policy. {result.get('error') or 'Pi setting not available.'}")
+                self.battery_alert_status.setStyleSheet("font-size: 12px; color: #b45309; font-weight: 800;")
+        self.battery_alert_settings = settings
+        self.apply_battery_alert_settings_to_ui()
+        return settings
+
+    def apply_battery_alert_settings_to_ui(self):
+        if not hasattr(self, "chk_battery_alert_enabled"):
+            return
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        self.chk_battery_alert_enabled.setChecked(bool(settings.get("enabled")))
+        self.spin_battery_low.setValue(int(settings.get("low_threshold", 20)))
+        self.spin_battery_critical.setValue(int(settings.get("critical_threshold", 10)))
+        self.spin_battery_cooldown.setValue(int(settings.get("popup_cooldown_minutes", 30)))
+        roles = set(settings.get("recipient_roles") or [])
+        self.chk_battery_role_it.setChecked("IT_ADMIN" in roles)
+        self.chk_battery_role_admin.setChecked("NURSE_ADMIN" in roles)
+        self.chk_battery_role_staff.setChecked("NURSE" in roles)
+        self.chk_battery_role_verifier.setChecked("VERIFIER" in roles)
+        if hasattr(self, "chk_battery_email_enabled"):
+            self.chk_battery_email_enabled.setChecked(bool(settings.get("email_enabled", False)))
+        if hasattr(self, "txt_battery_emails"):
+            self.txt_battery_emails.setText(", ".join(settings.get("recipient_emails") or []))
+        if hasattr(self, "spin_battery_email_cooldown"):
+            self.spin_battery_email_cooldown.setValue(int(settings.get("email_cooldown_minutes", 60)))
+
+    def battery_alert_settings_from_ui(self) -> Dict[str, Any]:
+        roles = []
+        for checkbox, role in [
+            (self.chk_battery_role_it, "IT_ADMIN"),
+            (self.chk_battery_role_admin, "NURSE_ADMIN"),
+            (self.chk_battery_role_staff, "NURSE"),
+            (self.chk_battery_role_verifier, "VERIFIER"),
+        ]:
+            if checkbox.isChecked():
+                roles.append(role)
+        return self.normalize_battery_alert_settings({
+            "enabled": self.chk_battery_alert_enabled.isChecked(),
+            "low_threshold": self.spin_battery_low.value(),
+            "critical_threshold": self.spin_battery_critical.value(),
+            "popup_cooldown_minutes": self.spin_battery_cooldown.value(),
+            "recipient_roles": roles or ["IT_ADMIN"],
+            "email_enabled": self.chk_battery_email_enabled.isChecked() if hasattr(self, "chk_battery_email_enabled") else False,
+            "recipient_emails": self.txt_battery_emails.text() if hasattr(self, "txt_battery_emails") else "",
+            "email_cooldown_minutes": self.spin_battery_email_cooldown.value() if hasattr(self, "spin_battery_email_cooldown") else 60,
+            "email_subject_prefix": "Whisperwood Battery Alert",
+        })
+
+    def save_battery_alert_settings_from_ui(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can change battery alert policy.")
+            return
+        settings = self.battery_alert_settings_from_ui()
+        busy = self.begin_button_busy(getattr(self, "btn_save_battery_alerts", None), "Saving...")
+        try:
+            result = self.control_client(timeout=5.0).save_battery_alert_settings(settings) if self.server_mode else {"ok": False}
+            if result.get("ok"):
+                payload = result.get("data") or {}
+                settings = self.normalize_battery_alert_settings(payload.get("settings") or settings)
+                email_state = " Email sender configured." if payload.get("email_configured") else " Email sender not configured on the Pi yet."
+                message = "Battery alert policy saved to the Raspberry Pi." + email_state
+                state_color = "#047857"
+            else:
+                message = result.get("error") or "Battery alert policy saved locally. Connect to the Raspberry Pi to share it."
+                state_color = "#b45309"
+            self.battery_alert_settings = settings
+            self.save_local_battery_alert_settings(settings)
+            self.apply_battery_alert_settings_to_ui()
+            if hasattr(self, "battery_alert_status"):
+                self.battery_alert_status.setText(message)
+                self.battery_alert_status.setStyleSheet(f"font-size: 12px; color: {state_color}; font-weight: 800;")
+            try:
+                self.db.log_it_audit(
+                    self.current_user.get("username"),
+                    "Battery Alert Policy",
+                    "devices",
+                    "Success" if result.get("ok") else "Local",
+                    message,
+                )
+            except Exception:
+                pass
+        finally:
+            self.end_button_busy(busy)
+
+    def send_battery_test_email(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can send battery test emails.")
+            return
+        settings = self.battery_alert_settings_from_ui()
+        recipients = settings.get("recipient_emails") or []
+        if not recipients:
+            self.show_error("No recipients", "Enter at least one email recipient before sending a test.")
+            return
+        busy = self.begin_button_busy(getattr(self, "btn_test_battery_email", None), "Sending...")
+        try:
+            result = self.control_client(timeout=20.0).send_battery_test_email(recipients)
+            if result.get("ok"):
+                self.battery_alert_status.setText("Test email sent. Check the configured recipient inbox.")
+                self.battery_alert_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                self.show_info("Battery Email", "Test battery email sent successfully.")
+            else:
+                message = result.get("error") or "Battery test email failed."
+                self.battery_alert_status.setText(message)
+                self.battery_alert_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+                self.show_error("Battery Email", message)
+        finally:
+            self.end_button_busy(busy)
+
+    def battery_alert_level(self, device: Dict[str, Any], settings: Dict[str, Any]) -> Optional[str]:
+        try:
+            percent = int(device.get("battery_level"))
+        except Exception:
+            percent = None
+        if percent is None and not self.truthy(device.get("battery_low")):
+            return None
+        if percent is not None and percent <= int(settings.get("critical_threshold", 10)):
+            return "critical"
+        if self.truthy(device.get("battery_low")) or (percent is not None and percent <= int(settings.get("low_threshold", 20))):
+            return "low"
+        return None
+
+    def check_battery_alerts(self, devices: List[Dict[str, Any]]):
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        if not settings.get("enabled", True) or not self.role_allows_battery_popup():
+            return
+        cooldown_s = int(settings.get("popup_cooldown_minutes", 30)) * 60
+        now_ts = time.time()
+        due = []
+        for device in devices:
+            if not device.get("is_online"):
+                continue
+            level = self.battery_alert_level(device, settings)
+            if not level:
+                continue
+            device_id = str(device.get("device_id") or device.get("id") or "unknown")
+            key = f"{device_id}:{level}"
+            last = self.battery_alert_last_popup.get(key, 0)
+            if now_ts - last < cooldown_s:
+                continue
+            self.battery_alert_last_popup[key] = now_ts
+            resident = device.get("resident_name") or device.get("paired_resident_name") or "Unassigned"
+            due.append((level, device_id, resident, self.battery_display_text(device), self.power_state_text(device)))
+        if not due:
+            return
+        critical = [row for row in due if row[0] == "critical"]
+        title = "Critical Battery Alert" if critical else "Low Battery Alert"
+        lines = []
+        for level, device_id, resident, battery, power in due[:8]:
+            lines.append(f"{device_id} | {resident} | {battery} | {power}")
+        if len(due) > 8:
+            lines.append(f"...and {len(due) - 8} more device(s).")
+        QMessageBox.warning(
+            self,
+            title,
+            "One or more connected smart labels need battery attention.\n\n" + "\n".join(lines),
+        )
+
     def control_client_from_form(self, timeout=2.0):
         if not hasattr(self, "control_host"):
             return self.control_client(timeout=timeout)
@@ -3297,13 +4399,19 @@ class DashboardWindow(QWidget):
     def control_status_text(self, result):
         if result.get("ok"):
             return "Connected"
-        return result.get("error") or "Control Service Offline or Unreachable"
+        return friendly_error_message(result.get("error") or "Control Service Offline or Unreachable")
 
     def load_it_health(self):
         if not hasattr(self, "it_control_stack"):
             return
         if self.it_control_stack.currentIndex() == 0:
             self.refresh_control_dashboard()
+            return
+        if self.it_control_stack.currentIndex() == 3:
+            self.load_ota_releases()
+            return
+        if self.it_control_stack.currentIndex() == 4:
+            self.load_control_backups()
             return
         if hasattr(self, "control_profile_combo"):
             self.load_control_profiles()
@@ -3317,7 +4425,7 @@ class DashboardWindow(QWidget):
             return
         profile = self.current_control_profile()
         if not profile.get("host"):
-            self.control_dashboard_labels["service"].setText("Demo Mode - No Raspberry Pi Connected")
+            self.control_dashboard_labels["service"].setText("No Raspberry Pi Connected")
         else:
             self.control_dashboard_labels["service"].setText("Not refreshed")
         for key in ["hostname", "lan_ip", "tailscale_ip", "cpu", "memory", "disk", "operation"]:
@@ -3464,34 +4572,38 @@ class DashboardWindow(QWidget):
         self.show_info("Copied", "API key copied.")
 
     def test_control_connection(self):
+        busy = self.begin_button_busy(getattr(self, "btn_test_control_connection", None), "Testing...")
         client = self.control_client_from_form()
-        result = client.health()
-        self.control_last_results["health"] = result
-        if result.get("ok"):
-            data = result.get("data") or {}
-            hostname = data.get("hostname") or "unknown host"
-            version = data.get("version") or "version pending"
-            self.control_test_status.setText(f"Connection Status: Connected | {hostname} | {version}")
-            self.control_test_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
-            audit_result = "Success"
-            message = f"Connected to Control Service at {client.base_url}"
-        else:
-            self.control_test_status.setText(f"Connection Status: {self.control_status_text(result)}")
-            self.control_test_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
-            audit_result = "Failed"
-            message = self.control_status_text(result)
-        tested_profile = self.control_profile_from_form()
-        self.update_control_network_labels(result, tested_profile)
-        self.update_control_header(result, tested_profile)
-        self.db.log_it_audit(self.current_user.get("username"), "Connection Test", client.base_url, audit_result, message)
-        self.load_it_audit_logs()
+        try:
+            result = client.health()
+            self.control_last_results["health"] = result
+            if result.get("ok"):
+                data = result.get("data") or {}
+                hostname = data.get("hostname") or "unknown host"
+                version = data.get("version") or "version pending"
+                self.control_test_status.setText(f"Connection Status: Connected | {hostname} | {version}")
+                self.control_test_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                audit_result = "Success"
+                message = f"Connected to Control Service at {client.base_url}"
+            else:
+                self.control_test_status.setText(f"Connection Status: {self.control_status_text(result)}")
+                self.control_test_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+                audit_result = "Failed"
+                message = self.control_status_text(result)
+            tested_profile = self.control_profile_from_form()
+            self.update_control_network_labels(result, tested_profile)
+            self.update_control_header(result, tested_profile)
+            self.db.log_it_audit(self.current_user.get("username"), "Connection Test", client.base_url, audit_result, message)
+            self.load_it_audit_logs()
+        finally:
+            self.end_button_busy(busy)
 
     def update_control_header(self, health_result=None, profile=None):
         if not hasattr(self, "control_header_status"):
             return
         profile = profile or self.current_control_profile()
         if not profile.get("host"):
-            self.control_header_status.setText("Demo Mode - No Raspberry Pi Connected")
+            self.control_header_status.setText("No Raspberry Pi Connected")
             self.control_header_status.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 800;")
             return
         if health_result and health_result.get("ok"):
@@ -3548,7 +4660,7 @@ class DashboardWindow(QWidget):
         self.control_dashboard_labels["memory"].setText(self.control_percent_value(system, "memory_percent", "memory_usage", "memory"))
         self.control_dashboard_labels["disk"].setText(self.control_percent_value(system, "disk_percent", "disk_usage", "disk"))
         self.control_dashboard_labels["operation"].setText(self.control_value(operation, "status", default=self.control_status_text(results["operation"])))
-        self.control_dashboard_labels["refreshed"].setText(time.strftime("%Y-%m-%d %H:%M:%S"))
+        self.control_dashboard_labels["refreshed"].setText(format_local_now())
         self.update_control_network_labels(health)
         self.update_control_header(health)
         self.load_control_services()
@@ -3565,12 +4677,13 @@ class DashboardWindow(QWidget):
         )
         self.control_service_labels["version"].setText(self.control_value(health.get("data") or {}, "version"))
         self.control_service_labels["uptime"].setText(self.control_value(health.get("data") or {}, "uptime"))
+        last_restart = self.control_value(
+            health.get("data") or {},
+            "last_restart",
+            default=self.control_value(operation.get("data") or {}, "last_restart", default="Not reported"),
+        )
         self.control_service_labels["last_restart"].setText(
-            self.control_value(
-                health.get("data") or {},
-                "last_restart",
-                default=self.control_value(operation.get("data") or {}, "last_restart", default="Not reported"),
-            )
+            self.db.format_timestamp(last_restart) if last_restart != "Not reported" else last_restart
         )
 
     def load_control_devices(self):
@@ -3578,13 +4691,23 @@ class DashboardWindow(QWidget):
             return
         devices = self.safe_get_devices()
         offline = sum(1 for d in devices if not d.get("is_online"))
-        low_battery = sum(1 for d in devices if d.get("battery_level") is not None and int(d.get("battery_level")) < 20)
+        settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+        low_threshold = int(settings.get("low_threshold", 20))
+        low_battery = 0
+        for d in devices:
+            try:
+                battery = int(d.get("battery_level"))
+            except Exception:
+                battery = None
+            if (battery is not None and battery <= low_threshold) or self.truthy(d.get("battery_low")):
+                low_battery += 1
         if hasattr(self, "control_device_summary"):
             self.control_device_summary["total"].setText(str(len(devices)))
             self.control_device_summary["online"].setText(str(len(devices) - offline))
             self.control_device_summary["offline"].setText(str(offline))
             self.control_device_summary["low_battery"].setText(str(low_battery))
-            self.control_device_summary["firmware"].setText("Pending")
+            versions = sorted({str(d.get("fw") or d.get("firmware") or "").strip() for d in devices if str(d.get("fw") or d.get("firmware") or "").strip()})
+            self.control_device_summary["firmware"].setText(", ".join(versions) if versions else "Not reported")
 
         self.it_device_table.setRowCount(len(devices))
         for r, d in enumerate(devices):
@@ -3594,26 +4717,537 @@ class DashboardWindow(QWidget):
                 d.get("ip") or "",
                 str(d.get("port") or ""),
                 d.get("fw") or "",
-                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A",
-                str(d.get("last_seen_s") or ""),
+                self.battery_display_text(d),
+                self.power_state_text(d),
+                format_elapsed_seconds(d.get("last_seen_s")),
             ]
             for c, value in enumerate(values):
                 self.it_device_table.setItem(r, c, QTableWidgetItem(str(value)))
+        if hasattr(self, "esp32_pi_host") and not self.esp32_pi_host.text().strip():
+            profile = self.current_control_profile()
+            self.esp32_pi_host.setText(profile.get("host") or "")
         self.load_it_recovery_users()
+        if hasattr(self, "ota_target"):
+            current = self.ota_target.currentData()
+            self.ota_target.blockSignals(True)
+            self.ota_target.clear()
+            self.ota_target.addItem("All online ESP32 devices", "all")
+            for device in devices:
+                if not device.get("is_online"):
+                    continue
+                device_id = device.get("device_id") or device.get("id")
+                if device_id:
+                    self.ota_target.addItem(str(device_id), str(device_id))
+            if current:
+                for idx in range(self.ota_target.count()):
+                    if self.ota_target.itemData(idx) == current:
+                        self.ota_target.setCurrentIndex(idx)
+                        break
+            self.ota_target.blockSignals(False)
+
+    def file_size_text(self, size):
+        try:
+            size = int(size or 0)
+        except Exception:
+            size = 0
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
+            size = size / 1024
+        return str(size)
+
+    def selected_ota_release_id(self):
+        if not hasattr(self, "ota_table"):
+            return None
+        row = self.ota_table.currentRow()
+        if row < 0:
+            return None
+        item = self.ota_table.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def choose_ota_firmware(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose ESP32 firmware .bin", "", "ESP32 Firmware (*.bin);;All Files (*)")
+        if not path:
+            return
+        self.ota_firmware_path.setText(path)
+        if not self.ota_version.text().strip():
+            self.ota_version.setText(os.path.splitext(os.path.basename(path))[0])
+
+    def load_ota_releases(self):
+        if not hasattr(self, "ota_table"):
+            return
+        result = self.control_client(timeout=6.0).get_firmware_releases()
+        if not result.get("ok"):
+            self.ota_status.setText(result.get("error") or "Could not load OTA releases.")
+            self.ota_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+            self.ota_table.setRowCount(0)
+            return
+        rows = (result.get("data") or {}).get("releases") or []
+        self.ota_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            values = [
+                row.get("id"),
+                row.get("version") or "",
+                row.get("filename") or "",
+                self.file_size_text(row.get("size_bytes")),
+                row.get("status") or "",
+                self.db.format_timestamp(row.get("released_at")),
+            ]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                if c == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row.get("id"))
+                self.ota_table.setItem(r, c, item)
+        self.ota_status.setText(f"{len(rows)} firmware release(s) available.")
+        self.ota_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+
+    def upload_ota_firmware(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can upload ESP32 firmware.")
+            return
+        path = self.ota_firmware_path.text().strip()
+        if not path or not os.path.isfile(path):
+            self.show_error("Firmware Missing", "Choose a compiled ESP32 .bin file first.")
+            return
+        busy = self.begin_button_busy(getattr(self, "btn_upload_ota_firmware", None), "Uploading...")
+        try:
+            result = self.control_client(timeout=60.0).upload_firmware(
+                path,
+                self.ota_version.text().strip(),
+                self.ota_notes.toPlainText().strip(),
+                self.current_user.get("username") or "itadmin",
+            )
+            if result.get("ok"):
+                self.ota_status.setText("Firmware uploaded to the Raspberry Pi. Select it below, then release when ready.")
+                self.ota_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                self.load_ota_releases()
+                self.load_it_audit_logs()
+            else:
+                self.show_error("Firmware Upload", result.get("error") or "Firmware upload failed.")
+        finally:
+            self.end_button_busy(busy)
+
+    def release_selected_ota_firmware(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can release ESP32 firmware.")
+            return
+        release_id = self.selected_ota_release_id()
+        if not release_id:
+            self.show_error("No firmware selected", "Select a firmware release row first.")
+            return
+        target = self.ota_target.currentData() or "all"
+        target_text = "all online ESP32 devices" if target == "all" else str(target)
+        reply = QMessageBox.question(
+            self,
+            "Release Firmware",
+            f"Release the selected firmware to {target_text}?\n\nDo this only when devices are powered and idle.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        busy = self.begin_button_busy(getattr(self, "btn_release_ota_firmware", None), "Releasing...")
+        try:
+            result = self.control_client(timeout=620.0).release_firmware(
+                int(release_id),
+                target,
+                self.current_user.get("username") or "itadmin",
+            )
+            if result.get("ok"):
+                self.ota_status.setText("OTA release sent. Devices will reboot when firmware is applied.")
+                self.ota_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                self.load_ota_releases()
+                self.refresh_devices()
+            else:
+                self.show_error("OTA Release", result.get("error") or "OTA release failed.")
+        finally:
+            self.end_button_busy(busy)
+
+    def selected_backup_path(self):
+        if not hasattr(self, "backup_table"):
+            return None
+        row = self.backup_table.currentRow()
+        if row < 0:
+            return None
+        item = self.backup_table.item(row, 1)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def load_control_backups(self):
+        if not hasattr(self, "backup_table"):
+            return
+        result = self.control_client(timeout=8.0).get_backups()
+        if not result.get("ok"):
+            self.backup_status.setText(result.get("error") or "Could not load backups.")
+            self.backup_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+            self.backup_table.setRowCount(0)
+            return
+        data = result.get("data") or {}
+        rows = data.get("backups") or []
+        drive = data.get("google_drive") or {}
+        self.backup_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            values = [
+                row.get("created_at_readable") or self.db.format_timestamp(row.get("created_at")),
+                row.get("name") or "",
+                self.file_size_text(row.get("size_bytes")),
+                row.get("scope") or ("Pi recovery bundle" if "recovery-bundle" in str(row.get("name") or "") else row.get("type") or "local"),
+                row.get("status") or "",
+            ]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                if c == 1:
+                    item.setData(Qt.ItemDataRole.UserRole, row.get("path"))
+                self.backup_table.setItem(r, c, item)
+        if drive.get("configured") and drive.get("rclone_available"):
+            drive_text = f"Google Drive ready: {drive.get('target') or 'saved target'}"
+        elif drive.get("configured"):
+            drive_text = "Google Drive target saved, but rclone is missing on the Pi"
+        else:
+            drive_text = "Google Drive target not set in Settings > Integrations"
+        self.backup_status.setText(f"{len(rows)} local backup(s). {drive_text}.")
+        self.backup_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;" if rows else "font-size: 12px; color: #b45309; font-weight: 800;")
+
+    def create_control_backup(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can create backups.")
+            return
+        busy = self.begin_button_busy(getattr(self, "btn_create_backup", None), "Creating...")
+        try:
+            result = self.control_client(timeout=620.0).create_backup(self.current_user.get("username") or "itadmin", True)
+            if result.get("ok"):
+                data = result.get("data") or {}
+                backup = data.get("backup") or {}
+                upload = backup.get("upload") or {}
+                message = upload.get("reason") or "Recovery bundle created locally and Google Drive upload was attempted."
+                if backup.get("warnings"):
+                    message = f"{message} Some protected service files were skipped; see backup warnings."
+                upload_ok = bool(upload.get("ok", True))
+                self.load_control_backups()
+                self.backup_status.setText(message)
+                self.backup_status.setStyleSheet(f"font-size: 12px; color: {'#047857' if upload_ok else '#b45309'}; font-weight: 800;")
+            else:
+                self.show_error("Backup", result.get("error") or "Backup failed.")
+        finally:
+            self.end_button_busy(busy)
+
+    def restore_selected_backup(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can restore backups.")
+            return
+        path = self.selected_backup_path()
+        if not path:
+            self.show_error("No backup selected", "Select a backup row first.")
+            return
+        confirm, ok = QInputDialog.getText(
+            self,
+            "Confirm Restore",
+            "Type RESTORE WHISPERWOOD BACKUP to restore this backup.\nA pre-restore backup will be created first.",
+        )
+        if not ok:
+            return
+        busy = self.begin_button_busy(getattr(self, "btn_restore_backup", None), "Restoring...")
+        try:
+            result = self.control_client(timeout=940.0).restore_backup(
+                path,
+                confirm,
+                self.current_user.get("username") or "itadmin",
+            )
+            if result.get("ok"):
+                self.backup_status.setText("Backup restored. Refresh the app data before continuing.")
+                self.backup_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                self.load_control_backups()
+                self.refresh_all()
+            else:
+                self.show_error("Restore", result.get("error") or "Restore failed.")
+        finally:
+            self.end_button_busy(busy)
+
+    def refresh_esp32_serial_ports(self):
+        if not hasattr(self, "esp32_serial_port"):
+            return
+        busy = self.begin_button_busy(getattr(self, "btn_refresh_esp32_ports", None), "Refreshing...")
+        self.set_esp32_wifi_status("Refreshing USB serial ports...", "pending")
+        try:
+            current = self.esp32_serial_port.currentData()
+            self.esp32_serial_port.clear()
+            try:
+                from serial.tools import list_ports
+            except Exception:
+                message = "USB serial support is missing from this installation. Install/update the desktop app, then try again."
+                self.set_esp32_wifi_status(message, "error")
+                self.show_error("USB Ports", message)
+                return
+            ports = list(list_ports.comports())
+            for port in ports:
+                label = f"{port.device} - {port.description}"
+                self.esp32_serial_port.addItem(label, port.device)
+            if current:
+                for idx in range(self.esp32_serial_port.count()):
+                    if self.esp32_serial_port.itemData(idx) == current:
+                        self.esp32_serial_port.setCurrentIndex(idx)
+                        break
+            count = self.esp32_serial_port.count()
+            self.set_esp32_wifi_status(
+                f"{count} USB serial port(s) found." if count else "No USB serial ports found. Plug in the ESP32, wait a few seconds, then click Refresh Ports again.",
+                "ok" if count else "error",
+            )
+        finally:
+            self.end_button_busy(busy)
+
+    def set_esp32_wifi_status(self, message, state="info"):
+        if not hasattr(self, "esp32_wifi_status"):
+            return
+        colors = {
+            "ok": "#047857",
+            "error": "#b91c1c",
+            "pending": "#b45309",
+            "info": "#475569",
+        }
+        color = colors.get(state, colors["info"])
+        self.esp32_wifi_status.setText(message)
+        self.esp32_wifi_status.setStyleSheet(f"font-size: 12px; color: {color}; font-weight: 800;")
+        QApplication.processEvents()
+
+    def set_esp32_provisioning_busy(self, busy):
+        for name in ("btn_refresh_esp32_ports", "btn_scan_esp32_wifi", "btn_apply_esp32_wifi"):
+            button = getattr(self, name, None)
+            if button:
+                button.setEnabled(not busy)
+        QApplication.processEvents()
+
+    def _open_esp32_serial(self):
+        port = self.esp32_serial_port.currentData() if hasattr(self, "esp32_serial_port") else None
+        if not port:
+            raise RuntimeError("Select the ESP32 USB / COM port first.")
+        try:
+            import serial
+        except Exception as exc:
+            raise RuntimeError("pyserial is not installed. Install/update the desktop app before provisioning ESP32 WiFi.") from exc
+        try:
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = 115200
+            ser.timeout = 0.45
+            ser.write_timeout = 4
+            # Set modem lines before opening so Windows is less likely to reset
+            # the ESP32 before the provisioning command is sent.
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+        except Exception as exc:
+            detail = str(exc)
+            lowered = detail.lower()
+            if "access is denied" in lowered or "permission" in lowered or "permissionerror" in lowered:
+                raise RuntimeError(
+                    f"{port} is busy or Windows denied access. Close Arduino Serial Monitor, "
+                    "Arduino Serial Plotter, PuTTY, Thonny, or any other app using the ESP32 USB port, "
+                    "then click Refresh Ports and try again."
+                ) from exc
+            raise RuntimeError(f"Could not open {port}. Unplug/replug the ESP32, refresh ports, and try again. Details: {detail}") from exc
+        try:
+            ser.setDTR(False)
+            ser.setRTS(False)
+        except Exception:
+            pass
+        return ser
+
+    def _wait_for_esp32_usb_ready(self, ser, timeout_s=8):
+        lines = []
+        start = time.time()
+        while time.time() - start < timeout_s:
+            raw = ser.readline()
+            if not raw:
+                continue
+            line = raw.decode(errors="ignore").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if line.startswith(("WWREADY", "WWCFG", "WWERR")):
+                break
+        return lines
+
+    def _write_esp32_command(self, ser, command):
+        data = command.encode("utf-8")
+        last_error = None
+        for _ in range(3):
+            try:
+                written = ser.write(data)
+                ser.flush()
+                if written == len(data):
+                    return
+                last_error = RuntimeError(f"Only wrote {written}/{len(data)} bytes to ESP32.")
+            except Exception as exc:
+                last_error = exc
+            time.sleep(1.2)
+        raise RuntimeError(
+            "Windows opened the USB serial port, but the ESP32 did not accept the command. "
+            "Close Arduino Serial Monitor/Plotter and try again. If the port only shows ESP-ROM boot text, "
+            "reflash the ESP32 with USB CDC On Boot enabled so the app can see WWREADY and WWSCAN over USB."
+        ) from last_error
+
+    def _read_esp32_lines(self, ser, end_markers, timeout_s=12):
+        lines = []
+        start = time.time()
+        markers = tuple(end_markers)
+        while time.time() - start < timeout_s:
+            raw = ser.readline()
+            if not raw:
+                continue
+            line = raw.decode(errors="ignore").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if markers and any(line.startswith(marker) for marker in markers):
+                break
+        return lines
+
+    def _esp32_serial_transaction(self, command, end_markers, timeout_s=12, ready_timeout_s=8):
+        with self._open_esp32_serial() as ser:
+            boot_lines = self._wait_for_esp32_usb_ready(ser, timeout_s=ready_timeout_s)
+            try:
+                ser.reset_input_buffer()
+                self._write_esp32_command(ser, command)
+                response_lines = self._read_esp32_lines(ser, end_markers, timeout_s=timeout_s)
+            except Exception as exc:
+                boot_text = " | ".join(boot_lines[-6:])
+                if any(line.startswith("ESP-ROM") or "SPI_FAST_FLASH_BOOT" in line for line in boot_lines):
+                    raise RuntimeError(
+                        "COM port opened, but the Whisperwood ESP32 provisioning prompt was not available. "
+                        "The port is showing ESP32 boot text instead of WWREADY/WWCFG. Reflash the ESP32 firmware "
+                        "with USB CDC On Boot enabled, then close Arduino Serial Monitor before scanning. "
+                        f"Last USB text: {boot_text or exc}"
+                    ) from exc
+                raise
+        return boot_lines + response_lines
+
+    def _friendly_esp32_serial_error(self, exc):
+        detail = str(exc or "").strip()
+        lowered = detail.lower()
+        if "wwready" in lowered or "wwcfg" in lowered or "esp-rom" in lowered or "usb cdc" in lowered:
+            return detail
+        if "write timeout" in lowered or "did not accept the command" in lowered:
+            return (
+                "The ESP32 USB port opened, but it did not accept the provisioning command. "
+                "Close Arduino Serial Monitor/Plotter and try again. If COM9 shows only ESP-ROM boot text, "
+                "reflash the ESP32 with USB CDC On Boot enabled."
+            )
+        if "access is denied" in lowered or "permission" in lowered or "busy" in lowered:
+            return detail
+        return detail or "The ESP32 did not respond over USB."
+
+    def _serial_value(self, value):
+        from urllib.parse import quote
+        return quote(str(value or "").strip(), safe="")
+
+    def scan_esp32_wifi_networks(self):
+        busy = self.begin_button_busy(getattr(self, "btn_scan_esp32_wifi", None), "Scanning...")
+        self.set_esp32_provisioning_busy(True)
+        self.set_esp32_wifi_status("Scanning WiFi from ESP32 over USB... keep the board plugged in.", "pending")
+        try:
+            lines = self._esp32_serial_transaction("WWSCAN\n", ("WWEND", "WWERR"), timeout_s=22, ready_timeout_s=12)
+            err_line = next((line for line in lines if line.startswith("WWERR")), "")
+            if err_line:
+                raise RuntimeError(f"The ESP32 returned an error during WiFi scan. {err_line}")
+            networks = []
+            for line in lines:
+                if not line.startswith("WWSSID "):
+                    continue
+                marker = " ssid="
+                rssi_marker = " rssi="
+                ssid = ""
+                if marker in line and rssi_marker in line:
+                    ssid = line.split(marker, 1)[1].split(rssi_marker, 1)[0].strip()
+                if ssid and ssid not in networks:
+                    networks.append(ssid)
+            self.esp32_wifi_ssid.clear()
+            for ssid in networks:
+                self.esp32_wifi_ssid.addItem(ssid)
+            for idx in range(self.esp32_wifi_ssid.count()):
+                if self.esp32_wifi_ssid.itemText(idx).strip().lower() == "bell458":
+                    self.esp32_wifi_ssid.setCurrentIndex(idx)
+                    break
+            detail = " Last: " + lines[-1] if lines else ""
+            self.set_esp32_wifi_status(
+                f"Found {len(networks)} WiFi network(s).{detail}" if networks else "No WiFi networks returned by ESP32. Confirm the latest ESP32 firmware is flashed.",
+                "ok" if networks else "error",
+            )
+            if not networks:
+                self.show_error(
+                    "WiFi Scan",
+                    "The ESP32 did not return any WiFi networks. Keep it plugged in, confirm the latest ESP32 firmware is flashed, then try Scan WiFi again."
+                )
+        except Exception as exc:
+            message = self._friendly_esp32_serial_error(exc)
+            self.set_esp32_wifi_status(f"WiFi scan failed. {message}", "error")
+            self.show_error("WiFi Scan Failed", message)
+        finally:
+            self.set_esp32_provisioning_busy(False)
+            self.end_button_busy(busy)
+
+    def provision_esp32_wifi(self):
+        ssid = self.esp32_wifi_ssid.currentText().strip() if hasattr(self, "esp32_wifi_ssid") else ""
+        password = self.esp32_wifi_password.text() if hasattr(self, "esp32_wifi_password") else ""
+        pi_host = self.esp32_pi_host.text().strip() if hasattr(self, "esp32_pi_host") else ""
+        pi_port = self.esp32_pi_port.text().strip() if hasattr(self, "esp32_pi_port") else "5000"
+        if not ssid:
+            self.show_error("Missing WiFi", "Enter or select the WiFi network name.")
+            return
+        if not pi_host:
+            self.show_error("Missing Pi Host", "Enter the Raspberry Pi LAN IP or hostname for the ESP32 to connect to.")
+            return
+        try:
+            port_num = int(pi_port)
+            if port_num < 1 or port_num > 65535:
+                raise ValueError
+        except Exception:
+            self.show_error("Invalid Port", "ESP32 TCP port must be a number from 1 to 65535.")
+            return
+        command = (
+            f"WWSET ssid={self._serial_value(ssid)} "
+            f"pass={self._serial_value(password)} "
+            f"pi={self._serial_value(pi_host)} "
+            f"port={port_num}\n"
+        )
+        busy = self.begin_button_busy(getattr(self, "btn_apply_esp32_wifi", None), "Saving...")
+        self.set_esp32_provisioning_busy(True)
+        self.set_esp32_wifi_status(f"Saving WiFi '{ssid}' to ESP32 and waiting for acknowledgement...", "pending")
+        try:
+            lines = self._esp32_serial_transaction(command, ("WWOK", "WWERR"), timeout_s=16, ready_timeout_s=12)
+            ok = any(line.startswith("WWOK") for line in lines)
+            detail = " | ".join(lines[-4:]) if lines else "No response from ESP32."
+            if ok:
+                self.set_esp32_wifi_status(f"WiFi saved to ESP32. Reconnecting to {ssid} and Pi {pi_host}:{port_num}.", "ok")
+                self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Success", f"Pi host {pi_host}:{port_num}")
+                self.show_info("ESP32 WiFi", "WiFi settings saved to the ESP32. It will reconnect using the new network without needing a restart.")
+            else:
+                message = f"The ESP32 did not confirm the WiFi save. Last response: {detail}"
+                self.set_esp32_wifi_status(message, "error")
+                self.show_error("ESP32 WiFi", message)
+        except Exception as exc:
+            message = self._friendly_esp32_serial_error(exc)
+            self.set_esp32_wifi_status(f"Provision failed. {message}", "error")
+            self.db.log_it_audit(self.current_user.get("username"), "ESP32 WiFi Provision", ssid, "Failed", message)
+            self.show_error("ESP32 WiFi Failed", message)
+        finally:
+            self.set_esp32_provisioning_busy(False)
+            self.end_button_busy(busy)
 
     def restart_operation_manager(self):
+        busy = self.begin_button_busy(getattr(self, "btn_restart_operation", None), "Restarting...")
         client = self.control_client()
-        result = client.restart_operation()
-        audit_result = "Success" if result.get("ok") else "Failed"
-        message = "Operation Manager restart requested." if result.get("ok") else self.control_status_text(result)
-        self.db.log_it_audit(self.current_user.get("username"), "Restart Operation Manager", client.base_url, audit_result, message)
-        self.load_it_audit_logs()
-        self.control_last_results["operation"] = client.operation_status()
-        self.load_control_services()
-        if result.get("ok"):
-            self.show_info("Restart requested", "Operation Manager restart request was sent to the Raspberry Pi Control Service.")
-        else:
-            self.show_error("Restart failed", message)
+        try:
+            result = client.restart_operation()
+            audit_result = "Success" if result.get("ok") else "Failed"
+            message = "Operation Manager restart requested." if result.get("ok") else self.control_status_text(result)
+            self.db.log_it_audit(self.current_user.get("username"), "Restart Operation Manager", client.base_url, audit_result, message)
+            self.load_it_audit_logs()
+            self.control_last_results["operation"] = client.operation_status()
+            self.load_control_services()
+            if result.get("ok"):
+                self.show_info("Restart requested", "Operation Manager restart request was sent to the Raspberry Pi Control Service.")
+            else:
+                self.show_error("Restart failed", message)
+        finally:
+            self.end_button_busy(busy)
 
     def load_it_audit_logs(self):
         if not hasattr(self, "it_audit_table"):
@@ -3738,7 +5372,7 @@ class DashboardWindow(QWidget):
             self.ai_diag_input.setPlainText(json.dumps(diagnostics, indent=2, default=str))
 
         if not profile.get("host"):
-            summary = "Demo Mode - no Raspberry Pi Control Service host is configured."
+            summary = "Offline mode - no Raspberry Pi Control Service host is configured."
             cause = "The active connection profile does not have a host."
             fixes = [
                 "Confirm this deployment build includes the site Raspberry Pi address.",
@@ -3828,17 +5462,22 @@ class DashboardWindow(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("Change Password")
         dialog.resize(460, 300)
-        dialog.setStyleSheet("QDialog { background-color: #f3f7fb; color: #0f172a; }")
+        dialog.setStyleSheet("""
+            QDialog { background-color: #f3f7fb; color: #0f172a; }
+            QDialog QLabel { background: transparent; border: none; }
+        """)
         layout = QVBoxLayout(dialog)
 
         title = QLabel("Change your password", dialog)
-        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+        title.setFrameStyle(0)
+        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a; background: transparent; border: none;")
         layout.addWidget(title)
 
         guidance_text = "You signed in with a temporary password. Create a new password before continuing." if force else "Update the password for your signed-in account."
         guidance = QLabel(guidance_text, dialog)
         guidance.setWordWrap(True)
-        guidance.setStyleSheet("font-size: 12px; color: #64748b;")
+        guidance.setFrameStyle(0)
+        guidance.setStyleSheet("font-size: 12px; color: #64748b; background: transparent; border: none;")
         layout.addWidget(guidance)
 
         current_password = QLineEdit(dialog)
@@ -3861,15 +5500,19 @@ class DashboardWindow(QWidget):
 
         status = QLabel("", dialog)
         status.setWordWrap(True)
-        status.setStyleSheet("font-size: 12px; color: #b91c1c;")
+        status.setFrameStyle(0)
+        status.setStyleSheet("font-size: 12px; color: #b91c1c; background: transparent; border: none;")
         layout.addWidget(status)
 
         buttons = QHBoxLayout()
+        buttons.addStretch(1)
         save_btn = QPushButton("Save Password", dialog)
         save_btn.setStyleSheet(self.primary_btn_style())
+        save_btn.setFixedSize(150, 40)
         buttons.addWidget(save_btn)
         cancel_btn = QPushButton("Logout" if force else "Cancel", dialog)
         cancel_btn.setStyleSheet(self.secondary_btn_style())
+        cancel_btn.setFixedSize(110, 40)
         buttons.addWidget(cancel_btn)
         layout.addLayout(buttons)
 
@@ -3905,11 +5548,15 @@ class DashboardWindow(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("Profile")
         dialog.resize(520, 360)
-        dialog.setStyleSheet("QDialog { background-color: #f3f7fb; color: #0f172a; }")
+        dialog.setStyleSheet("""
+            QDialog { background-color: #f3f7fb; color: #0f172a; }
+            QDialog QLabel { background: transparent; border: none; }
+        """)
         layout = QVBoxLayout(dialog)
 
         title = QLabel("Profile", dialog)
-        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+        title.setFrameStyle(0)
+        title.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a; background: transparent; border: none;")
         layout.addWidget(title)
 
         guidance = QLabel(
@@ -3917,7 +5564,8 @@ class DashboardWindow(QWidget):
             dialog,
         )
         guidance.setWordWrap(True)
-        guidance.setStyleSheet("font-size: 12px; color: #64748b;")
+        guidance.setFrameStyle(0)
+        guidance.setStyleSheet("font-size: 12px; color: #64748b; background: transparent; border: none;")
         layout.addWidget(guidance)
 
         username_edit = QLineEdit(dialog)
@@ -3928,19 +5576,24 @@ class DashboardWindow(QWidget):
         layout.addWidget(username_edit)
 
         role_label = QLabel(f"Role: {self.role_label()}", dialog)
-        role_label.setStyleSheet("font-size: 13px; color: #334155;")
+        role_label.setFrameStyle(0)
+        role_label.setStyleSheet("font-size: 13px; color: #334155; background: transparent; border: none;")
         layout.addWidget(role_label)
 
         username_note = QLabel("Username editing is disabled until backend username-change support is available.", dialog)
         username_note.setWordWrap(True)
-        username_note.setStyleSheet("font-size: 12px; color: #b45309;")
+        username_note.setFrameStyle(0)
+        username_note.setStyleSheet("font-size: 12px; color: #b45309; background: transparent; border: none;")
         layout.addWidget(username_note)
 
         buttons = QHBoxLayout()
+        buttons.addStretch(1)
         change_password_btn = QPushButton("Change Password", dialog)
         change_password_btn.setStyleSheet(self.primary_btn_style())
+        change_password_btn.setFixedSize(165, 40)
         close_btn = QPushButton("Close", dialog)
         close_btn.setStyleSheet(self.secondary_btn_style())
+        close_btn.setFixedSize(100, 40)
         buttons.addWidget(change_password_btn)
         buttons.addWidget(close_btn)
         layout.addLayout(buttons)
@@ -3955,55 +5608,236 @@ class DashboardWindow(QWidget):
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
-        dialog.resize(880, 680)
-        dialog.setStyleSheet("QDialog { background-color: #f3f7fb; color: #0f172a; }")
+        available = QGuiApplication.primaryScreen().availableGeometry()
+        dialog.resize(min(980, max(860, available.width() - 120)), min(760, max(640, available.height() - 120)))
+        dialog.setMinimumSize(840, 640)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #f3f7fb;
+                color: #0f172a;
+            }
+            QDialog QLabel {
+                background: transparent;
+                border: none;
+            }
+            QTabWidget::pane {
+                border: 1px solid #d8e1ea;
+                border-radius: 8px;
+                background-color: #ffffff;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #e8f0f5;
+                color: #334155;
+                border: 1px solid #d8e1ea;
+                border-bottom: none;
+                padding: 10px 18px;
+                margin-right: 6px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                font-size: 13px;
+                font-weight: 800;
+            }
+            QTabBar::tab:selected {
+                background-color: #0f766e;
+                color: #ffffff;
+                border-color: #0f766e;
+            }
+            QTabBar::tab:hover {
+                background-color: #dbeafe;
+                color: #0f172a;
+            }
+        """)
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
 
-        header = QLabel(
-            f"Signed in as {self.current_user.get('username', 'admin')} | {self.role_label()}\n"
-            "IT settings manage system users and your own password."
-        )
-        header.setWordWrap(True)
-        header.setStyleSheet("font-size: 13px; color: #334155; background: transparent; border: none;")
+        header = QFrame(dialog)
+        header.setFixedHeight(112)
+        header.setStyleSheet("""
+            QFrame {
+                background-color: #103b36;
+                border: 1px solid #0f766e;
+                border-radius: 8px;
+            }
+        """)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(22, 18, 22, 18)
+
+        header_text = QVBoxLayout()
+        title = QLabel("IT Admin Settings", header)
+        title.setStyleSheet("font-size: 24px; font-weight: 900; color: #ffffff;")
+        subtitle = QLabel("Manage secure access, integrations, and operational settings from one clean control point.", header)
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("font-size: 13px; color: #d8f3ee;")
+        header_text.addWidget(title)
+        header_text.addWidget(subtitle)
+        header_text.addStretch(1)
+        header_layout.addLayout(header_text, 1)
+
+        profile_chip = QFrame(header)
+        profile_chip.setFixedSize(275, 72)
+        profile_chip.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: none;
+                border-radius: 8px;
+            }
+        """)
+        chip_layout = QVBoxLayout(profile_chip)
+        chip_layout.setContentsMargins(14, 10, 14, 10)
+        chip_user = QLabel(self.current_user.get("username", "admin"), profile_chip)
+        chip_user.setStyleSheet("font-size: 18px; font-weight: 900; color: #0f172a;")
+        chip_role = QLabel(self.role_label(), profile_chip)
+        chip_role.setStyleSheet("font-size: 12px; color: #0f766e; font-weight: 800;")
+        chip_layout.addWidget(chip_user)
+        chip_layout.addWidget(chip_role)
+        header_layout.addWidget(profile_chip)
         layout.addWidget(header)
 
-        password_panel = QFrame(dialog)
-        password_panel.setStyleSheet("QFrame { background-color: #ffffff; border: 1px solid #d8e1ea; border-radius: 8px; }")
-        password_layout = QHBoxLayout(password_panel)
-        password_layout.setContentsMargins(12, 12, 12, 12)
-        password_text = QLabel("Account security: change your password here. Temporary password recovery is handled from this IT area.", password_panel)
-        password_text.setWordWrap(True)
-        password_text.setStyleSheet("font-size: 12px; color: #334155;")
-        password_layout.addWidget(password_text)
-        change_password_btn = QPushButton("Change My Password", password_panel)
-        change_password_btn.setStyleSheet(self.primary_btn_style())
-        password_layout.addWidget(change_password_btn)
-        layout.addWidget(password_panel)
+        tabs = QTabWidget(dialog)
+        layout.addWidget(tabs, 1)
 
-        users_table = QTableWidget(dialog)
+        def make_tab():
+            scroll = QScrollArea(tabs)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+            body = QWidget(scroll)
+            body.setStyleSheet("background: transparent;")
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(18, 18, 18, 18)
+            body_layout.setSpacing(14)
+            scroll.setWidget(body)
+            return scroll, body_layout
+
+        def make_card(parent, title_text, subtitle_text=""):
+            card = QFrame(parent)
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: #ffffff;
+                    border: 1px solid #d8e1ea;
+                    border-radius: 8px;
+                }
+            """)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 14, 16, 14)
+            card_layout.setSpacing(10)
+            heading = QLabel(title_text, card)
+            heading.setStyleSheet("font-size: 16px; font-weight: 900; color: #0f172a;")
+            card_layout.addWidget(heading)
+            if subtitle_text:
+                sub = QLabel(subtitle_text, card)
+                sub.setWordWrap(True)
+                sub.setStyleSheet("font-size: 12px; color: #64748b;")
+                card_layout.addWidget(sub)
+            return card, card_layout
+
+        def plain_label(label, style):
+            label.setFrameStyle(0)
+            label.setStyleSheet(f"{style}; background: transparent; border: none;")
+            return label
+
+        def compact_button(button, width=176, height=40):
+            button.setFixedHeight(height)
+            button.setMinimumWidth(width)
+            button.setMaximumWidth(width)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            return button
+
+        def make_metric(parent, label_text, value_text):
+            metric = QFrame(parent)
+            metric.setStyleSheet("""
+                QFrame {
+                    background-color: transparent;
+                    border: none;
+                    border-left: 3px solid #0f766e;
+                    border-radius: 0px;
+                }
+            """)
+            metric_layout = QVBoxLayout(metric)
+            metric_layout.setContentsMargins(14, 4, 12, 4)
+            label = QLabel(label_text, metric)
+            plain_label(label, "font-size: 11px; color: #64748b; font-weight: 900")
+            value = QLabel(value_text, metric)
+            value.setWordWrap(True)
+            plain_label(value, "font-size: 15px; color: #0f172a; font-weight: 900")
+            metric_layout.addWidget(label)
+            metric_layout.addWidget(value)
+            return metric
+
+        def field_with_label(parent, label_text, widget):
+            box = QVBoxLayout()
+            label = QLabel(label_text, parent)
+            plain_label(label, "font-size: 12px; font-weight: 800; color: #334155")
+            box.addWidget(label)
+            box.addWidget(widget)
+            return box
+
+        account_tab, account_layout = make_tab()
+        account_card, account_card_layout = make_card(
+            account_tab,
+            "Account Security",
+            "Keep your own IT Admin password current. Temporary password recovery is handled from the User Access tab."
+        )
+        account_metrics = QHBoxLayout()
+        account_metrics.addWidget(make_metric(account_card, "SIGNED IN", self.current_user.get("username", "admin")))
+        account_metrics.addWidget(make_metric(account_card, "ROLE", self.role_label()))
+        account_metrics.addWidget(make_metric(account_card, "DATA SOURCE", "Raspberry Pi Control Service" if self.server_mode else "Local fallback database"))
+        account_card_layout.addLayout(account_metrics)
+
+        password_text = QLabel(
+            "For safety, password changes are immediate. If an IT Admin loses access, recovery should be issued by another authorized IT/Admin account.",
+            account_card,
+        )
+        password_text.setWordWrap(True)
+        plain_label(password_text, "font-size: 12px; color: #334155")
+        account_card_layout.addWidget(password_text)
+        change_password_btn = QPushButton("Change My Password", account_card)
+        change_password_btn.setStyleSheet(self.primary_btn_style())
+        compact_button(change_password_btn, 210)
+        password_actions = QHBoxLayout()
+        password_actions.addWidget(change_password_btn)
+        password_actions.addStretch(1)
+        account_card_layout.addLayout(password_actions)
+        account_layout.addWidget(account_card)
+        account_layout.addStretch(1)
+        tabs.addTab(account_tab, "Account Security")
+
+        users_tab, users_layout = make_tab()
+        users_card, users_card_layout = make_card(
+            users_tab,
+            "User Access",
+            "Create users, assign roles, and deactivate accounts without deleting audit history."
+        )
+
+        users_table = QTableWidget(users_card)
         users_table.setColumnCount(5)
         users_table.setHorizontalHeaderLabels(["Username", "Role", "Active", "Must Change Password", "Created"])
         users_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         users_table.verticalHeader().setVisible(False)
         users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         users_table.setStyleSheet(self.table_style())
-        layout.addWidget(users_table)
+        users_table.setMinimumHeight(290)
+        users_card_layout.addWidget(users_table)
 
-        status_panel = QFrame(dialog)
-        status_panel.setStyleSheet("QFrame { background-color: #ffffff; border: 1px solid #d8e1ea; border-radius: 8px; }")
+        status_panel = QFrame(users_card)
+        status_panel.setStyleSheet("QFrame { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; }")
         status_layout = QHBoxLayout(status_panel)
-        status_layout.setContentsMargins(12, 12, 12, 12)
-        status_text = QLabel("Select a user to activate or deactivate access.", status_panel)
+        status_layout.setContentsMargins(14, 12, 14, 12)
+        status_text = QLabel("Select a user row, then activate or deactivate access.", status_panel)
         status_text.setWordWrap(True)
-        status_text.setStyleSheet("font-size: 12px; color: #334155;")
-        status_layout.addWidget(status_text)
+        plain_label(status_text, "font-size: 12px; color: #334155")
+        status_layout.addWidget(status_text, 1)
         activate_btn = QPushButton("Activate User", status_panel)
         activate_btn.setStyleSheet(self.secondary_btn_style())
-        deactivate_btn = QPushButton("Deactivate User", status_panel)
+        compact_button(activate_btn, 142)
+        deactivate_btn = QPushButton("Deactivate", status_panel)
         deactivate_btn.setStyleSheet(self.secondary_btn_style())
+        compact_button(deactivate_btn, 142)
         status_layout.addWidget(activate_btn)
         status_layout.addWidget(deactivate_btn)
-        layout.addWidget(status_panel)
+        users_card_layout.addWidget(status_panel)
 
         def load_users():
             auth = AuthService()
@@ -4026,10 +5860,9 @@ class DashboardWindow(QWidget):
                     item.setData(Qt.ItemDataRole.UserRole, row)
                     users_table.setItem(r, c, item)
 
-        load_users()
-
         def selected_settings_user():
-            item = users_table.item(users_table.currentRow(), 0)
+            row = users_table.currentRow()
+            item = users_table.item(row, 0) if row >= 0 else None
             return item.data(Qt.ItemDataRole.UserRole) if item else None
 
         def set_selected_user_status(active):
@@ -4060,36 +5893,45 @@ class DashboardWindow(QWidget):
                 auth.close()
             load_users()
 
-        create_panel = QFrame(dialog)
-        create_panel.setStyleSheet("QFrame { background-color: #ffffff; border: 1px solid #d8e1ea; border-radius: 8px; }")
-        create_layout = QHBoxLayout(create_panel)
-        create_layout.setContentsMargins(12, 12, 12, 12)
+        create_panel = QFrame(users_card)
+        create_panel.setStyleSheet("QFrame { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; }")
+        create_layout = QVBoxLayout(create_panel)
+        create_layout.setContentsMargins(14, 12, 14, 12)
+        create_title = QLabel("Create New User", create_panel)
+        plain_label(create_title, "font-size: 13px; color: #0f172a; font-weight: 900")
+        create_layout.addWidget(create_title)
+        create_row = QHBoxLayout()
 
         username_edit = QLineEdit(create_panel)
         username_edit.setPlaceholderText("New username")
         username_edit.setStyleSheet(self.input_style())
-        create_layout.addWidget(username_edit)
+        create_row.addWidget(username_edit)
 
         password_edit = QLineEdit(create_panel)
         password_edit.setPlaceholderText("Temporary password")
         password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         password_edit.setStyleSheet(self.input_style())
-        create_layout.addWidget(password_edit)
+        create_row.addWidget(password_edit)
 
         role_combo = QComboBox(create_panel)
         for role in ["NURSE_ADMIN", "IT_ADMIN", "NURSE", "VERIFIER"]:
             role_combo.addItem(self.role_label(role), role)
         role_combo.setStyleSheet(self.input_style())
-        create_layout.addWidget(role_combo)
+        create_row.addWidget(role_combo)
 
         create_btn = QPushButton("Create User", create_panel)
         create_btn.setStyleSheet(self.primary_btn_style())
-        create_layout.addWidget(create_btn)
-        layout.addWidget(create_panel)
+        compact_button(create_btn, 132)
+        create_row.addWidget(create_btn)
+        create_layout.addLayout(create_row)
+        users_card_layout.addWidget(create_panel)
 
         def create_user():
             if not self.is_it_admin():
                 self.show_error("Permission Required", "Only IT admins can create users.")
+                return
+            if not username_edit.text().strip() or not password_edit.text():
+                self.show_error("Missing user details", "Enter a username and temporary password.")
                 return
             auth = AuthService()
             try:
@@ -4103,26 +5945,358 @@ class DashboardWindow(QWidget):
             load_users()
 
         create_btn.clicked.connect(create_user)
-        deactivate_btn.setText("Delete / Deactivate User")
         create_panel.setVisible(self.is_it_admin())
         status_panel.setVisible(self.is_it_admin())
         activate_btn.clicked.connect(lambda: set_selected_user_status(True))
         deactivate_btn.clicked.connect(lambda: set_selected_user_status(False))
         change_password_btn.clicked.connect(lambda: self.show_change_password_dialog(force=False))
+        load_users()
+        users_layout.addWidget(users_card)
+        users_layout.addStretch(1)
+        tabs.addTab(users_tab, "User Access")
 
+        integrations_tab, integrations_layout = make_tab()
+        integration_panel, integration_layout = make_card(
+            integrations_tab,
+            "Email Delivery",
+            "Saved to the Raspberry Pi Control Service. SMTP powers battery email alerts and test notifications."
+        )
+
+        smtp_row_1 = QHBoxLayout()
+        smtp_host = QLineEdit(integration_panel)
+        smtp_host.setPlaceholderText("SMTP host")
+        smtp_host.setStyleSheet(self.input_style())
+        smtp_row_1.addWidget(smtp_host, 3)
+        smtp_port = QSpinBox(integration_panel)
+        smtp_port.setRange(1, 65535)
+        smtp_port.setValue(587)
+        smtp_port.setStyleSheet(self.input_style())
+        smtp_row_1.addWidget(smtp_port, 1)
+        smtp_security = QComboBox(integration_panel)
+        smtp_security.addItem("TLS / STARTTLS", "tls")
+        smtp_security.addItem("SSL", "ssl")
+        smtp_security.addItem("No encryption", "none")
+        smtp_security.setStyleSheet(self.input_style())
+        smtp_row_1.addWidget(smtp_security, 2)
+        integration_layout.addLayout(smtp_row_1)
+
+        smtp_row_2 = QHBoxLayout()
+        smtp_username = QLineEdit(integration_panel)
+        smtp_username.setPlaceholderText("SMTP username")
+        smtp_username.setStyleSheet(self.input_style())
+        smtp_row_2.addWidget(smtp_username, 1)
+        smtp_password = QLineEdit(integration_panel)
+        smtp_password.setPlaceholderText("SMTP password or app password")
+        smtp_password.setEchoMode(QLineEdit.EchoMode.Password)
+        smtp_password.setStyleSheet(self.input_style())
+        smtp_row_2.addWidget(smtp_password, 1)
+        clear_smtp_password = QCheckBox("Clear saved password", integration_panel)
+        clear_smtp_password.setStyleSheet(self.checkbox_style())
+        smtp_row_2.addWidget(clear_smtp_password)
+        integration_layout.addLayout(smtp_row_2)
+
+        smtp_row_3 = QHBoxLayout()
+        smtp_from_email = QLineEdit(integration_panel)
+        smtp_from_email.setPlaceholderText("Sender email")
+        smtp_from_email.setStyleSheet(self.input_style())
+        smtp_row_3.addWidget(smtp_from_email, 1)
+        smtp_from_name = QLineEdit(integration_panel)
+        smtp_from_name.setPlaceholderText("Sender name")
+        smtp_from_name.setStyleSheet(self.input_style())
+        smtp_row_3.addWidget(smtp_from_name, 1)
+        integration_layout.addLayout(smtp_row_3)
+
+        integrations_layout.addWidget(integration_panel)
+
+        battery_panel, battery_layout = make_card(
+            integrations_tab,
+            "Battery Notification Recipients",
+            "Choose whether battery alerts send email and list who receives them. Thresholds stay in IT Control Center > Devices."
+        )
+        battery_email_row = QHBoxLayout()
+        settings_battery_email_enabled = QCheckBox("Enable battery email alerts", battery_panel)
+        settings_battery_email_enabled.setStyleSheet(self.checkbox_style())
+        battery_email_row.addWidget(settings_battery_email_enabled)
+        battery_recipients = QLineEdit(battery_panel)
+        battery_recipients.setPlaceholderText("Battery alert recipients, separated by commas")
+        battery_recipients.setStyleSheet(self.input_style())
+        battery_email_row.addWidget(battery_recipients, 1)
+        battery_layout.addLayout(battery_email_row)
+        integrations_layout.addWidget(battery_panel)
+
+        drive_panel, drive_layout = make_card(
+            integrations_tab,
+            "Google Drive Backups",
+            "Backups are recovery bundles. The Pi saves the bundle locally first, then rclone can copy it to Google Drive."
+        )
+
+        drive_help = QLabel(
+            "Do not enter the Google account password. Use the account email for reference, then save an OAuth token JSON or service-account JSON path. "
+            "The app builds the rclone target from the remote name and Drive folder path.",
+            drive_panel,
+        )
+        drive_help.setWordWrap(True)
+        plain_label(drive_help, "font-size: 12px; color: #64748b; font-weight: 700")
+        drive_layout.addWidget(drive_help)
+
+        drive_row_1 = QHBoxLayout()
+        gdrive_account_email = QLineEdit(drive_panel)
+        gdrive_account_email.setPlaceholderText("Google account email, for example backups@example.com")
+        gdrive_account_email.setStyleSheet(self.input_style())
+        drive_row_1.addWidget(gdrive_account_email, 2)
+        gdrive_remote_name = QLineEdit(drive_panel)
+        gdrive_remote_name.setPlaceholderText("Remote name: whisperwooddrive")
+        gdrive_remote_name.setStyleSheet(self.input_style())
+        drive_row_1.addWidget(gdrive_remote_name, 1)
+        drive_layout.addLayout(drive_row_1)
+
+        drive_row_2 = QHBoxLayout()
+        gdrive_folder_path = QLineEdit(drive_panel)
+        gdrive_folder_path.setPlaceholderText("Drive folder path: Backups/Whisperwood")
+        gdrive_folder_path.setStyleSheet(self.input_style())
+        drive_row_2.addWidget(gdrive_folder_path, 1)
+        gdrive_target = QLineEdit(drive_panel)
+        gdrive_target.setPlaceholderText("Generated rclone target")
+        gdrive_target.setReadOnly(True)
+        gdrive_target.setStyleSheet(self.input_style())
+        drive_row_2.addWidget(gdrive_target, 1)
+        drive_layout.addLayout(drive_row_2)
+
+        drive_row_3 = QHBoxLayout()
+        gdrive_folder_link = QLineEdit(drive_panel)
+        gdrive_folder_link.setPlaceholderText("Optional note: Google Drive folder link")
+        gdrive_folder_link.setStyleSheet(self.input_style())
+        drive_row_3.addWidget(gdrive_folder_link, 1)
+        gdrive_service_account_path = QLineEdit(drive_panel)
+        gdrive_service_account_path.setPlaceholderText("Optional service-account JSON path on Pi")
+        gdrive_service_account_path.setStyleSheet(self.input_style())
+        drive_row_3.addWidget(gdrive_service_account_path, 1)
+        drive_layout.addLayout(drive_row_3)
+
+        oauth_label = QLabel("OAuth token JSON from Google approval, not the Google password", drive_panel)
+        plain_label(oauth_label, "font-size: 12px; color: #475569; font-weight: 800")
+        drive_layout.addWidget(oauth_label)
+        gdrive_oauth_token_json = QTextEdit(drive_panel)
+        gdrive_oauth_token_json.setPlaceholderText('Paste token JSON only when setting/changing the Google account, for example {"access_token":"...","refresh_token":"..."}')
+        gdrive_oauth_token_json.setFixedHeight(74)
+        gdrive_oauth_token_json.setStyleSheet(self.input_style())
+        drive_layout.addWidget(gdrive_oauth_token_json)
+
+        drive_row_4 = QHBoxLayout()
+        clear_gdrive_token = QCheckBox("Clear saved Google token", drive_panel)
+        clear_gdrive_token.setStyleSheet(self.checkbox_style())
+        drive_row_4.addWidget(clear_gdrive_token)
+        save_integrations_btn = QPushButton("Save Integrations", drive_panel)
+        save_integrations_btn.setStyleSheet(self.primary_btn_style())
+        compact_button(save_integrations_btn, 164)
+        drive_row_4.addWidget(save_integrations_btn)
+        test_drive_btn = QPushButton("Test Drive", drive_panel)
+        test_drive_btn.setStyleSheet(self.secondary_btn_style())
+        compact_button(test_drive_btn, 124)
+        drive_row_4.addWidget(test_drive_btn)
+        test_integration_email_btn = QPushButton("Test Email", drive_panel)
+        test_integration_email_btn.setStyleSheet(self.secondary_btn_style())
+        compact_button(test_integration_email_btn, 128)
+        drive_row_4.addWidget(test_integration_email_btn)
+        drive_layout.addLayout(drive_row_4)
+
+        integration_status = QLabel("Load settings from the Raspberry Pi, edit, then save.", drive_panel)
+        integration_status.setWordWrap(True)
+        plain_label(integration_status, "font-size: 12px; color: #64748b; font-weight: 700")
+        drive_layout.addWidget(integration_status)
+        integrations_layout.addWidget(drive_panel)
+        integrations_layout.addStretch(1)
+        tabs.addTab(integrations_tab, "Integrations")
+
+        def parse_settings_emails(text):
+            values = []
+            for part in (text or "").replace(";", ",").split(","):
+                email = part.strip()
+                if email and "@" in email and email.lower() not in [existing.lower() for existing in values]:
+                    values.append(email)
+            return values
+
+        def set_integration_status(message, state="info"):
+            colors = {"ok": "#047857", "error": "#b91c1c", "pending": "#b45309", "info": "#64748b"}
+            integration_status.setText(message)
+            plain_label(integration_status, f"font-size: 12px; color: {colors.get(state, '#64748b')}; font-weight: 800")
+
+        def update_drive_target_preview():
+            remote = "".join(ch for ch in (gdrive_remote_name.text() or "whisperwooddrive").strip() if ch.isalnum() or ch in {"_", "-"})
+            remote = remote or "whisperwooddrive"
+            folder = (gdrive_folder_path.text() or "Backups/Whisperwood").strip().strip("/")
+            gdrive_target.setText(f"{remote}:{folder}" if folder else f"{remote}:")
+
+        def integration_payload():
+            security = smtp_security.currentData()
+            update_drive_target_preview()
+            return {
+                "smtp_host": smtp_host.text().strip(),
+                "smtp_port": smtp_port.value(),
+                "smtp_username": smtp_username.text().strip(),
+                "smtp_password": smtp_password.text(),
+                "smtp_from_email": smtp_from_email.text().strip(),
+                "smtp_from_name": smtp_from_name.text().strip(),
+                "smtp_use_ssl": security == "ssl",
+                "smtp_use_tls": security == "tls",
+                "gdrive_backup_target": gdrive_target.text().strip(),
+                "gdrive_account_email": gdrive_account_email.text().strip(),
+                "gdrive_remote_name": gdrive_remote_name.text().strip(),
+                "gdrive_folder_path": gdrive_folder_path.text().strip(),
+                "gdrive_oauth_token_json": gdrive_oauth_token_json.toPlainText().strip(),
+                "gdrive_folder_link": gdrive_folder_link.text().strip(),
+                "gdrive_service_account_path": gdrive_service_account_path.text().strip(),
+                "clear_smtp_password": clear_smtp_password.isChecked(),
+                "clear_gdrive_token": clear_gdrive_token.isChecked(),
+            }
+
+        def load_integration_settings():
+            if not self.server_mode:
+                set_integration_status("Integration settings require the Raspberry Pi Control Service.", "error")
+                return
+            result = self.control_client(timeout=6.0).get_integration_settings()
+            if result.get("ok"):
+                data = (result.get("data") or {}).get("settings") or {}
+                smtp_host.setText(data.get("smtp_host") or "")
+                smtp_port.setValue(int(data.get("smtp_port") or 587))
+                smtp_username.setText(data.get("smtp_username") or "")
+                smtp_password.clear()
+                smtp_password.setPlaceholderText("Password already saved; leave blank to keep it" if data.get("smtp_password_configured") else "SMTP password or app password")
+                smtp_from_email.setText(data.get("smtp_from_email") or "")
+                smtp_from_name.setText(data.get("smtp_from_name") or "Enhanced Living Whisperwood")
+                security_mode = "tls"
+                if data.get("smtp_use_ssl"):
+                    security_mode = "ssl"
+                elif data.get("smtp_use_tls"):
+                    security_mode = "tls"
+                else:
+                    security_mode = "none"
+                security_index = smtp_security.findData(security_mode)
+                smtp_security.setCurrentIndex(security_index if security_index >= 0 else 0)
+                gdrive_account_email.setText(data.get("gdrive_account_email") or "")
+                gdrive_remote_name.setText(data.get("gdrive_remote_name") or "whisperwooddrive")
+                gdrive_folder_path.setText(data.get("gdrive_folder_path") or "Backups/Whisperwood")
+                update_drive_target_preview()
+                gdrive_folder_link.setText(data.get("gdrive_folder_link") or "")
+                gdrive_service_account_path.setText(data.get("gdrive_service_account_path") or "")
+                gdrive_oauth_token_json.clear()
+                gdrive_oauth_token_json.setPlaceholderText("Google token already saved; leave blank to keep it" if data.get("gdrive_oauth_token_configured") else 'Paste OAuth token JSON here when setting up Drive')
+                clear_gdrive_token.setChecked(False)
+                email_state = "SMTP ready" if data.get("email_configured") else "SMTP not ready"
+                if data.get("google_drive_ready"):
+                    drive_state = "Google Drive upload ready"
+                elif data.get("google_drive_configured"):
+                    drive_state = "Drive target saved, but Google authorization is not complete"
+                else:
+                    drive_state = "Drive target not set; backups will stay local"
+                set_integration_status(f"{email_state}. {drive_state}.", "ok" if data.get("email_configured") and data.get("google_drive_ready") else "pending")
+            else:
+                set_integration_status(result.get("error") or "Could not load integration settings.", "error")
+            battery_settings = self.load_battery_alert_settings(quiet=True, timeout=4.0)
+            settings_battery_email_enabled.setChecked(bool(battery_settings.get("email_enabled", False)))
+            battery_recipients.setText(", ".join(battery_settings.get("recipient_emails") or []))
+
+        def save_integrations(show_popup=True):
+            if not self.server_mode:
+                set_integration_status("Connect to the Raspberry Pi Control Service before saving integrations.", "error")
+                return False
+            set_integration_status("Saving integration settings...", "pending")
+            result = self.control_client(timeout=8.0).save_integration_settings(integration_payload())
+            if not result.get("ok"):
+                set_integration_status(result.get("error") or "Integration settings could not be saved.", "error")
+                return False
+            smtp_password.clear()
+            clear_smtp_password.setChecked(False)
+            data = (result.get("data") or {}).get("settings") or {}
+            smtp_password.setPlaceholderText("Password already saved; leave blank to keep it" if data.get("smtp_password_configured") else "SMTP password or app password")
+            gdrive_oauth_token_json.clear()
+            clear_gdrive_token.setChecked(False)
+            gdrive_oauth_token_json.setPlaceholderText("Google token already saved; leave blank to keep it" if data.get("gdrive_oauth_token_configured") else 'Paste OAuth token JSON here when setting up Drive')
+
+            battery_settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
+            battery_settings["email_enabled"] = settings_battery_email_enabled.isChecked()
+            battery_settings["recipient_emails"] = parse_settings_emails(battery_recipients.text())
+            saved_battery = self.control_client(timeout=5.0).save_battery_alert_settings(battery_settings)
+            if saved_battery.get("ok"):
+                payload = saved_battery.get("data") or {}
+                self.battery_alert_settings = self.normalize_battery_alert_settings(payload.get("settings") or battery_settings)
+                self.save_local_battery_alert_settings(self.battery_alert_settings)
+                self.apply_battery_alert_settings_to_ui()
+
+            email_state = "SMTP ready" if data.get("email_configured") else "SMTP saved but not complete"
+            rclone_apply = (result.get("data") or {}).get("rclone_apply") or {}
+            if data.get("google_drive_ready"):
+                drive_state = "Google Drive upload ready"
+            elif data.get("google_drive_configured"):
+                drive_state = rclone_apply.get("reason") or "Drive target saved; finish Google authorization before cloud uploads will work"
+            else:
+                drive_state = "Google Drive target not set; backups will stay local"
+            set_integration_status(f"{email_state}. {drive_state}.", "ok" if data.get("email_configured") else "pending")
+            if show_popup:
+                self.show_info("Settings Saved", "Email and backup integration settings were saved to the Raspberry Pi.")
+            return True
+
+        def test_integration_email():
+            recipients = parse_settings_emails(battery_recipients.text())
+            if not recipients:
+                self.show_error("No recipients", "Enter at least one recipient email before testing.")
+                return
+            if not save_integrations(show_popup=False):
+                return
+            set_integration_status("Sending test email...", "pending")
+            result = self.control_client(timeout=25.0).send_integration_test_email(recipients)
+            if result.get("ok"):
+                set_integration_status("Test email sent. Check the recipient inbox.", "ok")
+                self.show_info("Email Test", "Test email sent successfully.")
+            else:
+                set_integration_status(result.get("error") or "Test email failed.", "error")
+                self.show_error("Email Test Failed", result.get("error") or "Test email failed.")
+
+        def test_google_drive():
+            if not save_integrations(show_popup=False):
+                return
+            set_integration_status("Testing Google Drive upload...", "pending")
+            result = self.control_client(timeout=130.0).test_google_drive_backup()
+            if result.get("ok"):
+                data = result.get("data") or {}
+                set_integration_status(data.get("message") or "Google Drive test upload worked.", "ok")
+                self.show_info("Google Drive Test", data.get("message") or "Google Drive test upload worked.")
+            else:
+                set_integration_status(result.get("error") or "Google Drive test failed.", "error")
+                self.show_error("Google Drive Test Failed", result.get("error") or "Google Drive test failed.")
+
+        gdrive_remote_name.textChanged.connect(update_drive_target_preview)
+        gdrive_folder_path.textChanged.connect(update_drive_target_preview)
+        update_drive_target_preview()
+        save_integrations_btn.clicked.connect(lambda: save_integrations(show_popup=True))
+        test_integration_email_btn.clicked.connect(test_integration_email)
+        test_drive_btn.clicked.connect(test_google_drive)
+        load_integration_settings()
+
+        footer = QHBoxLayout()
+        footer_note = QLabel("Settings changes are audited where backend support is available.", dialog)
+        plain_label(footer_note, "font-size: 12px; color: #64748b")
+        footer.addWidget(footer_note, 1)
         close_btn = QPushButton("Close", dialog)
         close_btn.setStyleSheet(self.primary_btn_style())
+        compact_button(close_btn, 112)
         close_btn.clicked.connect(dialog.accept)
-        layout.addWidget(close_btn)
+        footer.addWidget(close_btn)
+        for label in dialog.findChildren(QLabel):
+            label.setFrameStyle(0)
+            style = label.styleSheet()
+            if "border:" not in style:
+                style += "; border: none;"
+            if "background" not in style:
+                style += "; background: transparent;"
+            label.setStyleSheet(style)
+        layout.addLayout(footer)
         dialog.exec()
 
-    def on_resident_selected(self, item):
-        resident_id = item.data(Qt.ItemDataRole.UserRole)
-        row = self.db.get_resident(resident_id)
+    def apply_resident_row_to_form(self, row):
         if not row:
             return
-
-        self.selected_resident_id = resident_id
+        self.selected_resident_id = row.get("id")
         self.txt_uid.setText(row["resident_uid"] or "")
         self.txt_name.setText(row["full_name"] or "")
         self.txt_room.setText(row.get("room") or "")
@@ -4131,20 +6305,26 @@ class DashboardWindow(QWidget):
         if alert_index < 0:
             alert_index = self.cmb_alert.findText(str(status_alert).title(), Qt.MatchFlag.MatchFixedString)
         self.cmb_alert.setCurrentIndex(alert_index if alert_index >= 0 else 0)
-        self.txt_diet.setText(row.get("diet") or "")
-        self.txt_allergies.setText(row.get("allergies") or "")
+        self.set_field_text(self.txt_diet, row.get("diet") or "")
+        self.set_field_text(self.txt_allergies, row.get("texture") or row.get("allergies") or "")
         self.txt_note.setPlainText(row.get("note") or "")
         self.txt_drinks.setText(row.get("drinks") or "")
-        self.txt_schedule.setText(row.get("schedule") or "")
+        self.set_field_text(self.txt_schedule, row.get("fluids") or row.get("schedule") or "")
         self.selected_source_document = row.get("source_document") or None
         self.source_doc_label.setText(os.path.basename(self.selected_source_document) if self.selected_source_document else "No source document attached")
         self.chk_safety_review.setChecked(bool(row.get("needs_safety_review", False)))
-        self.selected_image_path = row.get("lcd_image_path") or None
-        if self.selected_image_path and hasattr(self, "image_path_label"):
-            self.image_path_label.setText(self.selected_image_path)
+        self.set_resident_photo_path(row.get("lcd_image_path") or None)
         self.chk_active.setChecked(bool(row.get("active", True)))
 
         self.update_preview()
+
+    def on_resident_selected(self, item):
+        resident_id = item.data(Qt.ItemDataRole.UserRole)
+        row = self.db.get_resident(resident_id)
+        if not row:
+            return
+
+        self.apply_resident_row_to_form(row)
         self.load_update_targets()
         if row.get("paired_device_id"):
             idx = self.upd_target.findData(row.get("paired_device_id"))
@@ -4175,6 +6355,7 @@ class DashboardWindow(QWidget):
             self.show_error("Missing name", "Resident name is required.")
             return
 
+        busy = self.begin_button_busy(getattr(self, "btn_save_resident", None), "Saving...")
         try:
             before_snapshot = None
             if self.selected_resident_id is None:
@@ -4208,11 +6389,16 @@ class DashboardWindow(QWidget):
             self.load_approvals()
             self.load_resident_audit()
             self.refresh_dashboard_summary()
-            self.send_saved_resident_if_paired()
-            self.show_info("Saved", message)
+            queued = self.send_saved_resident_if_paired()
+            if queued:
+                self.show_info("Saved", f"{message}\n\nText update started in the background. Send the resident photo from Resident Records after the e-paper finishes.")
+            else:
+                self.show_info("Saved", message)
 
         except Exception as e:
             self.show_error("Save failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def submit_resident_review_request(self):
         if not self.is_nurse():
@@ -4232,6 +6418,7 @@ class DashboardWindow(QWidget):
             return
 
         payload = self.collect_resident_payload()
+        busy = self.begin_button_busy(getattr(self, "btn_submit_review_request", None), "Submitting...")
         try:
             self.db.create_change_request(
                 self.selected_resident_id,
@@ -4265,6 +6452,8 @@ class DashboardWindow(QWidget):
             self.show_info("Submitted", "Review request sent to the admin queue.")
         except Exception as e:
             self.show_error("Submit failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def delete_selected_resident(self):
         if not self.can_edit_residents():
@@ -4291,6 +6480,7 @@ class DashboardWindow(QWidget):
 
         resident_id = self.selected_resident_id
         resident_uid = row.get("resident_uid")
+        busy = self.begin_button_busy(getattr(self, "btn_delete_resident", None), "Deleting...")
         try:
             self.db.delete_resident(resident_id)
             self.db.log_update(
@@ -4323,39 +6513,75 @@ class DashboardWindow(QWidget):
             self.show_info("Deleted", "Resident deleted successfully.")
         except Exception as e:
             self.show_error("Delete failed", str(e))
+        finally:
+            self.end_button_busy(busy)
+
+    def find_paired_device_id_for_resident(self, row):
+        row = dict(row or {})
+        direct = row.get("paired_device_id") or row.get("device_id")
+        if direct:
+            return str(direct)
+
+        resident_id = row.get("id") or self.selected_resident_id
+        resident_uid = row.get("resident_uid")
+        resident_name = row.get("full_name")
+        for device in self.safe_get_devices():
+            device_id = device.get("device_id") or device.get("id")
+            if not device_id:
+                continue
+            paired_id = device.get("paired_resident_id") or device.get("resident_id")
+            if resident_id is not None and str(paired_id or "") == str(resident_id):
+                return str(device_id)
+            if resident_uid and str(device.get("resident_uid") or "") == str(resident_uid):
+                return str(device_id)
+            if resident_name and str(device.get("resident_name") or "") == str(resident_name):
+                return str(device_id)
+        return None
+
+    def build_gateway_payload_from_row(self, row, device_id):
+        row = dict(row or {})
+        payload = {
+            "id": device_id,
+            "name": row.get("full_name") or "",
+            "room": row.get("room") or "",
+            "note": row.get("note") or "",
+            "drinks": row.get("drinks") or "",
+        }
+        diet = row.get("diet")
+        if diet:
+            payload["diet"] = [x.strip() for x in str(diet).split(",") if x.strip()]
+        texture = row.get("texture") or row.get("allergies")
+        if texture:
+            texture_items = [x.strip() for x in str(texture).split(",") if x.strip()]
+            payload["texture"] = texture_items
+            payload["allergies"] = texture_items
+        fluids = row.get("fluids") or row.get("schedule")
+        if fluids:
+            payload["fluids"] = str(fluids)
+            payload["schedule"] = str(fluids)
+        return payload
 
     def send_saved_resident_if_paired(self):
         if not self.gateway_online:
-            return
+            return False
         row = self.db.get_resident(self.selected_resident_id)
-        device_id = row.get("paired_device_id") if row else None
+        device_id = self.find_paired_device_id_for_resident(row)
         if not device_id:
-            return
+            return False
 
-        payload = self.build_gateway_payload(device_id)
-        try:
-            result = self.gateway.send_text(self.base_url(), payload)
-            success = result["status_code"] == 200
-            message = "Saved resident sent to paired device" if success else f"Auto-send failed ({result['status_code']})"
-            response = result["body"]
-        except Exception as e:
-            success = False
-            message = f"Auto-send queued for later review: {e}"
-            response = {"error": str(e)}
-
-        self.db.log_update(
-            "auto_send_after_save",
-            self.selected_resident_id,
-            self.current_resident_uid(),
+        payload = self.build_gateway_payload_from_row(row, device_id)
+        self.queue_resident_display_sequence(
+            row,
             device_id,
-            self.current_user.get("id"),
-            self.current_user.get("username"),
             payload,
-            response,
-            success,
-            message
+            "Saved resident text sent to paired device",
+            "Auto-send",
+            image_path=None,
+            action_type="auto_send_after_save",
+            notify_on_failure=False,
+            include_image=False,
         )
-        self.load_recent_logs()
+        return True
 
     # ---------------------------- devices / pairing ----------------------------
 
@@ -4364,6 +6590,7 @@ class DashboardWindow(QWidget):
             devices = self.gateway.get_devices(self.base_url())
             self.db.upsert_devices(devices)
             self.set_gateway_state(True)
+            self.check_battery_alerts(self.safe_get_devices())
         except Exception as e:
             self.set_gateway_state(False)
             try:
@@ -4410,6 +6637,43 @@ class DashboardWindow(QWidget):
                 self.upd_target.setCurrentIndex(idx)
         self.upd_target.blockSignals(False)
 
+    def resident_for_device(self, device_id):
+        if not device_id:
+            return None
+        devices = self.safe_get_devices()
+        device = next((d for d in devices if str(d.get("device_id")) == str(device_id)), None)
+        if not device:
+            return None
+
+        resident_id = device.get("paired_resident_id") or device.get("resident_id")
+        if resident_id:
+            row = self.db.get_resident(resident_id)
+            if row:
+                return row
+
+        residents = self.db.get_residents()
+        resident_uid = device.get("resident_uid")
+        resident_name = device.get("resident_name")
+        return next(
+            (
+                row for row in residents
+                if str(row.get("paired_device_id") or "") == str(device_id)
+                or (resident_uid and str(row.get("resident_uid") or "") == str(resident_uid))
+                or (resident_name and str(row.get("full_name") or "") == str(resident_name))
+            ),
+            None,
+        )
+
+    def on_update_target_changed(self):
+        if not hasattr(self, "upd_target"):
+            return
+        row = self.resident_for_device(self.selected_device_id())
+        if row:
+            self.apply_resident_row_to_form(row)
+        else:
+            self.sync_resident_photo_labels()
+            self.update_lcd_image_preview()
+
     def load_pairing_views(self):
         resident_id = self.selected_pair_resident_id
         device_id = self.selected_pair_device_id
@@ -4428,7 +6692,7 @@ class DashboardWindow(QWidget):
                 d.get("resident_name") or "Unpaired",
                 d.get("resident_uid") or "-",
                 "Online" if d.get("is_online") else "Offline",
-                f"{d.get('battery_level')}%" if d.get("battery_level") is not None else "N/A"
+                self.battery_display_text(d, compact=True)
             ]
             for c, val in enumerate(vals):
                 self.pair_table.setItem(r, c, QTableWidgetItem(val))
@@ -4466,6 +6730,7 @@ class DashboardWindow(QWidget):
             self.show_error("Not found", "Resident record was not found.")
             return
 
+        busy = self.begin_button_busy(getattr(self, "btn_pair_selected", None), "Pairing...")
         try:
             self.selected_pair_resident_id = resident_id
             self.selected_pair_device_id = device_id
@@ -4484,47 +6749,156 @@ class DashboardWindow(QWidget):
             )
             self.push_resident_row_to_device(row, device_id, "auto_send_after_pair")
             self.refresh_devices()
-            self.show_info("Paired", f"{row['full_name']} paired to {device_id}.")
+            self.show_info("Paired", f"{row['full_name']} paired to {device_id}.\n\nText update started in the background. Send the resident photo from Resident Records after the e-paper finishes.")
         except Exception as e:
             self.show_error("Pair failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def push_resident_row_to_device(self, row, device_id, action_type):
         if not self.gateway_online:
             return
-        payload = {
-            "id": device_id,
-            "name": row.get("full_name") or "",
-            "room": row.get("room") or "",
-            "note": row.get("note") or "",
-            "drinks": row.get("drinks") or "",
-        }
-        if row.get("diet"):
-            payload["diet"] = [x.strip() for x in row.get("diet").split(",") if x.strip()]
-        if row.get("allergies"):
-            payload["allergies"] = [x.strip() for x in row.get("allergies").split(",") if x.strip()]
-        if row.get("schedule"):
-            payload["schedule"] = row.get("schedule")
-        try:
-            result = self.gateway.send_text(self.base_url(), payload)
-            success = result["status_code"] == 200
-            message = "Latest resident text pushed after pairing" if success else f"Auto-push failed ({result['status_code']})"
-            response = result["body"]
-        except Exception as e:
-            success = False
-            message = f"Auto-push queued for review: {e}"
-            response = {"error": str(e)}
-        self.db.log_update(
-            action_type,
-            row.get("id"),
-            row.get("resident_uid"),
+        payload = self.build_gateway_payload_from_row(row, device_id)
+        self.queue_resident_display_sequence(
+            row,
             device_id,
-            self.current_user.get("id"),
-            self.current_user.get("username"),
             payload,
-            response,
-            success,
-            message
+            "Latest resident text pushed after pairing",
+            "Auto-push",
+            image_path=None,
+            action_type=action_type,
+            notify_on_failure=True,
+            include_image=False,
         )
+
+    def queue_resident_display_sequence(
+        self,
+        row,
+        device_id,
+        payload,
+        success_message,
+        label,
+        image_path=None,
+        action_type="auto_send",
+        notify_on_failure=False,
+        include_image=True,
+    ):
+        task = {
+            "row": dict(row or {}),
+            "device_id": device_id,
+            "payload": dict(payload or {}),
+            "success_message": success_message,
+            "label": label,
+            "image_path": image_path,
+            "action_type": action_type,
+            "notify_on_failure": notify_on_failure,
+            "include_image": include_image,
+            "user_id": self.current_user.get("id"),
+            "username": self.current_user.get("username"),
+            "server_mode": self.server_mode,
+            "base_url": self.base_url(),
+        }
+        threading.Thread(target=self._resident_display_worker, args=(task,), daemon=True).start()
+
+    def _resident_display_worker(self, task):
+        try:
+            gateway = ServerGatewayClient() if task.get("server_mode") else GatewayClient()
+            success, message, response = self.send_resident_display_sequence(
+                task.get("row"),
+                task.get("device_id"),
+                task.get("payload"),
+                task.get("success_message"),
+                task.get("label"),
+                image_path=task.get("image_path"),
+                include_image=task.get("include_image", True),
+                gateway=gateway,
+                base_url=task.get("base_url"),
+            )
+            task.update({"success": success, "message": message, "response": response})
+        except Exception as exc:
+            task.update({
+                "success": False,
+                "message": f"{task.get('label') or 'Display update'} could not finish. {friendly_error_message(str(exc))}",
+                "response": {"error": str(exc)},
+            })
+        self.resident_display_finished.emit(task)
+
+    def on_resident_display_finished(self, task):
+        self.end_button_busy(task.get("busy_state"))
+        row = task.get("row") or {}
+        payload = task.get("payload") or {}
+        self.db.log_update(
+            task.get("action_type") or "auto_send",
+            row.get("id") or self.selected_resident_id,
+            row.get("resident_uid") or self.current_resident_uid(),
+            task.get("device_id"),
+            task.get("user_id"),
+            task.get("username"),
+            payload,
+            task.get("response"),
+            bool(task.get("success")),
+            task.get("message") or "",
+        )
+        self.load_recent_logs()
+        self.refresh_devices()
+        if task.get("notify_on_success") and task.get("success"):
+            self.show_info(task.get("success_title") or "Success", task.get("message") or "The request completed successfully.")
+        if task.get("notify_on_failure") and not task.get("success"):
+            self.show_error(task.get("failure_title") or "Display update", task.get("message") or "The resident was saved, but the display update failed.")
+
+    def send_resident_display_sequence(self, row, device_id, payload, success_message, label, image_path=None, include_image=True, gateway=None, base_url=None):
+        try:
+            gateway = gateway or self.gateway
+            target_base_url = base_url if base_url is not None else self.base_url()
+            if not include_image:
+                text_result = gateway.send_text(target_base_url, payload)
+                text_success = text_result["status_code"] == 200
+                response = {"text": text_result["body"], "image": {"ok": True, "skipped": True, "reason": "Photo send is manual"}}
+                message = success_message if text_success else self.result_error_message(text_result, f"{label} text failed.")
+                return text_success, message, response
+
+            if self.server_mode and hasattr(gateway, "send_resident_display") and row and row.get("id"):
+                result = gateway.send_resident_display(target_base_url, row.get("id"), device_id)
+                body = result.get("body") or {}
+                success = (
+                    result["status_code"] == 200
+                    and not (isinstance(body, dict) and body.get("ok") is False)
+                    and not (isinstance(body, dict) and body.get("partial") is True)
+                )
+                message = success_message if success else self.result_error_message(result, f"{label} failed.")
+                if success and isinstance(body, dict):
+                    image = body.get("image") or {}
+                    if isinstance(image, dict) and image.get("ok") is False:
+                        detail = image.get("message") or image.get("detail") or "Resident photo could not be sent."
+                        message = f"{success_message}; {friendly_error_message(str(detail))}"
+                elif isinstance(body, dict) and body.get("message"):
+                    message = friendly_error_message(str(body.get("message")))
+                return success, message, result["body"]
+
+            response = {}
+            image_success = True
+            if image_path and os.path.isfile(str(image_path)):
+                image_result = gateway.send_image(target_base_url, device_id, str(image_path))
+                response["image"] = image_result["body"]
+                image_success = image_result["status_code"] == 200
+                if not image_success:
+                    message = self.result_error_message(image_result, f"{label} photo failed. E-paper text will still be attempted.")
+                else:
+                    message = f"{success_message}; resident photo sent"
+            else:
+                response["image"] = {"ok": True, "skipped": True, "reason": "No resident photo available"}
+
+            text_result = gateway.send_text(target_base_url, payload)
+            text_success = text_result["status_code"] == 200
+            response["text"] = text_result["body"]
+            success = text_success and image_success
+            if text_success and image_success:
+                message = f"{success_message}; e-paper text sent after photo step"
+            elif not text_success:
+                message = self.result_error_message(text_result, f"{label} text failed after the photo step.")
+            return success, message, response
+        except Exception as e:
+            return False, f"{label} could not finish. {friendly_error_message(str(e))}", {"error": str(e)}
 
     def unpair_selected_from_menu(self):
         if not self.require_network_for_write("Unpairing device"):
@@ -4534,6 +6908,7 @@ class DashboardWindow(QWidget):
         if not device_id:
             self.show_error("No device", "Select a device first.")
             return
+        busy = self.begin_button_busy(getattr(self, "btn_unpair_selected", None), "Unpairing...")
         try:
             self.selected_pair_device_id = device_id
             self.db.unpair_device(device_id)
@@ -4553,6 +6928,8 @@ class DashboardWindow(QWidget):
             self.show_info("Unpaired", f"{device_id} was unpaired.")
         except Exception as e:
             self.show_error("Unpair failed", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     # ---------------------------- highlights ----------------------------
 
@@ -4563,9 +6940,11 @@ class DashboardWindow(QWidget):
         if section == "ROOM":
             return self.txt_room.text().strip()
         if section == "DIET":
-            return self.txt_diet.text().strip()
-        if section == "ALLERGIES":
-            return self.txt_allergies.text().strip()
+            return self.field_text(self.txt_diet)
+        if section in {"TEXTURE", "ALLERGIES"}:
+            return self.field_text(self.txt_allergies)
+        if section == "FLUIDS":
+            return self.field_text(self.txt_schedule)
         if section == "NOTE":
             return self.txt_note.toPlainText().strip()
         if section == "DRINKS":
@@ -4664,6 +7043,8 @@ class DashboardWindow(QWidget):
                 )
                 self.upd_lcd_image.setPixmap(big_pix)
                 self.upd_lcd_image.show()
+                if hasattr(self, "upd_lcd_empty_state"):
+                    self.upd_lcd_empty_state.hide()
 
                 small_pix = pix.scaled(
                     self.lcd_image.size(),
@@ -4672,6 +7053,8 @@ class DashboardWindow(QWidget):
                 )
                 self.lcd_image.setPixmap(small_pix)
                 self.lcd_image.show()
+                if hasattr(self, "lcd_empty_state"):
+                    self.lcd_empty_state.hide()
 
                 self.upd_lcd_name.hide()
                 self.upd_lcd_room.hide()
@@ -4686,29 +7069,34 @@ class DashboardWindow(QWidget):
 
         self.upd_lcd_image.hide()
         self.lcd_image.hide()
+        if hasattr(self, "upd_lcd_empty_state"):
+            self.upd_lcd_empty_state.show()
+        if hasattr(self, "lcd_empty_state"):
+            self.lcd_empty_state.show()
 
-        self.upd_lcd_name.show()
-        self.upd_lcd_room.show()
-        self.upd_lcd_alert.show()
-        self.upd_lcd_note.show()
+        self.upd_lcd_name.hide()
+        self.upd_lcd_room.hide()
+        self.upd_lcd_alert.hide()
+        self.upd_lcd_note.hide()
 
-        self.lcd_name.show()
-        self.lcd_room.show()
-        self.lcd_alert_banner.show()
-        self.lcd_note.show()
+        self.lcd_name.hide()
+        self.lcd_room.hide()
+        self.lcd_alert_banner.hide()
+        self.lcd_note.hide()
 
     def update_preview(self):
         name = self.txt_name.text().strip() or "Resident Name"
         room = self.txt_room.text().strip() or "---"
-        diet = self.txt_diet.text().strip() or "---"
-        allergies = self.txt_allergies.text().strip() or "---"
+        diet = self.field_text(self.txt_diet) or "---"
+        texture = self.field_text(self.txt_allergies) or "---"
+        fluids = self.field_text(self.txt_schedule) or "---"
         note = self.txt_note.toPlainText().strip() or "---"
-        alert = self.cmb_alert.currentText().upper()
 
         self.ep_name.setText(name)
         self.ep_room.setText(f"Room {room}")
         self.ep_diet.setText(f"Diet: {diet}")
-        self.ep_allergies.setText(f"Allergies: {allergies}")
+        self.ep_allergies.setText(f"Texture: {texture}")
+        self.ep_fluids.setText(f"Fluids: {fluids}")
         self.ep_note.setText(f"Note: {note[:80]}")
 
         self.lcd_name.setText(name)
@@ -4718,28 +7106,13 @@ class DashboardWindow(QWidget):
         self.upd_ep_name.setText(name)
         self.upd_ep_room.setText(f"Room {room}")
         self.upd_ep_diet.setText(f"Diet: {diet}")
-        self.upd_ep_allergies.setText(f"Allergies: {allergies}")
+        self.upd_ep_allergies.setText(f"Texture: {texture}")
+        self.upd_ep_fluids.setText(f"Fluids: {fluids}")
         self.upd_ep_note.setText(f"Note: {note[:120]}")
 
         self.upd_lcd_name.setText(name)
         self.upd_lcd_room.setText(f"Room {room}")
         self.upd_lcd_note.setText(note[:120])
-
-        color = "#146c2e"
-        if alert in ("NEEDS ATTENTION", "FALL RISK"):
-            color = "#b45309"
-        if alert == "EMERGENCY":
-            color = "#b91c1c"
-
-        self.lcd_alert_banner.setText(alert)
-        self.lcd_alert_banner.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 16px; font-weight: 700; }}"
-        )
-
-        self.upd_lcd_alert.setText(alert)
-        self.upd_lcd_alert.setStyleSheet(
-            f"QLabel {{ background-color: {color}; color: white; border-radius: 8px; font-size: 18px; font-weight: 700; }}"
-        )
 
         self.update_lcd_image_preview()
 
@@ -4752,7 +7125,8 @@ class DashboardWindow(QWidget):
         room = self.txt_room.text().strip()
         note = self.txt_note.toPlainText().strip()
         drinks = self.txt_drinks.text().strip()
-        schedule = self.txt_schedule.text().strip()
+        schedule = self.field_text(self.txt_schedule)
+        texture = self.field_text(self.txt_allergies)
 
         if name:
             payload["name"] = name
@@ -4763,16 +7137,18 @@ class DashboardWindow(QWidget):
         if drinks:
             payload["drinks"] = drinks
         if schedule:
+            payload["fluids"] = schedule
             payload["schedule"] = schedule
 
-        diet = self.txt_diet.text().strip()
-        allergies = self.txt_allergies.text().strip()
+        diet = self.field_text(self.txt_diet)
 
         if diet:
             payload["diet"] = [x.strip() for x in diet.split(",") if x.strip()]
 
-        if allergies:
-            payload["allergies"] = [x.strip() for x in allergies.split(",") if x.strip()]
+        if texture:
+            texture_items = [x.strip() for x in texture.split(",") if x.strip()]
+            payload["texture"] = texture_items
+            payload["allergies"] = texture_items
 
         if self.rules:
             payload["highlights"] = [r.to_json() for r in self.rules]
@@ -4793,10 +7169,11 @@ class DashboardWindow(QWidget):
 
         payload = self.build_gateway_payload(device_id)
 
+        busy = self.begin_button_busy(getattr(self, "btn_send_text", None), "Sending...")
         try:
             result = self.gateway.send_text(self.base_url(), payload)
             success = result["status_code"] == 200
-            message = "Text update sent successfully" if success else f"Text update failed ({result['status_code']})"
+            message = "Text update sent successfully" if success else self.result_error_message(result, "Text update failed.")
 
             self.db.log_update(
                 "send_text",
@@ -4817,7 +7194,7 @@ class DashboardWindow(QWidget):
             if success:
                 self.show_info("Success", message)
             else:
-                self.show_error("Send failed", f"{message}\n\n{result['body']}")
+                self.show_error("Send failed", message)
 
         except Exception as e:
             self.db.log_update(
@@ -4834,6 +7211,8 @@ class DashboardWindow(QWidget):
             )
             self.load_recent_logs()
             self.show_error("Network Error", str(e))
+        finally:
+            self.end_button_busy(busy)
 
     def send_lcd_command(self, command, device_id=None):
         if not self.require_network_for_write("Sending LCD command"):
@@ -4842,21 +7221,31 @@ class DashboardWindow(QWidget):
         if not device_id:
             self.show_error("No device", "Please select a paired device first.")
             return
+        is_global_target = str(device_id).lower() == "all"
+        target_label = "all LCD devices" if is_global_target else str(device_id)
         payload = {"device_id": device_id, "command": command}
+        button = self.btn_lcd_on if command == "on" else self.btn_lcd_off
+        busy = self.begin_button_busy(button, f"LCD {command.upper()}...")
         try:
             result = self.gateway.send_lcd_command(self.base_url(), device_id, command)
-            success = result["status_code"] == 200
             response = result["body"]
-            message = f"LCD {command.upper()} command sent" if success else f"LCD command failed ({result['status_code']})"
+            success = result["status_code"] == 200 and not (isinstance(response, dict) and response.get("ok") is False)
+            message = (
+                f"LCD {command.upper()} command sent to {target_label}."
+                if success
+                else self.result_error_message(result, "LCD command failed.")
+            )
         except Exception as e:
             success = False
             response = {"error": str(e)}
-            message = f"LCD command queued for review: {e}"
+            message = f"LCD command could not be completed. {friendly_error_message(str(e))}"
+        finally:
+            self.end_button_busy(busy)
         self.db.log_update(
             "lcd_command",
             self.selected_resident_id,
             self.current_resident_uid(),
-            device_id,
+            "ALL" if is_global_target else device_id,
             self.current_user.get("id"),
             self.current_user.get("username"),
             payload,
@@ -4879,40 +7268,47 @@ class DashboardWindow(QWidget):
             return
 
         self.global_schedule_enabled = self.chk_schedule_enabled.isChecked()
-        self.global_schedule_on = self.schedule_on_time()
-        self.global_schedule_off = self.schedule_off_time()
+        self.global_schedule_saved = True
         self.global_schedule_sleep_if_no_image = self.chk_sleep_no_image.isChecked()
+        entries = self.normalize_schedule_entries_for_save()
+        self.global_schedule_entries = entries
+        self.global_schedule_on = entries[0]["lcd_on_time"]
+        self.global_schedule_off = entries[0]["lcd_off_time"]
 
-        responses = []
-        failed_devices = []
-        for d in devices:
-            device_id = d.get("device_id")
-            payload = {
-                "resident_uid": "GLOBAL",
-                "resident_id": None,
-                "device_id": device_id,
-                "enabled": self.global_schedule_enabled,
-                "lcd_on_time": self.global_schedule_on,
-                "lcd_off_time": self.global_schedule_off,
-                "sleep_if_no_image": self.global_schedule_sleep_if_no_image,
-                "has_image": False,
-            }
-            try:
-                result = self.gateway.save_schedule(self.base_url(), payload)
-                ok = result["status_code"] == 200
-                responses.append({"device_id": device_id, "status_code": result["status_code"], "body": result["body"]})
-                if not ok:
-                    failed_devices.append(device_id)
-            except Exception as e:
-                failed_devices.append(device_id)
-                responses.append({"device_id": device_id, "error": str(e)})
-
-        success_count = len(devices) - len(failed_devices)
-        success = len(failed_devices) == 0
-        if success:
-            message = f"Global LCD schedule saved for {success_count} device(s)."
-        else:
-            message = f"Schedule applied to {success_count}/{len(devices)} device(s). Failed: {', '.join(failed_devices)}"
+        payload = {
+            "resident_uid": "GLOBAL",
+            "resident_id": None,
+            "device_id": "all",
+            "enabled": self.global_schedule_enabled,
+            "lcd_on_time": self.global_schedule_on,
+            "lcd_off_time": self.global_schedule_off,
+            "sleep_if_no_image": self.global_schedule_sleep_if_no_image,
+            "schedules": entries,
+            "has_image": False,
+            "device_ids": [d.get("device_id") for d in devices],
+        }
+        busy = self.begin_button_busy(getattr(self, "btn_save_schedule", None), "Saving...")
+        try:
+            result = self.gateway.save_schedule(self.base_url(), payload)
+            body = result["body"]
+            success = result["status_code"] == 200 and not (isinstance(body, dict) and body.get("ok") is False)
+            responses = [{"device_id": "all", "status_code": result["status_code"], "body": result["body"]}]
+            if success:
+                message = f"{len(entries)} LCD schedule time(s) saved for {len(devices)} device(s)."
+                if isinstance(body, dict):
+                    if body.get("server_time"):
+                        message += f"\nPi local time: {body.get('server_time')}"
+                    due_result = body.get("due_result") or {}
+                    if isinstance(due_result, dict) and due_result.get("fired"):
+                        message += f"\nImmediate LCD {str(due_result.get('command') or '').upper()} command fired."
+            else:
+                message = self.result_error_message(result, "Global LCD schedule failed.")
+        except Exception as e:
+            success = False
+            responses = [{"device_id": "all", "error": str(e)}]
+            message = f"Global LCD schedule could not be saved. {friendly_error_message(str(e))}"
+        finally:
+            self.end_button_busy(busy)
 
         self.db.log_update(
             "save_schedule",
@@ -4924,8 +7320,7 @@ class DashboardWindow(QWidget):
             {
                 "scope": "all_lcd_devices",
                 "enabled": self.global_schedule_enabled,
-                "lcd_on_time": self.global_schedule_on,
-                "lcd_off_time": self.global_schedule_off,
+                "schedules": entries,
                 "sleep_if_no_image": self.global_schedule_sleep_if_no_image,
                 "device_ids": [d.get("device_id") for d in devices],
             },
@@ -4941,35 +7336,127 @@ class DashboardWindow(QWidget):
         else:
             self.show_error("Schedule", message)
 
+    def delete_lcd_schedule(self):
+        if not self.require_network_for_write("Deleting LCD schedule"):
+            return
+
+        delete_all_confirmed = False
+        selected_rows = []
+        if hasattr(self, "schedule_table") and self.schedule_table.selectionModel():
+            selected_rows = sorted({index.row() for index in self.schedule_table.selectionModel().selectedRows()})
+        selected_rows = [row for row in selected_rows if 0 <= row < len(self.global_schedule_entries)]
+
+        if selected_rows:
+            answer = QMessageBox.question(
+                self,
+                "Delete Schedule Time",
+                f"Delete {len(selected_rows)} selected LCD schedule time(s)?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.global_schedule_entries = [
+                entry for index, entry in enumerate(self.global_schedule_entries)
+                if index not in selected_rows
+            ]
+            if self.global_schedule_entries:
+                self.load_schedule_view(sync=False)
+                self.save_lcd_schedule()
+                return
+            delete_all_confirmed = True
+
+        if not delete_all_confirmed:
+            answer = QMessageBox.question(
+                self,
+                "Delete LCD Schedule",
+                "Delete all saved LCD schedule times from the Raspberry Pi and backend database?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        payload = {"resident_id": None, "device_id": "all"}
+        busy = self.begin_button_busy(getattr(self, "btn_delete_schedule", None), "Deleting...")
+        try:
+            result = self.gateway.delete_schedule(self.base_url(), payload)
+            body = result["body"]
+            success = result["status_code"] == 200 and not (isinstance(body, dict) and body.get("ok") is False)
+            message = (
+                "Global LCD schedule deleted."
+                if success
+                else self.result_error_message(result, "Delete schedule failed.")
+            )
+        except Exception as e:
+            success = False
+            body = {"error": str(e)}
+            message = f"Global LCD schedule could not be deleted. {friendly_error_message(str(e))}"
+        finally:
+            self.end_button_busy(busy)
+
+        if success:
+            self.global_schedule_saved = False
+            self.global_schedule_enabled = False
+            self.global_schedule_entries = []
+            self.chk_schedule_enabled.setChecked(False)
+
+        self.db.log_update(
+            "delete_schedule",
+            None,
+            "GLOBAL",
+            "ALL",
+            self.current_user.get("id"),
+            self.current_user.get("username"),
+            payload,
+            body,
+            success,
+            message,
+        )
+        self.load_schedule_view()
+        self.refresh_dashboard_summary()
+        self.load_recent_logs()
+        if success:
+            self.show_info("Schedule", message)
+        else:
+            self.show_error("Schedule", message)
+
     def choose_image(self):
+        self.attach_resident_photo()
+
+    def attach_resident_photo(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Choose image for LCD",
+            "Attach resident photo for LCD",
             "",
             "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
         )
-        if not path:
-            return
-
-        self.selected_image_path = path
-        self.image_path_label.setText(path)
-        self.update_lcd_image_preview()
+        if path:
+            self.set_resident_photo_path(path)
 
     def clear_lcd_image(self):
-        self.selected_image_path = None
-        self.image_path_label.setText("No image selected")
-        self.update_lcd_image_preview()
+        self.set_resident_photo_path(None)
 
-    def send_image(self):
+    def send_image(self, busy_button=None):
+        if isinstance(busy_button, bool):
+            busy_button = None
         if not self.require_network_for_write("Sending LCD image"):
             return
         if not self.selected_resident_id:
             self.show_error("No resident", "Select or save a resident first.")
             return
 
-        device_id = self.selected_device_id()
+        from_resident_record = busy_button is getattr(self, "btn_send_resident_photo", None)
+        row = self.db.get_resident(self.selected_resident_id) or {}
+        if from_resident_record:
+            device_id = self.find_paired_device_id_for_resident(row)
+        else:
+            device_id = self.selected_device_id() or self.find_paired_device_id_for_resident(row)
         if not device_id:
-            self.show_error("No device", "Please select a device.")
+            if from_resident_record:
+                self.show_error("No paired device", "Pair this resident to a device before sending the attached photo.")
+            else:
+                self.show_error("No device", "Please select a device or pair this resident first.")
             return
 
         if not self.selected_image_path or not os.path.isfile(self.selected_image_path):
@@ -4978,47 +7465,42 @@ class DashboardWindow(QWidget):
 
         payload = {"device_id": device_id, "image_path": self.selected_image_path}
 
+        button = busy_button or getattr(self, "btn_send_image", None)
+        busy = self.begin_button_busy(button, "Sending...")
+        task = {
+            "row": dict(row or {}),
+            "device_id": device_id,
+            "payload": payload,
+            "image_path": self.selected_image_path,
+            "action_type": "send_image",
+            "label": "LCD photo",
+            "busy_state": busy,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "success_title": "LCD Photo",
+            "failure_title": "LCD Photo",
+            "user_id": self.current_user.get("id"),
+            "username": self.current_user.get("username"),
+            "server_mode": self.server_mode,
+            "base_url": self.base_url(),
+        }
+        threading.Thread(target=self._resident_photo_worker, args=(task,), daemon=True).start()
+
+    def _resident_photo_worker(self, task):
         try:
-            result = self.gateway.send_image(self.base_url(), device_id, self.selected_image_path)
-            success = result["status_code"] == 200
-            message = "Image sent successfully" if success else f"Image send failed ({result['status_code']})"
-
-            self.db.log_update(
-                "send_image",
-                self.selected_resident_id,
-                self.current_resident_uid(),
-                device_id,
-                self.current_user.get("id"),
-                self.current_user.get("username"),
-                payload,
-                result["body"],
-                success,
-                message
-            )
-
-            self.load_recent_logs()
-            self.refresh_devices()
-
-            if success:
-                self.show_info("Success", message)
-            else:
-                self.show_error("Send failed", f"{message}\n\n{result['body']}")
-
-        except Exception as e:
-            self.db.log_update(
-                "send_image",
-                self.selected_resident_id,
-                self.current_resident_uid(),
-                device_id,
-                self.current_user.get("id"),
-                self.current_user.get("username"),
-                payload,
-                {"error": str(e)},
-                False,
-                str(e)
-            )
-            self.load_recent_logs()
-            self.show_error("Network Error", str(e))
+            gateway = ServerGatewayClient() if task.get("server_mode") else GatewayClient()
+            result = gateway.send_image(task.get("base_url"), task.get("device_id"), task.get("image_path"))
+            body = result.get("body") or {}
+            success = result.get("status_code") == 200 and not (isinstance(body, dict) and body.get("ok") is False)
+            message = "Resident photo sent to LCD successfully." if success else self.result_error_message(result, "LCD photo send failed.")
+            task.update({"success": success, "message": message, "response": body})
+        except Exception as exc:
+            task.update({
+                "success": False,
+                "message": f"LCD photo could not finish. {friendly_error_message(str(exc))}",
+                "response": {"error": str(exc)},
+            })
+        self.resident_display_finished.emit(task)
 
     # ---------------------------- logs ----------------------------
 

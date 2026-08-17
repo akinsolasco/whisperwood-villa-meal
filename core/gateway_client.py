@@ -14,11 +14,14 @@ class GatewayClient:
         r = self.session.get(f"{base_url.rstrip('/')}/devices", timeout=3)
         r.raise_for_status()
         data = r.json()
+        rows = data.get("devices") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            rows = []
 
         devices = []
-        for d in data:
+        for d in rows:
             devices.append(Device(
-                id=d.get("id", ""),
+                id=d.get("device_id") or d.get("id", ""),
                 ip=d.get("ip", ""),
                 port=int(d.get("port", 0)),
                 fw=d.get("fw"),
@@ -26,11 +29,25 @@ class GatewayClient:
                 pending_img_seq=d.get("pending_img_seq"),
                 last_seen_s=int(d.get("last_seen_s", 9999)),
                 battery_level=d.get("battery_level"),
+                online=d.get("is_online", d.get("online")),
+                battery_ok=d.get("battery_ok"),
+                battery_mv=d.get("battery_mv"),
+                battery_voltage=d.get("battery_voltage"),
+                battery_raw_percent=d.get("battery_raw_percent"),
+                battery_low=d.get("battery_low"),
+                battery_alert=d.get("battery_alert"),
+                battery_plugged=d.get("battery_plugged"),
+                battery_charging=d.get("battery_charging"),
+                battery_full=d.get("battery_full"),
+                rssi=d.get("rssi"),
+                heap=d.get("heap"),
+                last_status_at=d.get("last_status_at"),
+                epaper_busy=d.get("epaper_busy"),
             ))
         return devices
 
     def send_text(self, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = self.session.post(f"{base_url.rstrip('/')}/send", json=payload, timeout=8)
+        r = self.session.post(f"{base_url.rstrip('/')}/send", json=payload, timeout=100)
         try:
             body = r.json()
         except Exception:
@@ -47,7 +64,7 @@ class GatewayClient:
                 f"{base_url.rstrip('/')}/send_image",
                 data=data,
                 files=files,
-                timeout=30,
+                timeout=100,
             )
         try:
             body = r.json()
@@ -66,6 +83,14 @@ class GatewayClient:
 
     def save_schedule(self, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         r = self.session.post(f"{base_url.rstrip('/')}/schedule", json=payload, timeout=8)
+        try:
+            body = r.json()
+        except Exception:
+            body = {"raw": r.text}
+        return {"status_code": r.status_code, "body": body}
+
+    def delete_schedule(self, base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        r = self.session.delete(f"{base_url.rstrip('/')}/schedule", json=payload, timeout=8)
         try:
             body = r.json()
         except Exception:

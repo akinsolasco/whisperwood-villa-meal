@@ -48,43 +48,64 @@ class ServerGatewayClient:
                 pending_img_seq=row.get("pending_img_seq"),
                 last_seen_s=int(row.get("last_seen_s") or row.get("last_seen") or 9999),
                 battery_level=row.get("battery_level") or row.get("battery"),
+                online=row.get("is_online", row.get("online")),
+                battery_ok=row.get("battery_ok"),
+                battery_mv=row.get("battery_mv"),
+                battery_voltage=row.get("battery_voltage"),
+                battery_raw_percent=row.get("battery_raw_percent"),
+                battery_low=row.get("battery_low"),
+                battery_alert=row.get("battery_alert"),
+                battery_plugged=row.get("battery_plugged"),
+                battery_charging=row.get("battery_charging"),
+                battery_full=row.get("battery_full"),
+                rssi=row.get("rssi"),
+                heap=row.get("heap"),
+                last_status_at=row.get("last_status_at"),
+                epaper_busy=row.get("epaper_busy"),
             ))
         return devices
 
     def send_text(self, _base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.client(timeout=100.0).operation_send_text(payload)
         return {
-            "status_code": 501,
-            "body": {
-                "ok": False,
-                "message": "Display text push is pending Control Service backend implementation.",
-                "payload_preview": {k: v for k, v in payload.items() if k != "api_key"},
-            },
+            "status_code": result.get("status_code") or (200 if result.get("ok") else 500),
+            "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},
         }
 
     def send_image(self, _base_url: str, device_id: str, image_path: str) -> Dict[str, Any]:
+        result = self.client(timeout=100.0).operation_send_image(device_id, image_path)
         return {
-            "status_code": 501,
-            "body": {
-                "ok": False,
-                "device_id": device_id,
-                "image_path": image_path,
-                "message": "LCD image push is pending Control Service backend implementation.",
-            },
+            "status_code": result.get("status_code") or (200 if result.get("ok") else 500),
+            "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},
         }
 
     def send_lcd_command(self, _base_url: str, device_id: str, command: str) -> Dict[str, Any]:
+        result = self.client(timeout=12.0).operation_lcd_command(device_id, command)
         return {
-            "status_code": 501,
-            "body": {
-                "ok": False,
-                "device_id": device_id,
-                "command": command,
-                "message": "LCD command routing is pending Control Service backend implementation.",
-            },
+            "status_code": result.get("status_code") or (200 if result.get("ok") else 500),
+            "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},
         }
 
     def save_schedule(self, _base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        result = self.client(timeout=8.0).save_schedule(payload)
+        result = self.client(timeout=12.0).operation_schedule(payload)
+        if not result.get("ok") and result.get("status_code") in {404, 405}:
+            result = self.client(timeout=8.0).save_schedule(payload)
+        return {
+            "status_code": result.get("status_code") or (200 if result.get("ok") else 500),
+            "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},
+        }
+
+    def delete_schedule(self, _base_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.client(timeout=12.0).operation_delete_schedule(payload)
+        if not result.get("ok") and result.get("status_code") in {404, 405}:
+            result = self.client(timeout=8.0).delete_schedule(payload)
+        return {
+            "status_code": result.get("status_code") or (200 if result.get("ok") else 500),
+            "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},
+        }
+
+    def send_resident_display(self, _base_url: str, resident_id: int, device_id: str = "") -> Dict[str, Any]:
+        result = self.client(timeout=160.0).operation_resident_display(resident_id, device_id)
         return {
             "status_code": result.get("status_code") or (200 if result.get("ok") else 500),
             "body": result.get("data") if result.get("ok") else {"ok": False, "message": result.get("error")},

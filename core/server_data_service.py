@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime
+from core.time_utils import format_readable_datetime
 from typing import Any, Dict, List, Optional
 
 from core.app_settings import AppSettingsStore
@@ -83,11 +84,74 @@ class ServerDataService:
     def set_active_control_profile(self, profile_id):
         self.settings.set_active_profile(profile_id)
 
+    def _normalize_dropdown_options(self, value):
+        if isinstance(value, list):
+            grouped = {}
+            for row in value:
+                if not isinstance(row, dict):
+                    continue
+                category = row.get("category") or row.get("option_key") or row.get("key")
+                text = row.get("option_text") or row.get("value") or row.get("name")
+                category = str(category or "").strip()
+                text = str(text or "").strip()
+                if category and text:
+                    grouped.setdefault(category, []).append(text)
+            value = grouped
+        if not isinstance(value, dict):
+            return {}
+        out = {}
+        for key, values in value.items():
+            category = str(key or "").strip()
+            if not category:
+                continue
+            if isinstance(values, str):
+                values = [values]
+            seen = set()
+            options = []
+            for item in values or []:
+                text = str(item or "").strip()
+                marker = text.lower()
+                if not text or marker in seen:
+                    continue
+                seen.add(marker)
+                options.append(text)
+            if options:
+                out[category] = options
+        return out
+
+    def get_dropdown_options(self):
+        result = self.client(timeout=2.5).get_dropdown_options()
+        if not result.get("ok"):
+            return None
+        data = result.get("data")
+        if isinstance(data, dict):
+            for key in ("options", "dropdown_options", "resident_dropdown_options"):
+                options = self._normalize_dropdown_options(data.get(key))
+                if options:
+                    return options
+            return self._normalize_dropdown_options(data)
+        return {}
+
+    def save_dropdown_options(self, options):
+        payload = self._normalize_dropdown_options(options)
+        result = self.client(timeout=6.0).save_dropdown_options(payload)
+        self._require_ok(result)
+        return True
+
     def _normalize_resident(self, row: Dict[str, Any], devices: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         row = dict(row or {})
         resident_id = row.get("id") or row.get("resident_id")
         paired = next((d for d in devices or [] if str(d.get("paired_resident_id") or d.get("resident_id") or "") == str(resident_id)), {})
         status_alert = row.get("status_alert") or row.get("status") or row.get("alert") or "Stable"
+        texture = row.get("texture") or row.get("allergies") or ""
+        fluids = row.get("fluids") or row.get("schedule") or ""
+        image_path = (
+            row.get("resident_photo_path")
+            or row.get("lcd_image_path")
+            or row.get("image_path")
+            or row.get("image_url")
+            or ""
+        )
         return {
             **row,
             "id": resident_id,
@@ -96,14 +160,16 @@ class ServerDataService:
             "room": row.get("room") or "",
             "status_alert": status_alert,
             "diet": row.get("diet") or "",
-            "allergies": row.get("allergies") or "",
+            "texture": texture,
+            "allergies": texture,
             "note": row.get("note") or "",
             "drinks": row.get("drinks") or "",
-            "schedule": row.get("schedule") or "",
+            "fluids": fluids,
+            "schedule": fluids,
             "source_document": row.get("source_document") or row.get("document_path") or row.get("document_url") or "",
             "safety_review_note": row.get("safety_review_note") or "",
             "needs_safety_review": bool(row.get("needs_safety_review", False)),
-            "lcd_image_path": row.get("lcd_image_path") or row.get("image_path") or row.get("image_url") or "",
+            "lcd_image_path": image_path,
             "lcd_schedule_enabled": bool(row.get("lcd_schedule_enabled", False)),
             "lcd_on_time": row.get("lcd_on_time"),
             "lcd_off_time": row.get("lcd_off_time"),
@@ -114,16 +180,20 @@ class ServerDataService:
         }
 
     def _resident_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        texture = data.get("texture") or data.get("allergies")
+        fluids = data.get("fluids") or data.get("schedule")
         return {
             "resident_uid": data.get("resident_uid"),
             "full_name": data.get("full_name"),
             "room": data.get("room"),
             "status_alert": data.get("status_alert") or data.get("status") or "Stable",
             "diet": data.get("diet"),
-            "allergies": data.get("allergies"),
+            "texture": texture,
+            "allergies": texture,
             "note": data.get("note"),
             "drinks": data.get("drinks"),
-            "schedule": data.get("schedule"),
+            "fluids": fluids,
+            "schedule": fluids,
             "source_document": data.get("source_document"),
             "safety_review_note": data.get("safety_review_note"),
             "needs_safety_review": bool(data.get("needs_safety_review", False)),
@@ -193,6 +263,19 @@ class ServerDataService:
             "last_seen_s": row.get("last_seen_s") or row.get("last_seen") or "",
             "is_online": bool(row.get("is_online", row.get("online", False))),
             "battery_level": row.get("battery_level") or row.get("battery"),
+            "battery_ok": row.get("battery_ok"),
+            "battery_mv": row.get("battery_mv"),
+            "battery_voltage": row.get("battery_voltage"),
+            "battery_raw_percent": row.get("battery_raw_percent"),
+            "battery_low": row.get("battery_low"),
+            "battery_alert": row.get("battery_alert"),
+            "battery_plugged": row.get("battery_plugged"),
+            "battery_charging": row.get("battery_charging"),
+            "battery_full": row.get("battery_full"),
+            "rssi": row.get("rssi"),
+            "heap": row.get("heap"),
+            "last_status_at": row.get("last_status_at"),
+            "epaper_busy": row.get("epaper_busy"),
             "paired_resident_id": resident_id,
             "resident_name": row.get("resident_name") or row.get("full_name") or resident.get("full_name"),
             "resident_uid": row.get("resident_uid") or resident.get("resident_uid"),
@@ -239,7 +322,9 @@ class ServerDataService:
             resident = residents.get(str(row.get("resident_id")), {})
             out.append({
                 **row,
+                "schedule_id": row.get("id"),
                 "id": row.get("resident_id"),
+                "resident_id": row.get("resident_id"),
                 "resident_uid": resident.get("resident_uid"),
                 "full_name": resident.get("full_name"),
                 "lcd_schedule_enabled": bool(row.get("enabled")),
@@ -441,6 +526,4 @@ class ServerDataService:
 
     @staticmethod
     def format_timestamp(value):
-        if isinstance(value, datetime):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-        return str(value or "")
+        return format_readable_datetime(value)

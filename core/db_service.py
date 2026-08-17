@@ -1,12 +1,15 @@
 import json
+import mimetypes
+import os
 import sqlite3
 import uuid
 from datetime import datetime
+from core.time_utils import format_readable_datetime
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
-from config import DATABASE_MODE, LOCAL_DB_PATH
+from config import APP_DATA_DIR, DATABASE_MODE, LOCAL_DB_PATH
 from db_config import DB_CONFIG
 
 
@@ -92,14 +95,19 @@ class DatabaseService:
                 full_name VARCHAR(255) NOT NULL,
                 room VARCHAR(64),
                 diet TEXT,
+                texture TEXT,
                 allergies TEXT,
                 note TEXT,
                 drinks TEXT,
+                fluids TEXT,
                 schedule TEXT,
                 source_document TEXT,
                 safety_review_note TEXT,
                 needs_safety_review BOOLEAN NOT NULL DEFAULT FALSE,
                 lcd_image_path TEXT,
+                resident_photo_data BYTEA,
+                resident_photo_mime TEXT,
+                resident_photo_name TEXT,
                 lcd_schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                 lcd_on_time TEXT,
                 lcd_off_time TEXT,
@@ -110,11 +118,16 @@ class DatabaseService:
             );
             """)
             for column_sql in [
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS texture TEXT",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS fluids TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS schedule TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS source_document TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS safety_review_note TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS needs_safety_review BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_image_path TEXT",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS resident_photo_data BYTEA",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS resident_photo_mime TEXT",
+                "ALTER TABLE residents ADD COLUMN IF NOT EXISTS resident_photo_name TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_on_time TEXT",
                 "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_off_time TEXT",
@@ -183,7 +196,22 @@ class DatabaseService:
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             );
             """)
-            cur.execute("ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_level INTEGER")
+            for column_sql in [
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_level INTEGER",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_ok BOOLEAN",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_mv INTEGER",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_voltage REAL",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_raw_percent REAL",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_low BOOLEAN",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_alert BOOLEAN",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_plugged BOOLEAN",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_charging BOOLEAN",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS battery_full BOOLEAN",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS rssi INTEGER",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS heap INTEGER",
+                "ALTER TABLE device_registry ADD COLUMN IF NOT EXISTS last_status_at TEXT",
+            ]:
+                cur.execute(column_sql)
         else:
             cur.execute("""
             CREATE TABLE IF NOT EXISTS residents (
@@ -192,14 +220,19 @@ class DatabaseService:
                 full_name TEXT NOT NULL,
                 room TEXT,
                 diet TEXT,
+                texture TEXT,
                 allergies TEXT,
                 note TEXT,
                 drinks TEXT,
+                fluids TEXT,
                 schedule TEXT,
                 source_document TEXT,
                 safety_review_note TEXT,
                 needs_safety_review INTEGER NOT NULL DEFAULT 0,
                 lcd_image_path TEXT,
+                resident_photo_data BLOB,
+                resident_photo_mime TEXT,
+                resident_photo_name TEXT,
                 lcd_schedule_enabled INTEGER NOT NULL DEFAULT 0,
                 lcd_on_time TEXT,
                 lcd_off_time TEXT,
@@ -227,8 +260,24 @@ class DatabaseService:
             );
             """)
             device_columns = {row["name"] for row in cur.execute("PRAGMA table_info(device_registry)").fetchall()}
-            if "battery_level" not in device_columns:
-                cur.execute("ALTER TABLE device_registry ADD COLUMN battery_level INTEGER")
+            extra_device_columns = {
+                "battery_level": "INTEGER",
+                "battery_ok": "INTEGER",
+                "battery_mv": "INTEGER",
+                "battery_voltage": "REAL",
+                "battery_raw_percent": "REAL",
+                "battery_low": "INTEGER",
+                "battery_alert": "INTEGER",
+                "battery_plugged": "INTEGER",
+                "battery_charging": "INTEGER",
+                "battery_full": "INTEGER",
+                "rssi": "INTEGER",
+                "heap": "INTEGER",
+                "last_status_at": "TEXT",
+            }
+            for name, col_type in extra_device_columns.items():
+                if name not in device_columns:
+                    cur.execute(f"ALTER TABLE device_registry ADD COLUMN {name} {col_type}")
             cur.execute("""
             CREATE TABLE IF NOT EXISTS display_updates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -276,9 +325,39 @@ class DatabaseService:
             );
             """)
 
+        self._migrate_resident_alias_columns(cur)
+        self._ensure_dropdown_options_table(cur)
         self._ensure_it_control_tables(cur)
         self.conn.commit()
         cur.close()
+
+    def _ensure_dropdown_options_table(self, cur):
+        if self.backend == "postgres":
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_dropdown_options (
+                id SERIAL PRIMARY KEY,
+                category VARCHAR(64) NOT NULL,
+                option_text TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                UNIQUE(category, option_text)
+            );
+            """)
+        else:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS resident_dropdown_options (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                option_text TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(category, option_text)
+            );
+            """)
 
     def _ensure_it_control_tables(self, cur):
         if self.backend == "postgres":
@@ -312,7 +391,7 @@ class DatabaseService:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (%s, %s, %s, %s, %s, TRUE)
-                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection.",))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection.",))
         else:
             cur.execute("""
             CREATE TABLE IF NOT EXISTS control_service_profiles (
@@ -344,16 +423,21 @@ class DatabaseService:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (?, ?, ?, ?, ?, 1)
-                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
 
     def _add_resident_columns(self, cur):
         existing = {row["name"] for row in cur.execute("PRAGMA table_info(residents)").fetchall()}
         columns = {
+            "texture": "TEXT",
+            "fluids": "TEXT",
             "schedule": "TEXT",
             "source_document": "TEXT",
             "safety_review_note": "TEXT",
             "needs_safety_review": "INTEGER NOT NULL DEFAULT 0",
             "lcd_image_path": "TEXT",
+            "resident_photo_data": "BLOB",
+            "resident_photo_mime": "TEXT",
+            "resident_photo_name": "TEXT",
             "lcd_schedule_enabled": "INTEGER NOT NULL DEFAULT 0",
             "lcd_on_time": "TEXT",
             "lcd_off_time": "TEXT",
@@ -363,21 +447,105 @@ class DatabaseService:
             if name not in existing:
                 cur.execute(f"ALTER TABLE residents ADD COLUMN {name} {definition}")
 
+    def _migrate_resident_alias_columns(self, cur):
+        if self.backend == "postgres":
+            statements = [
+                "UPDATE residents SET texture = allergies WHERE (texture IS NULL OR texture = '') AND allergies IS NOT NULL AND allergies <> ''",
+                "UPDATE residents SET fluids = schedule WHERE (fluids IS NULL OR fluids = '') AND schedule IS NOT NULL AND schedule <> ''",
+                "UPDATE residents SET allergies = texture WHERE (allergies IS NULL OR allergies = '') AND texture IS NOT NULL AND texture <> ''",
+                "UPDATE residents SET schedule = fluids WHERE (schedule IS NULL OR schedule = '') AND fluids IS NOT NULL AND fluids <> ''",
+            ]
+        else:
+            statements = [
+                "UPDATE residents SET texture = allergies WHERE (texture IS NULL OR texture = '') AND allergies IS NOT NULL AND allergies <> ''",
+                "UPDATE residents SET fluids = schedule WHERE (fluids IS NULL OR fluids = '') AND schedule IS NOT NULL AND schedule <> ''",
+                "UPDATE residents SET allergies = texture WHERE (allergies IS NULL OR allergies = '') AND texture IS NOT NULL AND texture <> ''",
+                "UPDATE residents SET schedule = fluids WHERE (schedule IS NULL OR schedule = '') AND fluids IS NOT NULL AND fluids <> ''",
+            ]
+        for statement in statements:
+            cur.execute(statement)
+
+    def _resident_texture(self, data):
+        return data.get("texture") or data.get("allergies")
+
+    def _resident_fluids(self, data):
+        return data.get("fluids") or data.get("schedule")
+
+    def _resident_photo_values(self, data):
+        photo_data = data.get("resident_photo_data")
+        photo_mime = data.get("resident_photo_mime")
+        photo_name = data.get("resident_photo_name")
+        image_path = data.get("lcd_image_path") or data.get("resident_photo_path")
+
+        if photo_data is None and image_path and os.path.isfile(str(image_path)):
+            with open(image_path, "rb") as fh:
+                photo_data = fh.read()
+            photo_name = photo_name or os.path.basename(str(image_path))
+            photo_mime = photo_mime or mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
+
+        return photo_data, photo_mime, photo_name
+
+    def _normalize_resident_fields(self, row):
+        if not row:
+            return row
+        row = dict(row)
+        texture = row.get("texture") or row.get("allergies") or ""
+        fluids = row.get("fluids") or row.get("schedule") or ""
+        row["texture"] = texture
+        row["allergies"] = texture
+        row["fluids"] = fluids
+        row["schedule"] = fluids
+        return self._materialize_resident_photo(row)
+
+    def _materialize_resident_photo(self, row):
+        photo_data = row.get("resident_photo_data")
+        if not photo_data:
+            return row
+
+        current_path = row.get("lcd_image_path") or ""
+        if current_path and os.path.isfile(str(current_path)):
+            return row
+
+        photo_name = row.get("resident_photo_name") or ""
+        photo_mime = row.get("resident_photo_mime") or ""
+        suffix = os.path.splitext(photo_name)[1] or mimetypes.guess_extension(photo_mime) or ".jpg"
+        base = str(row.get("resident_uid") or row.get("id") or "resident_photo")
+        safe_base = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in base)
+        photo_dir = APP_DATA_DIR / "resident_photos"
+        photo_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = photo_dir / f"{safe_base}{suffix}"
+
+        try:
+            with open(cache_path, "wb") as fh:
+                fh.write(bytes(photo_data))
+            row["lcd_image_path"] = str(cache_path)
+        except Exception:
+            pass
+        return row
+
     def create_resident(self, data):
         cur = self._cursor()
+        texture = self._resident_texture(data)
+        fluids = self._resident_fluids(data)
+        photo_data, photo_mime, photo_name = self._resident_photo_values(data)
         values = (
             data["resident_uid"],
             data["full_name"],
             data.get("room"),
             data.get("diet"),
-            data.get("allergies"),
+            texture,
+            data.get("allergies") or texture,
             data.get("note"),
             data.get("drinks"),
-            data.get("schedule"),
+            fluids,
+            data.get("schedule") or fluids,
             data.get("source_document"),
             data.get("safety_review_note"),
             data.get("needs_safety_review", False),
             data.get("lcd_image_path"),
+            photo_data,
+            photo_mime,
+            photo_name,
             data.get("lcd_schedule_enabled", False),
             data.get("lcd_on_time"),
             data.get("lcd_off_time"),
@@ -387,22 +555,24 @@ class DatabaseService:
         if self.backend == "postgres":
             cur.execute("""
                 INSERT INTO residents (
-                    resident_uid, full_name, room, diet, allergies, note, drinks,
-                    schedule, source_document, safety_review_note, needs_safety_review,
-                    lcd_image_path, lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
+                    resident_uid, full_name, room, diet, texture, allergies, note, drinks,
+                    fluids, schedule, source_document, safety_review_note, needs_safety_review,
+                    lcd_image_path, resident_photo_data, resident_photo_mime, resident_photo_name,
+                    lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, values)
             resident_id = cur.fetchone()[0]
         else:
             cur.execute("""
                 INSERT INTO residents (
-                    resident_uid, full_name, room, diet, allergies, note, drinks,
-                    schedule, source_document, safety_review_note, needs_safety_review,
-                    lcd_image_path, lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
+                    resident_uid, full_name, room, diet, texture, allergies, note, drinks,
+                    fluids, schedule, source_document, safety_review_note, needs_safety_review,
+                    lcd_image_path, resident_photo_data, resident_photo_mime, resident_photo_name,
+                    lcd_schedule_enabled, lcd_on_time, lcd_off_time, sleep_if_no_image, active
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, values)
             resident_id = cur.lastrowid
         self.conn.commit()
@@ -411,18 +581,26 @@ class DatabaseService:
 
     def update_resident(self, resident_id, data):
         cur = self._cursor()
+        texture = self._resident_texture(data)
+        fluids = self._resident_fluids(data)
+        photo_data, photo_mime, photo_name = self._resident_photo_values(data)
         values = (
             data["full_name"],
             data.get("room"),
             data.get("diet"),
-            data.get("allergies"),
+            texture,
+            data.get("allergies") or texture,
             data.get("note"),
             data.get("drinks"),
-            data.get("schedule"),
+            fluids,
+            data.get("schedule") or fluids,
             data.get("source_document"),
             data.get("safety_review_note"),
             data.get("needs_safety_review", False),
             data.get("lcd_image_path"),
+            photo_data,
+            photo_mime,
+            photo_name,
             data.get("lcd_schedule_enabled", False),
             data.get("lcd_on_time"),
             data.get("lcd_off_time"),
@@ -436,14 +614,19 @@ class DatabaseService:
                 SET full_name=%s,
                     room=%s,
                     diet=%s,
+                    texture=%s,
                     allergies=%s,
                     note=%s,
                     drinks=%s,
+                    fluids=%s,
                     schedule=%s,
                     source_document=%s,
                     safety_review_note=%s,
                     needs_safety_review=%s,
                     lcd_image_path=%s,
+                    resident_photo_data=%s,
+                    resident_photo_mime=%s,
+                    resident_photo_name=%s,
                     lcd_schedule_enabled=%s,
                     lcd_on_time=%s,
                     lcd_off_time=%s,
@@ -458,14 +641,19 @@ class DatabaseService:
                 SET full_name=?,
                     room=?,
                     diet=?,
+                    texture=?,
                     allergies=?,
                     note=?,
                     drinks=?,
+                    fluids=?,
                     schedule=?,
                     source_document=?,
                     safety_review_note=?,
                     needs_safety_review=?,
                     lcd_image_path=?,
+                    resident_photo_data=?,
+                    resident_photo_mime=?,
+                    resident_photo_name=?,
                     lcd_schedule_enabled=?,
                     lcd_on_time=?,
                     lcd_off_time=?,
@@ -489,7 +677,7 @@ class DatabaseService:
         """)
         rows = self._rows(cur.fetchall())
         cur.close()
-        return rows
+        return [self._normalize_resident_fields(row) for row in rows]
 
     def get_resident(self, resident_id):
         cur = self._cursor(dict_rows=True)
@@ -504,7 +692,7 @@ class DatabaseService:
         """, (resident_id,))
         row = self._row(cur.fetchone())
         cur.close()
-        return row
+        return self._normalize_resident_fields(row)
 
     def upsert_devices(self, devices):
         cur = self._cursor()
@@ -518,9 +706,12 @@ class DatabaseService:
             if self.backend == "postgres":
                 cur.execute("""
                     INSERT INTO device_registry (
-                        device_id, ip, port, fw, last_seen_s, is_online, battery_level, last_sync_at, updated_at
+                        device_id, ip, port, fw, last_seen_s, is_online, battery_level,
+                        battery_ok, battery_mv, battery_voltage, battery_raw_percent, battery_low, battery_alert,
+                        battery_plugged, battery_charging, battery_full, rssi, heap, last_status_at,
+                        last_sync_at, updated_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                     ON CONFLICT (device_id)
                     DO UPDATE SET
                         ip = EXCLUDED.ip,
@@ -529,15 +720,34 @@ class DatabaseService:
                         last_seen_s = EXCLUDED.last_seen_s,
                         is_online = EXCLUDED.is_online,
                         battery_level = EXCLUDED.battery_level,
+                        battery_ok = EXCLUDED.battery_ok,
+                        battery_mv = EXCLUDED.battery_mv,
+                        battery_voltage = EXCLUDED.battery_voltage,
+                        battery_raw_percent = EXCLUDED.battery_raw_percent,
+                        battery_low = EXCLUDED.battery_low,
+                        battery_alert = EXCLUDED.battery_alert,
+                        battery_plugged = EXCLUDED.battery_plugged,
+                        battery_charging = EXCLUDED.battery_charging,
+                        battery_full = EXCLUDED.battery_full,
+                        rssi = EXCLUDED.rssi,
+                        heap = EXCLUDED.heap,
+                        last_status_at = EXCLUDED.last_status_at,
                         last_sync_at = NOW(),
                         updated_at = NOW()
-                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, bool(d.is_online), d.battery_level))
+                """, (
+                    d.id, d.ip, d.port, d.fw, d.last_seen_s, bool(d.is_online), d.battery_level,
+                    d.battery_ok, d.battery_mv, d.battery_voltage, d.battery_raw_percent, d.battery_low, d.battery_alert,
+                    d.battery_plugged, d.battery_charging, d.battery_full, d.rssi, d.heap, d.last_status_at,
+                ))
             else:
                 cur.execute("""
                     INSERT INTO device_registry (
-                        device_id, ip, port, fw, last_seen_s, is_online, battery_level, last_sync_at, updated_at
+                        device_id, ip, port, fw, last_seen_s, is_online, battery_level,
+                        battery_ok, battery_mv, battery_voltage, battery_raw_percent, battery_low, battery_alert,
+                        battery_plugged, battery_charging, battery_full, rssi, heap, last_status_at,
+                        last_sync_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT(device_id)
                     DO UPDATE SET
                         ip = excluded.ip,
@@ -546,9 +756,31 @@ class DatabaseService:
                         last_seen_s = excluded.last_seen_s,
                         is_online = excluded.is_online,
                         battery_level = excluded.battery_level,
+                        battery_ok = excluded.battery_ok,
+                        battery_mv = excluded.battery_mv,
+                        battery_voltage = excluded.battery_voltage,
+                        battery_raw_percent = excluded.battery_raw_percent,
+                        battery_low = excluded.battery_low,
+                        battery_alert = excluded.battery_alert,
+                        battery_plugged = excluded.battery_plugged,
+                        battery_charging = excluded.battery_charging,
+                        battery_full = excluded.battery_full,
+                        rssi = excluded.rssi,
+                        heap = excluded.heap,
+                        last_status_at = excluded.last_status_at,
                         last_sync_at = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
-                """, (d.id, d.ip, d.port, d.fw, d.last_seen_s, int(bool(d.is_online)), d.battery_level))
+                """, (
+                    d.id, d.ip, d.port, d.fw, d.last_seen_s, int(bool(d.is_online)), d.battery_level,
+                    int(bool(d.battery_ok)) if d.battery_ok is not None else None,
+                    d.battery_mv, d.battery_voltage, d.battery_raw_percent,
+                    int(bool(d.battery_low)) if d.battery_low is not None else None,
+                    int(bool(d.battery_alert)) if d.battery_alert is not None else None,
+                    int(bool(d.battery_plugged)) if d.battery_plugged is not None else None,
+                    int(bool(d.battery_charging)) if d.battery_charging is not None else None,
+                    int(bool(d.battery_full)) if d.battery_full is not None else None,
+                    d.rssi, d.heap, d.last_status_at,
+                ))
         self.conn.commit()
         cur.close()
 
@@ -825,6 +1057,9 @@ class DatabaseService:
                    r.lcd_off_time,
                    r.sleep_if_no_image,
                    r.lcd_image_path,
+                   r.resident_photo_data,
+                   r.resident_photo_mime,
+                   r.resident_photo_name,
                    d.device_id,
                    d.is_online
             FROM residents r
@@ -833,7 +1068,7 @@ class DatabaseService:
         """)
         rows = self._rows(cur.fetchall())
         cur.close()
-        return rows
+        return [self._normalize_resident_fields(row) for row in rows]
 
     def get_dashboard_summary(self):
         cur = self._cursor(dict_rows=True)
@@ -906,12 +1141,12 @@ class DatabaseService:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (%s, %s, %s, %s, %s, TRUE)
-                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
             else:
                 cur.execute("""
                     INSERT INTO control_service_profiles (profile_name, host, port, api_key, description, is_active)
                     VALUES (?, ?, ?, ?, ?, 1)
-                """, ("Demo Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
+                """, ("Raspberry Pi", "", 7000, "", "Configure the Raspberry Pi Control Service connection."))
             self.conn.commit()
             cur.close()
             rows = self.list_control_profiles()
@@ -983,6 +1218,71 @@ class DatabaseService:
         self.conn.commit()
         cur.close()
 
+    def get_dropdown_options(self):
+        cur = self._cursor(dict_rows=True)
+        active_filter = "active = TRUE" if self.backend == "postgres" else "active = 1"
+        cur.execute(f"""
+            SELECT category, option_text, sort_order
+            FROM resident_dropdown_options
+            WHERE {active_filter}
+            ORDER BY category ASC, sort_order ASC, option_text ASC
+        """)
+        rows = self._rows(cur.fetchall())
+        cur.close()
+        options = {}
+        for row in rows:
+            category = str(row.get("category") or "").strip()
+            text = str(row.get("option_text") or "").strip()
+            if not category or not text:
+                continue
+            options.setdefault(category, []).append(text)
+        return options
+
+    def save_dropdown_options(self, options):
+        options = options or {}
+        cur = self._cursor()
+        marker = "%s" if self.backend == "postgres" else "?"
+        timestamp = "NOW()" if self.backend == "postgres" else "CURRENT_TIMESTAMP"
+        for category, values in options.items():
+            category = str(category or "").strip()
+            if not category:
+                continue
+            cur.execute(
+                f"UPDATE resident_dropdown_options SET active = {marker}, updated_at = {timestamp} WHERE category = {marker}",
+                (False if self.backend == "postgres" else 0, category),
+            )
+            seen = set()
+            order_index = 0
+            for value in values or []:
+                text = str(value or "").strip()
+                key = text.lower()
+                if not text or key in seen:
+                    continue
+                seen.add(key)
+                if self.backend == "postgres":
+                    cur.execute("""
+                        INSERT INTO resident_dropdown_options (category, option_text, sort_order, active, updated_at)
+                        VALUES (%s, %s, %s, TRUE, NOW())
+                        ON CONFLICT (category, option_text)
+                        DO UPDATE SET
+                            sort_order = EXCLUDED.sort_order,
+                            active = TRUE,
+                            updated_at = NOW()
+                    """, (category, text, order_index))
+                else:
+                    cur.execute("""
+                        INSERT INTO resident_dropdown_options (category, option_text, sort_order, active, updated_at)
+                        VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+                        ON CONFLICT(category, option_text)
+                        DO UPDATE SET
+                            sort_order = excluded.sort_order,
+                            active = 1,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (category, text, order_index))
+                order_index += 1
+        self.conn.commit()
+        cur.close()
+
     def log_it_audit(self, username, action, target, result, message):
         cur = self._cursor()
         marker = "%s" if self.backend == "postgres" else "?"
@@ -1009,6 +1309,4 @@ class DatabaseService:
 
     @staticmethod
     def format_timestamp(value):
-        if isinstance(value, datetime):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-        return str(value or "")
+        return format_readable_datetime(value)

@@ -5,6 +5,67 @@ from typing import Any, Dict, Optional
 import requests
 
 
+FACILITY_NETWORK_GUIDANCE = (
+    "Connect this computer to the dedicated facility network, then try again. "
+    "If you are already on that network, ask IT to check the Raspberry Pi Control Service."
+)
+
+
+def friendly_error_message(
+    error: str = "",
+    endpoint: str = "",
+    status_code: Optional[int] = None,
+    data: Optional[Any] = None,
+) -> str:
+    raw = str(error or "").strip()
+    detail = raw
+    if isinstance(data, dict):
+        value = data.get("detail") or data.get("err") or data.get("error") or data.get("message")
+        if isinstance(value, dict):
+            value = value.get("message") or value.get("err") or value.get("error") or value.get("line")
+        if value:
+            detail = str(value)
+    lowered = detail.lower()
+    endpoint = endpoint or ""
+
+    if status_code in {401} and endpoint.startswith("/auth/login"):
+        return "Username or password was not accepted. Check the details or ask IT/Admin for a temporary password."
+    if status_code in {401, 403}:
+        return "This workstation is not authorized to use the Raspberry Pi Control Service. Ask IT to verify the Control API key."
+    if status_code == 404:
+        return "The Raspberry Pi server is reachable, but this feature is not available on the server yet. Ask IT to update the Pi backend."
+    if "e-paper is updating" in lowered or "epaper is updating" in lowered or "epaper_busy" in lowered:
+        return "The e-paper screen is still updating. Wait until the text finishes, then send the LCD photo again."
+    if "lcd photo is updating" in lowered:
+        return "The LCD photo is still uploading. Wait until it finishes, then send the e-paper text again."
+    if status_code == 409 or "busy" in lowered:
+        return "The device is busy finishing the previous request. Wait a few seconds, then try again."
+    if status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered:
+        return f"The Raspberry Pi server did not complete the request in time. {FACILITY_NETWORK_GUIDANCE}"
+    if status_code and status_code >= 500:
+        return "The Raspberry Pi server reported an internal service error. Ask IT to check the Control Service and Operation Manager logs."
+    if "connection refused" in lowered:
+        return "The Raspberry Pi was found, but the Control Service is not accepting connections. Ask IT to restart or check the Raspberry Pi Control Service."
+    if "cannot connect to network database" in lowered:
+        return f"Cannot reach the network database. {FACILITY_NETWORK_GUIDANCE}"
+    if any(marker in lowered for marker in (
+        "failed to establish",
+        "max retries exceeded",
+        "no route to host",
+        "network is unreachable",
+        "offline",
+        "unreachable",
+        "name resolution",
+        "temporary failure",
+    )):
+        return f"Cannot reach the Raspberry Pi Control Service. {FACILITY_NETWORK_GUIDANCE}"
+    if "malformed" in lowered or "invalid response" in lowered:
+        return "The Raspberry Pi server replied with an unreadable response. Ask IT to check the Control Service logs."
+    if not detail:
+        return f"The request could not be completed. {FACILITY_NETWORK_GUIDANCE}"
+    return detail
+
+
 @dataclass
 class ControlServiceProfile:
     name: str
@@ -96,23 +157,23 @@ class ControlServiceClient:
                 timeout=self.timeout,
             )
         except requests.Timeout:
-            return self._result(False, endpoint, error="Control Service request timed out.")
-        except requests.ConnectionError:
-            return self._result(False, endpoint, error="Control Service Offline or Unreachable.")
+            return self._result(False, endpoint, error=friendly_error_message("Control Service request timed out.", endpoint))
+        except requests.ConnectionError as exc:
+            return self._result(False, endpoint, error=friendly_error_message(str(exc), endpoint))
         except requests.RequestException as exc:
-            return self._result(False, endpoint, error=f"Control Service request failed: {exc}")
+            return self._result(False, endpoint, error=friendly_error_message(str(exc), endpoint))
 
         if response.status_code == 403:
-            return self._result(False, endpoint, response.status_code, error="Unauthorized Control Service request.")
+            return self._result(False, endpoint, response.status_code, error=friendly_error_message("Unauthorized Control Service request.", endpoint, response.status_code))
 
         try:
             data = response.json()
         except ValueError:
-            return self._result(False, endpoint, response.status_code, error="Malformed Control Service response.")
+            return self._result(False, endpoint, response.status_code, error=friendly_error_message("Malformed Control Service response.", endpoint, response.status_code))
 
         if response.status_code >= 400:
             message = data.get("err") or data.get("error") or data.get("message") or response.reason
-            return self._result(False, endpoint, response.status_code, data, str(message))
+            return self._result(False, endpoint, response.status_code, data, friendly_error_message(str(message), endpoint, response.status_code, data))
 
         return self._result(True, endpoint, response.status_code, data)
 
@@ -207,6 +268,40 @@ class ControlServiceClient:
     def save_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/schedules", payload)
 
+    def delete_schedule(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("DELETE", "/schedules", payload or {})
+
+    def get_dropdown_options(self) -> Dict[str, Any]:
+        primary = self._request("GET", "/resident-dropdown-options")
+        if primary.get("ok") or primary.get("status_code") not in {404, 405}:
+            return primary
+        return self._request("GET", "/dropdown-options")
+
+    def save_dropdown_options(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {"options": options or {}}
+        attempts = [
+            ("PUT", "/resident-dropdown-options"),
+            ("POST", "/resident-dropdown-options"),
+            ("PUT", "/dropdown-options"),
+            ("POST", "/dropdown-options"),
+        ]
+        last = None
+        for method, endpoint in attempts:
+            last = self._request(method, endpoint, payload)
+            if last.get("ok") or last.get("status_code") not in {404, 405}:
+                return last
+        return last or self._result(False, "/resident-dropdown-options", error="Dropdown options endpoint is not available.")
+
+    def get_battery_alert_settings(self) -> Dict[str, Any]:
+        return self._request("GET", "/battery-alert-settings")
+
+    def save_battery_alert_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(settings or {})
+        primary = self._request("PUT", "/battery-alert-settings", payload)
+        if primary.get("ok") or primary.get("status_code") not in {404, 405}:
+            return primary
+        return self._request("POST", "/battery-alert-settings", payload)
+
     def get_dashboard_summary(self) -> Dict[str, Any]:
         return self._request("GET", "/dashboard/summary")
 
@@ -261,6 +356,90 @@ class ControlServiceClient:
     def restart_operation(self) -> Dict[str, Any]:
         return self._request("POST", "/operation/restart")
 
+    def operation_devices(self) -> Dict[str, Any]:
+        return self._request("GET", "/operation/devices")
+
+    def operation_send_text(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/operation/send", payload)
+
+    def operation_send_image(self, device_id: str, image_path: str) -> Dict[str, Any]:
+        if not image_path or not os.path.isfile(image_path):
+            return self._result(False, "/operation/send_image", error="Image file was not found.")
+        with open(image_path, "rb") as fh:
+            files = {"image": (os.path.basename(image_path), fh, "application/octet-stream")}
+            return self._request("POST", "/operation/send_image", files=files, data={"id": device_id})
+
+    def operation_lcd_command(self, device_id: str, command: str) -> Dict[str, Any]:
+        return self._request("POST", "/operation/lcd", {"id": device_id, "command": command})
+
+    def operation_schedule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/operation/schedule", payload)
+
+    def operation_delete_schedule(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("DELETE", "/operation/schedule", payload or {})
+
+    def operation_resident_display(self, resident_id: int, device_id: str = "") -> Dict[str, Any]:
+        return self._request("POST", "/operation/resident-display", {
+            "resident_id": resident_id,
+            "device_id": device_id,
+        })
+
+    def get_firmware_releases(self) -> Dict[str, Any]:
+        return self._request("GET", "/firmware/releases")
+
+    def upload_firmware(self, firmware_path: str, version: str = "", notes: str = "", uploaded_by: str = "") -> Dict[str, Any]:
+        if not firmware_path or not os.path.isfile(firmware_path):
+            return self._result(False, "/firmware/upload", error="Firmware .bin file was not found.")
+        with open(firmware_path, "rb") as fh:
+            files = {"firmware": (os.path.basename(firmware_path), fh, "application/octet-stream")}
+            data = {"version": version, "notes": notes, "uploaded_by": uploaded_by}
+            return self._request("POST", "/firmware/upload", files=files, data=data)
+
+    def release_firmware(self, release_id: int, device_id: str = "all", released_by: str = "") -> Dict[str, Any]:
+        return self._request("POST", f"/firmware/releases/{release_id}/release", {
+            "device_id": device_id or "all",
+            "released_by": released_by,
+        })
+
+    def get_backups(self) -> Dict[str, Any]:
+        return self._request("GET", "/backups")
+
+    def create_backup(self, created_by: str = "system", upload_to_drive: bool = True) -> Dict[str, Any]:
+        return self._request("POST", "/backups", {
+            "created_by": created_by or "system",
+            "upload_to_drive": bool(upload_to_drive),
+        })
+
+    def restore_backup(self, path: str, confirm_text: str, restored_by: str = "system") -> Dict[str, Any]:
+        return self._request("POST", "/backups/restore", {
+            "path": path,
+            "confirm_text": confirm_text,
+            "restored_by": restored_by or "system",
+        })
+
+    def send_battery_test_email(self, recipients: Optional[list[str]] = None) -> Dict[str, Any]:
+        return self._request("POST", "/battery-alert-settings/test-email", {
+            "recipients": recipients or [],
+        })
+
+    def get_integration_settings(self) -> Dict[str, Any]:
+        return self._request("GET", "/integration-settings")
+
+    def save_integration_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(settings or {})
+        primary = self._request("PUT", "/integration-settings", payload)
+        if primary.get("ok") or primary.get("status_code") not in {404, 405}:
+            return primary
+        return self._request("POST", "/integration-settings", payload)
+
+    def send_integration_test_email(self, recipients: Optional[list[str]] = None) -> Dict[str, Any]:
+        return self._request("POST", "/integration-settings/test-email", {
+            "recipients": recipients or [],
+        })
+
+    def test_google_drive_backup(self) -> Dict[str, Any]:
+        return self._request("POST", "/integration-settings/test-drive", {})
+
     def bootstrap_info(self) -> Dict[str, Any]:
         return self._request("GET", "/bootstrap/info")
 
@@ -275,20 +454,8 @@ class ControlServiceClient:
     def logs(self) -> Dict[str, Any]:
         return self.get_logs()
 
-    def create_backup(self) -> Dict[str, Any]:
-        return self.pending("create_backup")
-
-    def restore_backup(self) -> Dict[str, Any]:
-        return self.pending("restore_backup")
-
     def ota_status(self) -> Dict[str, Any]:
-        return self.pending("ota_status")
-
-    def upload_firmware(self) -> Dict[str, Any]:
-        return self.pending("upload_firmware")
-
-    def release_firmware(self) -> Dict[str, Any]:
-        return self.pending("release_firmware")
+        return self.get_firmware_releases()
 
     def ai_debug_summary(self) -> Dict[str, Any]:
         return self.pending("ai_debug_summary")
