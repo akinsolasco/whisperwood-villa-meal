@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from PIL import Image, ImageFilter, ImageOps
@@ -30,23 +31,40 @@ ACK_TIMEOUT_S = int(os.getenv("WHISPERWOOD_ACK_TIMEOUT_S", "90"))
 FIRMWARE_ACK_TIMEOUT_S = int(os.getenv("WHISPERWOOD_FIRMWARE_ACK_TIMEOUT_S", "360"))
 IMAGE_RESYNC_COOLDOWN_S = int(os.getenv("WHISPERWOOD_IMAGE_RESYNC_COOLDOWN_S", "60"))
 SCHEDULE_TICK_INTERVAL_S = int(os.getenv("WHISPERWOOD_SCHEDULE_TICK_INTERVAL_S", "5"))
+APP_VERSION = "0.3.12"
+LOCAL_TIMEZONE_NAME = os.getenv("WHISPERWOOD_TIMEZONE", "America/Halifax")
+LOCAL_TIMEZONE_LABEL = os.getenv("WHISPERWOOD_TIMEZONE_LABEL", "Atlantic Time")
+
+
+def load_local_timezone():
+    try:
+        return ZoneInfo(LOCAL_TIMEZONE_NAME)
+    except Exception:
+        return datetime.now().astimezone().tzinfo
+
+
+LOCAL_TZ = load_local_timezone()
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
 
-app = FastAPI(title="Whisperwood Operation Manager", version="0.3.11")
+app = FastAPI(title="Whisperwood Operation Manager", version=APP_VERSION)
 
 
 def utc_now() -> str:
-    return datetime.utcnow().isoformat()
+    return local_now().isoformat(timespec="seconds")
 
 
 def local_now() -> datetime:
-    return datetime.now().astimezone()
+    return datetime.now(LOCAL_TZ)
 
 
 def wall_time() -> str:
-    return time.strftime("%H:%M:%S")
+    return local_now().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def local_from_timestamp(timestamp: float) -> datetime:
+    return datetime.fromtimestamp(timestamp, LOCAL_TZ)
 
 
 def parse_kv_line(line: str) -> Dict[str, str]:
@@ -705,6 +723,7 @@ def fire_schedule_if_due(state: Dict[str, Any], reason: str = "timer") -> Option
                 "target": target,
                 "reason": reason,
                 "server_time": now_dt.isoformat(timespec="seconds"),
+                "timezone": LOCAL_TIMEZONE_NAME,
                 "result": result,
             })
         except Exception as exc:
@@ -717,6 +736,7 @@ def fire_schedule_if_due(state: Dict[str, Any], reason: str = "timer") -> Option
                 "target": target,
                 "reason": reason,
                 "server_time": now_dt.isoformat(timespec="seconds"),
+                "timezone": LOCAL_TIMEZONE_NAME,
                 "error": str(exc),
             })
 
@@ -730,6 +750,7 @@ def fire_schedule_if_due(state: Dict[str, Any], reason: str = "timer") -> Option
         "commands": [item.get("command") for item in fired_results],
         "reason": reason,
         "server_time": now_dt.isoformat(timespec="seconds"),
+        "timezone": LOCAL_TIMEZONE_NAME,
         "results": results,
     }
 
@@ -781,10 +802,10 @@ def device_to_json(st: ConnState) -> Dict[str, Any]:
         "pending_ota_seq": st.pending_ota_seq,
         "last_seen_s": age,
         "last_seen": age,
-        "last_seen_at": datetime.utcfromtimestamp(st.last_seen).isoformat(),
-        "first_seen_at": datetime.utcfromtimestamp(st.first_seen).isoformat(),
-        "last_status_at": datetime.utcfromtimestamp(st.last_status_at).isoformat() if st.last_status_at else "",
-        "disconnected_at": datetime.utcfromtimestamp(st.disconnected_at).isoformat() if st.disconnected_at else "",
+        "last_seen_at": local_from_timestamp(st.last_seen).isoformat(timespec="seconds"),
+        "first_seen_at": local_from_timestamp(st.first_seen).isoformat(timespec="seconds"),
+        "last_status_at": local_from_timestamp(st.last_status_at).isoformat(timespec="seconds") if st.last_status_at else "",
+        "disconnected_at": local_from_timestamp(st.disconnected_at).isoformat(timespec="seconds") if st.disconnected_at else "",
         "is_online": online,
         "online": online,
         "status": "online" if online else "offline",
@@ -1135,9 +1156,11 @@ def health() -> Dict[str, Any]:
     return {
         "ok": True,
         "service": "operation",
-        "version": "0.3.11",
+        "version": APP_VERSION,
         "time": utc_now(),
         "local_time": local_now().isoformat(timespec="seconds"),
+        "timezone": LOCAL_TIMEZONE_NAME,
+        "timezone_label": LOCAL_TIMEZONE_LABEL,
         "tcp_host": HOST,
         "tcp_port": TCP_PORT,
         "connected_devices": connected,
@@ -1179,6 +1202,8 @@ def schedule(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, A
         "ok": True,
         "schedule": state,
         "server_time": local_now().isoformat(timespec="seconds"),
+        "timezone": LOCAL_TIMEZONE_NAME,
+        "timezone_label": LOCAL_TIMEZONE_LABEL,
         "due_result": due_result,
         "message": "Global LCD schedule saved in Operation Manager",
     }
@@ -1188,6 +1213,8 @@ def schedule(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, A
 def delete_schedule(body: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
     result = delete_schedule_state(body or {})
     result["server_time"] = local_now().isoformat(timespec="seconds")
+    result["timezone"] = LOCAL_TIMEZONE_NAME
+    result["timezone_label"] = LOCAL_TIMEZONE_LABEL
     return result
 
 

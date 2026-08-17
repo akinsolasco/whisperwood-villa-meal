@@ -1,13 +1,28 @@
 from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+
+LOCAL_TIMEZONE_NAME = "America/Halifax"
+LOCAL_TIMEZONE_LABEL = "Atlantic Time"
+
+
+def _load_local_timezone():
+    try:
+        return ZoneInfo(LOCAL_TIMEZONE_NAME)
+    except Exception:
+        return datetime.now().astimezone().tzinfo
+
+
+LOCAL_TZ = _load_local_timezone()
 
 
 def local_now() -> datetime:
-    return datetime.now().astimezone()
+    return datetime.now(LOCAL_TZ)
 
 
 def _local_timezone():
-    return local_now().tzinfo
+    return LOCAL_TZ
 
 
 def _friendly_timezone_label(label: str) -> str:
@@ -22,6 +37,13 @@ def _friendly_timezone_label(label: str) -> str:
         acronym = "".join(word[0].upper() for word in words if word[0].isalpha())
         return acronym if 2 <= len(acronym) <= 5 else label
     return label
+
+
+def _readable_timezone_label(dt: datetime) -> str:
+    abbreviation = _friendly_timezone_label(dt.tzname() or "")
+    if abbreviation and abbreviation != LOCAL_TIMEZONE_LABEL:
+        return f"{abbreviation} ({LOCAL_TIMEZONE_LABEL})"
+    return LOCAL_TIMEZONE_LABEL
 
 
 def _clean_iso_value(value: str) -> str:
@@ -88,10 +110,10 @@ def format_readable_datetime(value: Any, fallback: str = "") -> str:
         return fallback if fallback else str(value or "")
 
     if dt.tzinfo is not None:
-        dt = dt.astimezone()
-        tz_label = _friendly_timezone_label(dt.tzname() or "")
+        dt = dt.astimezone(LOCAL_TZ)
     else:
-        tz_label = _friendly_timezone_label(_local_timezone().tzname(dt) or "")
+        dt = dt.replace(tzinfo=LOCAL_TZ)
+    tz_label = _readable_timezone_label(dt)
 
     hour = dt.strftime("%I").lstrip("0") or "12"
     minute = dt.strftime("%M")
