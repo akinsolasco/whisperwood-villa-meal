@@ -437,6 +437,9 @@ class ControlServiceClient:
             "recipients": recipients or [],
         })
 
+    def test_google_drive_backup(self) -> Dict[str, Any]:
+        return self._request("POST", "/integration-settings/test-drive", {})
+
     def bootstrap_info(self) -> Dict[str, Any]:
         return self._request("GET", "/bootstrap/info")
 

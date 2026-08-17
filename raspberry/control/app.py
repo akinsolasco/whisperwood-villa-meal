@@ -11,9 +11,9 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-import hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time
+import configparser, hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time
 
-APP_VERSION = "0.6.6"
+APP_VERSION = "0.6.7"
 LOCAL_TIMEZONE_NAME = os.getenv("WHISPERWOOD_TIMEZONE", "America/Halifax")
 LOCAL_TIMEZONE_LABEL = os.getenv("WHISPERWOOD_TIMEZONE_LABEL", "Atlantic Time")
 
@@ -116,6 +116,10 @@ DEFAULT_INTEGRATION_SETTINGS = {
     "smtp_use_ssl": SMTP_USE_SSL,
     "smtp_use_tls": SMTP_USE_TLS,
     "gdrive_backup_target": GDRIVE_BACKUP_TARGET,
+    "gdrive_account_email": "",
+    "gdrive_remote_name": "whisperwooddrive",
+    "gdrive_folder_path": "Backups/Whisperwood",
+    "gdrive_oauth_token_json": "",
     "gdrive_folder_link": "",
     "gdrive_service_account_path": "",
 }
@@ -296,7 +300,104 @@ def normalize_battery_alert_settings(raw: Any = None) -> dict[str, Any]:
     return data
 
 
-def normalize_integration_settings(raw: Any = None, previous: Any = None, preserve_blank_password: bool = False) -> dict[str, Any]:
+def rclone_config_path() -> Path:
+    return Path.home() / ".config" / "rclone" / "rclone.conf"
+
+
+def safe_rclone_remote_name(value: str) -> str:
+    remote = "".join(ch for ch in str(value or "").strip() if ch.isalnum() or ch in {"_", "-"})
+    return remote or "whisperwooddrive"
+
+
+def split_gdrive_target(target: str) -> tuple[str, str]:
+    raw = str(target or "").strip()
+    if ":" not in raw:
+        return "", raw.strip("/")
+    remote, folder = raw.split(":", 1)
+    return safe_rclone_remote_name(remote), folder.strip("/")
+
+
+def gdrive_target(remote_name: str, folder_path: str) -> str:
+    remote = safe_rclone_remote_name(remote_name)
+    folder = str(folder_path or "").strip().strip("/")
+    return f"{remote}:{folder}" if folder else f"{remote}:"
+
+
+def rclone_remote_configured(remote_name: str) -> bool:
+    remote = safe_rclone_remote_name(remote_name)
+    config_path = rclone_config_path()
+    if not config_path.exists():
+        return False
+    parser = configparser.RawConfigParser()
+    parser.read(config_path)
+    return parser.has_section(remote)
+
+
+def apply_rclone_drive_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    remote = safe_rclone_remote_name(settings.get("gdrive_remote_name") or "whisperwooddrive")
+    token_text = str(settings.get("gdrive_oauth_token_json") or "").strip()
+    service_account_path = str(settings.get("gdrive_service_account_path") or "").strip()
+    target = settings.get("gdrive_backup_target") or gdrive_target(remote, settings.get("gdrive_folder_path") or "")
+
+    if not shutil.which("rclone"):
+        return {"ok": False, "configured": False, "reason": "rclone is not installed on the Raspberry Pi"}
+    if not token_text and not service_account_path:
+        return {
+            "ok": True,
+            "configured": rclone_remote_configured(remote),
+            "reason": "Drive folder settings saved. Add an OAuth token JSON or service-account JSON path to create/update the rclone remote from the app.",
+            "remote": remote,
+            "target": target,
+        }
+
+    token_compact = ""
+    if token_text:
+        try:
+            token_compact = json.dumps(json.loads(token_text), separators=(",", ":"))
+        except Exception as exc:
+            return {"ok": False, "configured": False, "reason": f"Google OAuth token JSON is invalid: {exc}", "remote": remote}
+
+    if service_account_path and not Path(service_account_path).exists():
+        return {
+            "ok": False,
+            "configured": False,
+            "reason": f"Service-account JSON was not found on the Raspberry Pi: {service_account_path}",
+            "remote": remote,
+        }
+
+    config_path = rclone_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.RawConfigParser()
+    parser.read(config_path)
+    if not parser.has_section(remote):
+        parser.add_section(remote)
+    parser.set(remote, "type", "drive")
+    parser.set(remote, "scope", "drive")
+    if token_compact:
+        parser.set(remote, "token", token_compact)
+    if service_account_path:
+        parser.set(remote, "service_account_file", service_account_path)
+
+    temp_path = config_path.with_suffix(".conf.tmp")
+    with temp_path.open("w", encoding="utf-8") as fh:
+        parser.write(fh)
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, config_path)
+    return {
+        "ok": True,
+        "configured": True,
+        "reason": f"Google Drive rclone remote '{remote}' saved for target {target}",
+        "remote": remote,
+        "target": target,
+    }
+
+
+def normalize_integration_settings(
+    raw: Any = None,
+    previous: Any = None,
+    preserve_blank_password: bool = False,
+    preserve_blank_gdrive_token: bool = False,
+) -> dict[str, Any]:
     data = dict(DEFAULT_INTEGRATION_SETTINGS)
     if isinstance(previous, str) and previous.strip():
         try:
@@ -319,8 +420,27 @@ def normalize_integration_settings(raw: Any = None, previous: Any = None, preser
             previous_password = str(previous.get("smtp_password") or "")
         data["smtp_password"] = previous_password or str(DEFAULT_INTEGRATION_SETTINGS.get("smtp_password") or "")
 
-    for key in ["smtp_host", "smtp_username", "smtp_password", "smtp_from_email", "smtp_from_name", "gdrive_backup_target", "gdrive_folder_link", "gdrive_service_account_path"]:
+    if preserve_blank_gdrive_token and not str(raw_dict.get("gdrive_oauth_token_json") or "").strip():
+        previous_token = ""
+        if isinstance(previous, dict):
+            previous_token = str(previous.get("gdrive_oauth_token_json") or "")
+        data["gdrive_oauth_token_json"] = previous_token or str(DEFAULT_INTEGRATION_SETTINGS.get("gdrive_oauth_token_json") or "")
+
+    for key in [
+        "smtp_host", "smtp_username", "smtp_password", "smtp_from_email", "smtp_from_name",
+        "gdrive_backup_target", "gdrive_account_email", "gdrive_remote_name", "gdrive_folder_path",
+        "gdrive_oauth_token_json", "gdrive_folder_link", "gdrive_service_account_path",
+    ]:
         data[key] = str(data.get(key) or "").strip()
+    target_remote, target_folder = split_gdrive_target(data.get("gdrive_backup_target") or "")
+    if not data["gdrive_remote_name"] and target_remote:
+        data["gdrive_remote_name"] = target_remote
+    data["gdrive_remote_name"] = safe_rclone_remote_name(data.get("gdrive_remote_name") or "whisperwooddrive")
+    if not data["gdrive_folder_path"] and target_folder:
+        data["gdrive_folder_path"] = target_folder
+    data["gdrive_folder_path"] = data["gdrive_folder_path"].strip().strip("/")
+    if data["gdrive_remote_name"]:
+        data["gdrive_backup_target"] = gdrive_target(data["gdrive_remote_name"], data["gdrive_folder_path"])
     try:
         data["smtp_port"] = max(1, min(65535, int(data.get("smtp_port") or 587)))
     except Exception:
@@ -342,10 +462,14 @@ def public_integration_settings(settings: Any = None) -> dict[str, Any]:
     data = normalize_integration_settings(settings if settings is not None else get_integration_settings())
     public = dict(data)
     public.pop("smtp_password", None)
+    public.pop("gdrive_oauth_token_json", None)
     public["smtp_password_configured"] = bool(data.get("smtp_password"))
+    public["gdrive_oauth_token_configured"] = bool(data.get("gdrive_oauth_token_json"))
     public["email_configured"] = smtp_configured(data)
     public["google_drive_configured"] = bool(data.get("gdrive_backup_target"))
     public["rclone_available"] = bool(shutil.which("rclone"))
+    public["rclone_remote_configured"] = rclone_remote_configured(data.get("gdrive_remote_name") or "whisperwooddrive")
+    public["google_drive_ready"] = bool(public["google_drive_configured"] and public["rclone_available"] and public["rclone_remote_configured"])
     return public
 
 
@@ -1321,9 +1445,14 @@ class IntegrationSettingsPayload(BaseModel):
     smtp_use_ssl: bool = False
     smtp_use_tls: bool = True
     gdrive_backup_target: Optional[str] = ""
+    gdrive_account_email: Optional[str] = ""
+    gdrive_remote_name: Optional[str] = "whisperwooddrive"
+    gdrive_folder_path: Optional[str] = "Backups/Whisperwood"
+    gdrive_oauth_token_json: Optional[str] = ""
     gdrive_folder_link: Optional[str] = ""
     gdrive_service_account_path: Optional[str] = ""
     clear_smtp_password: bool = False
+    clear_gdrive_token: bool = False
 
 
 class FirmwareReleasePayload(BaseModel):
@@ -2061,11 +2190,19 @@ def save_integration_settings(payload: IntegrationSettingsPayload, x_whisperwood
     require_key(x_whisperwood_key)
     previous = get_integration_settings()
     incoming = payload.dict()
-    if incoming.pop("clear_smtp_password", False):
+    clear_smtp_password = bool(incoming.pop("clear_smtp_password", False))
+    clear_gdrive_token = bool(incoming.pop("clear_gdrive_token", False))
+    if clear_smtp_password:
         incoming["smtp_password"] = ""
-        settings = normalize_integration_settings(incoming, previous=previous)
-    else:
-        settings = normalize_integration_settings(incoming, previous=previous, preserve_blank_password=True)
+    if clear_gdrive_token:
+        incoming["gdrive_oauth_token_json"] = ""
+    settings = normalize_integration_settings(
+        incoming,
+        previous=previous,
+        preserve_blank_password=not clear_smtp_password,
+        preserve_blank_gdrive_token=not clear_gdrive_token,
+    )
+    rclone_apply = apply_rclone_drive_settings(settings)
     save_system_setting("integration_settings", settings)
     log_action(
         "system",
@@ -2074,9 +2211,49 @@ def save_integration_settings(payload: IntegrationSettingsPayload, x_whisperwood
         "success",
         "Email and backup integration settings updated",
         payload={**public_integration_settings(settings), "smtp_password_configured": bool(settings.get("smtp_password"))},
-        response={"ok": True},
+        response={"ok": True, "rclone_apply": rclone_apply},
     )
-    return {"ok": True, "settings": public_integration_settings(settings)}
+    return {"ok": True, "settings": public_integration_settings(settings), "rclone_apply": rclone_apply}
+
+
+@app.post("/integration-settings/test-drive")
+def integration_settings_test_drive(x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    settings = get_integration_settings()
+    public = public_integration_settings(settings)
+    target = settings.get("gdrive_backup_target") or ""
+    if not public.get("rclone_available"):
+        raise HTTPException(status_code=400, detail="rclone is not installed on the Raspberry Pi")
+    if not target:
+        raise HTTPException(status_code=400, detail="Google Drive backup folder is not configured")
+    if not public.get("rclone_remote_configured"):
+        raise HTTPException(status_code=400, detail="Google Drive remote is not configured. Save OAuth token JSON or service-account JSON path first.")
+    test_name = f"whisperwood-drive-test-{local_now().strftime('%Y%m%d-%H%M%S')}.txt"
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
+        fh.write(f"Enhanced Living Whisperwood Google Drive test\n{readable_now()}\n")
+        local_path = fh.name
+    remote_path = f"{target.rstrip('/')}/{test_name}"
+    try:
+        result = subprocess.run(
+            ["rclone", "copyto", local_path, remote_path],
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=400, detail=result.stderr or result.stdout or "Google Drive test upload failed")
+        subprocess.run(["rclone", "deletefile", remote_path], text=True, capture_output=True, timeout=60)
+        return {
+            "ok": True,
+            "target": target,
+            "remote_test_file": remote_path,
+            "message": f"Google Drive test upload worked for {target}",
+        }
+    finally:
+        try:
+            os.remove(local_path)
+        except OSError:
+            pass
 
 
 @app.post("/integration-settings/test-email")

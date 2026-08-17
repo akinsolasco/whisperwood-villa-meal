@@ -6031,8 +6031,8 @@ class DashboardWindow(QWidget):
         )
 
         drive_help = QLabel(
-            "Use the rclone target as the real upload destination, for example whisperwooddrive:Backups/Whisperwood. "
-            "The Google Drive folder link is only a human note so IT staff know which Drive folder the target points to.",
+            "Do not enter the Google account password. Use the account email for reference, then save an OAuth token JSON or service-account JSON path. "
+            "The app builds the rclone target from the remote name and Drive folder path.",
             drive_panel,
         )
         drive_help.setWordWrap(True)
@@ -6040,30 +6040,65 @@ class DashboardWindow(QWidget):
         drive_layout.addWidget(drive_help)
 
         drive_row_1 = QHBoxLayout()
-        gdrive_target = QLineEdit(drive_panel)
-        gdrive_target.setPlaceholderText("Required for Drive upload: whisperwooddrive:Backups/Whisperwood")
-        gdrive_target.setStyleSheet(self.input_style())
-        drive_row_1.addWidget(gdrive_target, 2)
-        gdrive_folder_link = QLineEdit(drive_panel)
-        gdrive_folder_link.setPlaceholderText("Optional note: Google Drive folder link")
-        gdrive_folder_link.setStyleSheet(self.input_style())
-        drive_row_1.addWidget(gdrive_folder_link, 1)
+        gdrive_account_email = QLineEdit(drive_panel)
+        gdrive_account_email.setPlaceholderText("Google account email, for example backups@example.com")
+        gdrive_account_email.setStyleSheet(self.input_style())
+        drive_row_1.addWidget(gdrive_account_email, 2)
+        gdrive_remote_name = QLineEdit(drive_panel)
+        gdrive_remote_name.setPlaceholderText("Remote name: whisperwooddrive")
+        gdrive_remote_name.setStyleSheet(self.input_style())
+        drive_row_1.addWidget(gdrive_remote_name, 1)
         drive_layout.addLayout(drive_row_1)
 
         drive_row_2 = QHBoxLayout()
+        gdrive_folder_path = QLineEdit(drive_panel)
+        gdrive_folder_path.setPlaceholderText("Drive folder path: Backups/Whisperwood")
+        gdrive_folder_path.setStyleSheet(self.input_style())
+        drive_row_2.addWidget(gdrive_folder_path, 1)
+        gdrive_target = QLineEdit(drive_panel)
+        gdrive_target.setPlaceholderText("Generated rclone target")
+        gdrive_target.setReadOnly(True)
+        gdrive_target.setStyleSheet(self.input_style())
+        drive_row_2.addWidget(gdrive_target, 1)
+        drive_layout.addLayout(drive_row_2)
+
+        drive_row_3 = QHBoxLayout()
+        gdrive_folder_link = QLineEdit(drive_panel)
+        gdrive_folder_link.setPlaceholderText("Optional note: Google Drive folder link")
+        gdrive_folder_link.setStyleSheet(self.input_style())
+        drive_row_3.addWidget(gdrive_folder_link, 1)
         gdrive_service_account_path = QLineEdit(drive_panel)
         gdrive_service_account_path.setPlaceholderText("Optional service-account JSON path on Pi")
         gdrive_service_account_path.setStyleSheet(self.input_style())
-        drive_row_2.addWidget(gdrive_service_account_path, 1)
+        drive_row_3.addWidget(gdrive_service_account_path, 1)
+        drive_layout.addLayout(drive_row_3)
+
+        oauth_label = QLabel("OAuth token JSON from Google approval, not the Google password", drive_panel)
+        plain_label(oauth_label, "font-size: 12px; color: #475569; font-weight: 800")
+        drive_layout.addWidget(oauth_label)
+        gdrive_oauth_token_json = QTextEdit(drive_panel)
+        gdrive_oauth_token_json.setPlaceholderText('Paste token JSON only when setting/changing the Google account, for example {"access_token":"...","refresh_token":"..."}')
+        gdrive_oauth_token_json.setFixedHeight(74)
+        gdrive_oauth_token_json.setStyleSheet(self.input_style())
+        drive_layout.addWidget(gdrive_oauth_token_json)
+
+        drive_row_4 = QHBoxLayout()
+        clear_gdrive_token = QCheckBox("Clear saved Google token", drive_panel)
+        clear_gdrive_token.setStyleSheet(self.checkbox_style())
+        drive_row_4.addWidget(clear_gdrive_token)
         save_integrations_btn = QPushButton("Save Integrations", drive_panel)
         save_integrations_btn.setStyleSheet(self.primary_btn_style())
         compact_button(save_integrations_btn, 164)
-        drive_row_2.addWidget(save_integrations_btn)
+        drive_row_4.addWidget(save_integrations_btn)
+        test_drive_btn = QPushButton("Test Drive", drive_panel)
+        test_drive_btn.setStyleSheet(self.secondary_btn_style())
+        compact_button(test_drive_btn, 124)
+        drive_row_4.addWidget(test_drive_btn)
         test_integration_email_btn = QPushButton("Test Email", drive_panel)
         test_integration_email_btn.setStyleSheet(self.secondary_btn_style())
         compact_button(test_integration_email_btn, 128)
-        drive_row_2.addWidget(test_integration_email_btn)
-        drive_layout.addLayout(drive_row_2)
+        drive_row_4.addWidget(test_integration_email_btn)
+        drive_layout.addLayout(drive_row_4)
 
         integration_status = QLabel("Load settings from the Raspberry Pi, edit, then save.", drive_panel)
         integration_status.setWordWrap(True)
@@ -6086,8 +6121,15 @@ class DashboardWindow(QWidget):
             integration_status.setText(message)
             plain_label(integration_status, f"font-size: 12px; color: {colors.get(state, '#64748b')}; font-weight: 800")
 
+        def update_drive_target_preview():
+            remote = "".join(ch for ch in (gdrive_remote_name.text() or "whisperwooddrive").strip() if ch.isalnum() or ch in {"_", "-"})
+            remote = remote or "whisperwooddrive"
+            folder = (gdrive_folder_path.text() or "Backups/Whisperwood").strip().strip("/")
+            gdrive_target.setText(f"{remote}:{folder}" if folder else f"{remote}:")
+
         def integration_payload():
             security = smtp_security.currentData()
+            update_drive_target_preview()
             return {
                 "smtp_host": smtp_host.text().strip(),
                 "smtp_port": smtp_port.value(),
@@ -6098,9 +6140,14 @@ class DashboardWindow(QWidget):
                 "smtp_use_ssl": security == "ssl",
                 "smtp_use_tls": security == "tls",
                 "gdrive_backup_target": gdrive_target.text().strip(),
+                "gdrive_account_email": gdrive_account_email.text().strip(),
+                "gdrive_remote_name": gdrive_remote_name.text().strip(),
+                "gdrive_folder_path": gdrive_folder_path.text().strip(),
+                "gdrive_oauth_token_json": gdrive_oauth_token_json.toPlainText().strip(),
                 "gdrive_folder_link": gdrive_folder_link.text().strip(),
                 "gdrive_service_account_path": gdrive_service_account_path.text().strip(),
                 "clear_smtp_password": clear_smtp_password.isChecked(),
+                "clear_gdrive_token": clear_gdrive_token.isChecked(),
             }
 
         def load_integration_settings():
@@ -6126,17 +6173,23 @@ class DashboardWindow(QWidget):
                     security_mode = "none"
                 security_index = smtp_security.findData(security_mode)
                 smtp_security.setCurrentIndex(security_index if security_index >= 0 else 0)
-                gdrive_target.setText(data.get("gdrive_backup_target") or "")
+                gdrive_account_email.setText(data.get("gdrive_account_email") or "")
+                gdrive_remote_name.setText(data.get("gdrive_remote_name") or "whisperwooddrive")
+                gdrive_folder_path.setText(data.get("gdrive_folder_path") or "Backups/Whisperwood")
+                update_drive_target_preview()
                 gdrive_folder_link.setText(data.get("gdrive_folder_link") or "")
                 gdrive_service_account_path.setText(data.get("gdrive_service_account_path") or "")
+                gdrive_oauth_token_json.clear()
+                gdrive_oauth_token_json.setPlaceholderText("Google token already saved; leave blank to keep it" if data.get("gdrive_oauth_token_configured") else 'Paste OAuth token JSON here when setting up Drive')
+                clear_gdrive_token.setChecked(False)
                 email_state = "SMTP ready" if data.get("email_configured") else "SMTP not ready"
-                if data.get("google_drive_configured") and data.get("rclone_available"):
+                if data.get("google_drive_ready"):
                     drive_state = "Google Drive upload ready"
                 elif data.get("google_drive_configured"):
-                    drive_state = "Drive target saved, but rclone is missing on the Pi"
+                    drive_state = "Drive target saved, but Google authorization is not complete"
                 else:
                     drive_state = "Drive target not set; backups will stay local"
-                set_integration_status(f"{email_state}. {drive_state}.", "ok" if data.get("email_configured") and data.get("google_drive_configured") and data.get("rclone_available") else "pending")
+                set_integration_status(f"{email_state}. {drive_state}.", "ok" if data.get("email_configured") and data.get("google_drive_ready") else "pending")
             else:
                 set_integration_status(result.get("error") or "Could not load integration settings.", "error")
             battery_settings = self.load_battery_alert_settings(quiet=True, timeout=4.0)
@@ -6156,6 +6209,9 @@ class DashboardWindow(QWidget):
             clear_smtp_password.setChecked(False)
             data = (result.get("data") or {}).get("settings") or {}
             smtp_password.setPlaceholderText("Password already saved; leave blank to keep it" if data.get("smtp_password_configured") else "SMTP password or app password")
+            gdrive_oauth_token_json.clear()
+            clear_gdrive_token.setChecked(False)
+            gdrive_oauth_token_json.setPlaceholderText("Google token already saved; leave blank to keep it" if data.get("gdrive_oauth_token_configured") else 'Paste OAuth token JSON here when setting up Drive')
 
             battery_settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
             battery_settings["email_enabled"] = settings_battery_email_enabled.isChecked()
@@ -6168,10 +6224,11 @@ class DashboardWindow(QWidget):
                 self.apply_battery_alert_settings_to_ui()
 
             email_state = "SMTP ready" if data.get("email_configured") else "SMTP saved but not complete"
-            if data.get("google_drive_configured") and data.get("rclone_available"):
+            rclone_apply = (result.get("data") or {}).get("rclone_apply") or {}
+            if data.get("google_drive_ready"):
                 drive_state = "Google Drive upload ready"
             elif data.get("google_drive_configured"):
-                drive_state = "Drive target saved; install/configure rclone on the Pi before cloud uploads will work"
+                drive_state = rclone_apply.get("reason") or "Drive target saved; finish Google authorization before cloud uploads will work"
             else:
                 drive_state = "Google Drive target not set; backups will stay local"
             set_integration_status(f"{email_state}. {drive_state}.", "ok" if data.get("email_configured") else "pending")
@@ -6195,8 +6252,25 @@ class DashboardWindow(QWidget):
                 set_integration_status(result.get("error") or "Test email failed.", "error")
                 self.show_error("Email Test Failed", result.get("error") or "Test email failed.")
 
+        def test_google_drive():
+            if not save_integrations(show_popup=False):
+                return
+            set_integration_status("Testing Google Drive upload...", "pending")
+            result = self.control_client(timeout=130.0).test_google_drive_backup()
+            if result.get("ok"):
+                data = result.get("data") or {}
+                set_integration_status(data.get("message") or "Google Drive test upload worked.", "ok")
+                self.show_info("Google Drive Test", data.get("message") or "Google Drive test upload worked.")
+            else:
+                set_integration_status(result.get("error") or "Google Drive test failed.", "error")
+                self.show_error("Google Drive Test Failed", result.get("error") or "Google Drive test failed.")
+
+        gdrive_remote_name.textChanged.connect(update_drive_target_preview)
+        gdrive_folder_path.textChanged.connect(update_drive_target_preview)
+        update_drive_target_preview()
         save_integrations_btn.clicked.connect(lambda: save_integrations(show_popup=True))
         test_integration_email_btn.clicked.connect(test_integration_email)
+        test_drive_btn.clicked.connect(test_google_drive)
         load_integration_settings()
 
         footer = QHBoxLayout()
