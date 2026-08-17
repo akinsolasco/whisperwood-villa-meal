@@ -13,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time
 
-APP_VERSION = "0.6.5"
+APP_VERSION = "0.6.6"
 LOCAL_TIMEZONE_NAME = os.getenv("WHISPERWOOD_TIMEZONE", "America/Halifax")
 LOCAL_TIMEZONE_LABEL = os.getenv("WHISPERWOOD_TIMEZONE_LABEL", "Atlantic Time")
 
@@ -36,10 +36,21 @@ def now() -> str:
     return local_now().isoformat(timespec="seconds")
 
 
+def ordinal_day(day: int) -> str:
+    if 10 <= day % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
 def readable_now() -> str:
-    dt = local_now()
+    return readable_datetime(local_now())
+
+
+def readable_datetime(dt: datetime) -> str:
     hour = dt.strftime("%I").lstrip("0") or "12"
-    return f"{dt.strftime('%a')}, {dt.strftime('%b')} {dt.day}, {dt.year} {hour}:{dt.strftime('%M')} {dt.strftime('%p')} {dt.tzname()} ({LOCAL_TIMEZONE_LABEL})"
+    return f"{dt.strftime('%A')}, {ordinal_day(dt.day)} {dt.strftime('%B')} {dt.year}, {hour}:{dt.strftime('%M')} {dt.strftime('%p')} {dt.tzname()} ({LOCAL_TIMEZONE_LABEL})"
 
 
 def local_from_timestamp(timestamp: float) -> datetime:
@@ -487,12 +498,16 @@ def pg_connection_url() -> str:
 
 def backup_file_info(path: Path) -> dict[str, Any]:
     stat = path.stat()
+    created_at = local_from_timestamp(stat.st_mtime)
+    is_recovery_bundle = "recovery-bundle" in path.name
     return {
         "name": path.name,
         "path": str(path),
         "size_bytes": stat.st_size,
-        "created_at": local_from_timestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        "created_at": created_at.isoformat(timespec="seconds"),
+        "created_at_readable": readable_datetime(created_at),
         "type": "local",
+        "scope": "Pi recovery bundle" if is_recovery_bundle else "Application backup",
         "status": "available",
     }
 
@@ -508,9 +523,17 @@ def run_backup_upload(path: Path) -> dict[str, Any]:
     settings = get_integration_settings()
     target = settings.get("gdrive_backup_target") or ""
     if not target:
-        return {"ok": True, "skipped": True, "reason": "Google Drive backup target is not configured"}
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "Recovery bundle created locally. Google Drive upload was skipped because no rclone target is configured.",
+        }
     if not shutil.which("rclone"):
-        return {"ok": False, "skipped": True, "reason": "rclone is not installed on the Raspberry Pi"}
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "Recovery bundle created locally, but Google Drive upload failed because rclone is not installed on the Raspberry Pi.",
+        }
     result = subprocess.run(
         ["rclone", "copy", str(path), target],
         text=True,
@@ -520,6 +543,7 @@ def run_backup_upload(path: Path) -> dict[str, Any]:
     return {
         "ok": result.returncode == 0,
         "target": target,
+        "reason": f"Recovery bundle uploaded to Google Drive target: {target}" if result.returncode == 0 else f"Recovery bundle created locally, but Google Drive upload failed for target: {target}",
         "stdout": result.stdout[-2000:],
         "stderr": result.stderr[-2000:],
     }
@@ -527,19 +551,70 @@ def run_backup_upload(path: Path) -> dict[str, Any]:
 
 def create_backup_archive(created_by: str = "system", upload_to_drive: bool = True) -> dict[str, Any]:
     timestamp = local_now().strftime("%Y%m%d-%H%M%S")
-    archive_path = Path(BACKUP_DIR) / f"whisperwood-backup-{timestamp}.tar.gz"
+    archive_path = Path(BACKUP_DIR) / f"whisperwood-recovery-bundle-{timestamp}.tar.gz"
+    backup_warnings: list[str] = []
+    included = [
+        "PostgreSQL control database dump",
+        "resident source documents",
+        "resident LCD/display images",
+        "LCD image cache",
+        "saved LCD schedule file",
+        "uploaded ESP32 firmware files",
+        "Control Service and Operation Manager app files",
+        "systemd service files",
+        "Raspberry Pi environment files needed for restore",
+    ]
+    not_included = [
+        "bootable Raspberry Pi SD-card image",
+        "operating system packages",
+        "Python virtual environments",
+        "historic local backup archives",
+    ]
+    restore_summary = (
+        "To recover after Pi/SD-card failure: prepare a new Raspberry Pi with the Whisperwood installer, "
+        "copy this archive to the new Pi, then restore it from IT Admin > Backups. "
+        "This bundle is not a bootable SD-card image."
+    )
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         metadata = {
+            "backup_type": "pi_recovery_bundle",
             "created_at": now(),
+            "created_at_readable": readable_now(),
             "created_by": created_by or "system",
             "hostname": platform.node(),
             "control_version": APP_VERSION,
             "timezone": LOCAL_TIMEZONE_NAME,
             "timezone_label": LOCAL_TIMEZONE_LABEL,
             "database_url_configured": bool(DATABASE_URL),
+            "includes": included,
+            "not_included": not_included,
+            "restore_summary": restore_summary,
         }
         (tmp_path / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        (tmp_path / "RESTORE_README.txt").write_text(
+            "\n".join([
+                "Enhanced Living Whisperwood Raspberry Pi Recovery Bundle",
+                "",
+                f"Created: {metadata['created_at_readable']}",
+                f"Created by: {metadata['created_by']}",
+                f"Pi hostname: {metadata['hostname']}",
+                "",
+                "What is included:",
+                *[f"- {item}" for item in included],
+                "",
+                "What is not included:",
+                *[f"- {item}" for item in not_included],
+                "",
+                "Restore flow:",
+                "1. Prepare a replacement Raspberry Pi/SD card with Raspberry Pi OS.",
+                "2. Install the Whisperwood Raspberry Pi services using the current installer/setup script.",
+                "3. Copy this archive to the Pi backup folder.",
+                "4. In the desktop app, sign in as IT Admin and use IT Admin > Backups > Restore Selected.",
+                "5. Confirm residents, documents, images, LCD schedules, and devices after restore.",
+            ]),
+            encoding="utf-8",
+        )
 
         dump_path = tmp_path / "control_database.dump"
         pg_dump = shutil.which("pg_dump")
@@ -556,22 +631,51 @@ def create_backup_archive(created_by: str = "system", upload_to_drive: bool = Tr
             (tmp_path / "pg_dump_error.txt").write_text("pg_dump or DATABASE_URL is not configured", encoding="utf-8")
 
         with tarfile.open(archive_path, "w:gz") as tar:
+            def safe_tar_add(source: Path, arcname: str) -> None:
+                try:
+                    if source.exists():
+                        tar.add(source, arcname=arcname)
+                except Exception as exc:
+                    backup_warnings.append(f"Skipped {source}: {exc}")
+
             tar.add(tmp_path / "metadata.json", arcname="metadata.json")
+            tar.add(tmp_path / "RESTORE_README.txt", arcname="RESTORE_README.txt")
             if dump_path.exists():
-                tar.add(dump_path, arcname="control_database.dump")
+                safe_tar_add(dump_path, "control_database.dump")
             error_file = tmp_path / "pg_dump_error.txt"
             if error_file.exists():
-                tar.add(error_file, arcname="pg_dump_error.txt")
-            for folder_name in ("documents", "images"):
+                safe_tar_add(error_file, "pg_dump_error.txt")
+            for folder_name in ("documents", "images", "lcd_images", "firmware"):
                 folder = Path(DATA_DIR) / folder_name
-                if folder.exists():
-                    tar.add(folder, arcname=f"data/{folder_name}")
+                safe_tar_add(folder, f"data/{folder_name}")
             schedule_file = Path(DATA_DIR) / "lcd_schedule.json"
-            if schedule_file.exists():
-                tar.add(schedule_file, arcname="data/lcd_schedule.json")
+            safe_tar_add(schedule_file, "data/lcd_schedule.json")
+            for source, arcname in [
+                ("/opt/whisperwood/control/app.py", "services/control/app.py"),
+                ("/opt/whisperwood/control/requirements.txt", "services/control/requirements.txt"),
+                ("/opt/whisperwood/control/.env", "services/control/.env"),
+                ("/opt/whisperwood/operation/app.py", "services/operation/app.py"),
+                ("/opt/whisperwood/operation/requirements.txt", "services/operation/requirements.txt"),
+                ("/opt/whisperwood/operation/.env", "services/operation/.env"),
+                ("/etc/systemd/system/whisperwood-control.service", "systemd/whisperwood-control.service"),
+                ("/etc/systemd/system/whisperwood-operation.service", "systemd/whisperwood-operation.service"),
+                ("/etc/systemd/system/whisperwood-download-site.service", "systemd/whisperwood-download-site.service"),
+            ]:
+                safe_tar_add(Path(source), arcname)
+            if backup_warnings:
+                warnings_file = tmp_path / "backup_warnings.txt"
+                warnings_file.write_text("\n".join(backup_warnings), encoding="utf-8")
+                tar.add(warnings_file, arcname="backup_warnings.txt")
 
-    upload = run_backup_upload(archive_path) if upload_to_drive else {"ok": True, "skipped": True, "reason": "Drive upload disabled for this backup"}
+    upload = run_backup_upload(archive_path) if upload_to_drive else {"ok": True, "skipped": True, "reason": "Recovery bundle created locally. Google Drive upload was turned off for this backup."}
     info = backup_file_info(archive_path)
+    info["backup_type"] = "pi_recovery_bundle"
+    info["scope"] = "Pi recovery bundle"
+    info["created_at_readable"] = readable_now()
+    info["includes"] = included
+    info["not_included"] = not_included
+    info["restore_summary"] = restore_summary
+    info["warnings"] = backup_warnings
     info["upload"] = upload
     log_action(created_by or "system", "backup_create", archive_path.name, "success" if upload.get("ok") else "warning", upload.get("reason") or "Backup created", payload={"upload_to_drive": upload_to_drive}, response=info)
     return {"ok": True, "backup": info}
@@ -599,11 +703,14 @@ def restore_backup_archive(path_text: str, confirm_text: str, restored_by: str =
             )
             if result.returncode != 0:
                 raise HTTPException(status_code=500, detail=f"Database restore failed: {result.stderr or result.stdout}")
-        for folder_name in ("documents", "images"):
+        for folder_name in ("documents", "images", "lcd_images", "firmware"):
             src = tmp_path / "data" / folder_name
             dst = Path(DATA_DIR) / folder_name
             if src.exists():
                 shutil.copytree(src, dst, dirs_exist_ok=True)
+        schedule_src = tmp_path / "data" / "lcd_schedule.json"
+        if schedule_src.exists():
+            shutil.copy2(schedule_src, Path(DATA_DIR) / "lcd_schedule.json")
     log_action(restored_by or "system", "backup_restore", archive_path.name, "success", "Backup restored", payload={"path": str(archive_path)}, response={"pre_restore_backup": pre_restore.get("backup")})
     return {"ok": True, "restored": str(archive_path), "pre_restore_backup": pre_restore.get("backup")}
 
@@ -2260,6 +2367,9 @@ def backups(x_whisperwood_key: str | None = Header(default=None)):
     integrations = public_integration_settings()
     return {
         "ok": True,
+        "backup_scope": "Pi recovery bundle",
+        "backup_explanation": "Create Backup saves a local recovery bundle first, then uploads that same file to Google Drive when an rclone target is configured.",
+        "restore_explanation": "Use this bundle after preparing a replacement Raspberry Pi. It restores the Whisperwood database, resident documents/images, LCD schedule/cache data, firmware files, and service configuration. It is not a bootable SD-card image.",
         "backups": list_local_backups(),
         "google_drive": {
             "configured": bool(integrations.get("gdrive_backup_target")),
@@ -2267,6 +2377,7 @@ def backups(x_whisperwood_key: str | None = Header(default=None)):
             "folder_link": integrations.get("gdrive_folder_link") or "",
             "service_account_path": integrations.get("gdrive_service_account_path") or "",
             "rclone_available": bool(integrations.get("rclone_available")),
+            "how_it_works": "Set up rclone on the Pi, then enter a target like whisperwooddrive:Backups/Whisperwood. The folder link field is only a note for staff; rclone target controls the upload.",
         },
     }
 

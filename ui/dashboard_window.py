@@ -2443,33 +2443,40 @@ class DashboardWindow(QWidget):
         title = QLabel("Backups", page)
         title.setGeometry(0, 0, 260, 28)
         title.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
-        message = QLabel("Create encrypted-network-site backups locally and upload to the configured Google Drive target.", page)
-        message.setGeometry(0, 48, 760, 24)
+        message = QLabel("Create a Raspberry Pi recovery bundle: database, residents, documents, display images, schedules, firmware files, and service configuration.", page)
+        message.setGeometry(0, 42, 930, 42)
+        message.setWordWrap(True)
         message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
 
+        drive_help = QLabel("Google Drive is optional. The Pi always saves a local bundle first, then uploads the same file to the rclone target configured in Settings > Integrations.", page)
+        drive_help.setGeometry(0, 86, 930, 38)
+        drive_help.setWordWrap(True)
+        drive_help.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 700;")
+
         self.btn_create_backup = QPushButton("Create Backup Now", page)
-        self.btn_create_backup.setGeometry(0, 92, 180, 44)
+        self.btn_create_backup.setGeometry(0, 140, 180, 44)
         self.btn_create_backup.setStyleSheet(self.primary_btn_style())
         self.btn_create_backup.clicked.connect(self.create_control_backup)
 
         self.btn_refresh_backups = QPushButton("Refresh Backups", page)
-        self.btn_refresh_backups.setGeometry(198, 92, 155, 44)
+        self.btn_refresh_backups.setGeometry(198, 140, 155, 44)
         self.btn_refresh_backups.setStyleSheet(self.secondary_btn_style())
         self.btn_refresh_backups.clicked.connect(self.load_control_backups)
 
         self.btn_restore_backup = QPushButton("Restore Selected", page)
-        self.btn_restore_backup.setGeometry(371, 92, 155, 44)
+        self.btn_restore_backup.setGeometry(371, 140, 155, 44)
         self.btn_restore_backup.setStyleSheet(self.secondary_btn_style())
         self.btn_restore_backup.clicked.connect(self.restore_selected_backup)
 
-        self.backup_status = QLabel("Restore requires exact typed confirmation and creates a pre-restore backup first.", page)
-        self.backup_status.setGeometry(545, 102, 410, 24)
+        self.backup_status = QLabel("Restore requires exact typed confirmation and creates a pre-restore bundle first.", page)
+        self.backup_status.setGeometry(545, 142, 390, 42)
+        self.backup_status.setWordWrap(True)
         self.backup_status.setStyleSheet("font-size: 12px; color: #b45309; font-weight: 800;")
 
         self.backup_table = QTableWidget(page)
-        self.backup_table.setGeometry(0, 165, 955, 430)
+        self.backup_table.setGeometry(0, 212, 955, 385)
         self.backup_table.setColumnCount(5)
-        self.backup_table.setHorizontalHeaderLabels(["Created", "Name", "Size", "Type", "Status"])
+        self.backup_table.setHorizontalHeaderLabels(["Created", "Bundle", "Size", "Scope", "Status"])
         self.backup_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.backup_table.verticalHeader().setVisible(False)
         self.backup_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -4670,12 +4677,13 @@ class DashboardWindow(QWidget):
         )
         self.control_service_labels["version"].setText(self.control_value(health.get("data") or {}, "version"))
         self.control_service_labels["uptime"].setText(self.control_value(health.get("data") or {}, "uptime"))
+        last_restart = self.control_value(
+            health.get("data") or {},
+            "last_restart",
+            default=self.control_value(operation.get("data") or {}, "last_restart", default="Not reported"),
+        )
         self.control_service_labels["last_restart"].setText(
-            self.control_value(
-                health.get("data") or {},
-                "last_restart",
-                default=self.control_value(operation.get("data") or {}, "last_restart", default="Not reported"),
-            )
+            self.db.format_timestamp(last_restart) if last_restart != "Not reported" else last_restart
         )
 
     def load_control_devices(self):
@@ -4878,10 +4886,10 @@ class DashboardWindow(QWidget):
         self.backup_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             values = [
-                self.db.format_timestamp(row.get("created_at")),
+                row.get("created_at_readable") or self.db.format_timestamp(row.get("created_at")),
                 row.get("name") or "",
                 self.file_size_text(row.get("size_bytes")),
-                row.get("type") or "local",
+                row.get("scope") or ("Pi recovery bundle" if "recovery-bundle" in str(row.get("name") or "") else row.get("type") or "local"),
                 row.get("status") or "",
             ]
             for c, value in enumerate(values):
@@ -4889,7 +4897,12 @@ class DashboardWindow(QWidget):
                 if c == 1:
                     item.setData(Qt.ItemDataRole.UserRole, row.get("path"))
                 self.backup_table.setItem(r, c, item)
-        drive_text = "Google Drive ready" if drive.get("configured") and drive.get("rclone_available") else "Google Drive not configured yet"
+        if drive.get("configured") and drive.get("rclone_available"):
+            drive_text = f"Google Drive ready: {drive.get('target') or 'saved target'}"
+        elif drive.get("configured"):
+            drive_text = "Google Drive target saved, but rclone is missing on the Pi"
+        else:
+            drive_text = "Google Drive target not set in Settings > Integrations"
         self.backup_status.setText(f"{len(rows)} local backup(s). {drive_text}.")
         self.backup_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;" if rows else "font-size: 12px; color: #b45309; font-weight: 800;")
 
@@ -4902,11 +4915,15 @@ class DashboardWindow(QWidget):
             result = self.control_client(timeout=620.0).create_backup(self.current_user.get("username") or "itadmin", True)
             if result.get("ok"):
                 data = result.get("data") or {}
-                upload = (data.get("backup") or {}).get("upload") or {}
-                message = upload.get("reason") or "Backup created and Google Drive upload attempted."
-                self.backup_status.setText(message)
-                self.backup_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+                backup = data.get("backup") or {}
+                upload = backup.get("upload") or {}
+                message = upload.get("reason") or "Recovery bundle created locally and Google Drive upload was attempted."
+                if backup.get("warnings"):
+                    message = f"{message} Some protected service files were skipped; see backup warnings."
+                upload_ok = bool(upload.get("ok", True))
                 self.load_control_backups()
+                self.backup_status.setText(message)
+                self.backup_status.setStyleSheet(f"font-size: 12px; color: {'#047857' if upload_ok else '#b45309'}; font-weight: 800;")
             else:
                 self.show_error("Backup", result.get("error") or "Backup failed.")
         finally:
@@ -6010,16 +6027,25 @@ class DashboardWindow(QWidget):
         drive_panel, drive_layout = make_card(
             integrations_tab,
             "Google Drive Backups",
-            "Backups are created locally first. Drive upload uses an rclone target such as whisperwooddrive:Backups/Whisperwood."
+            "Backups are recovery bundles. The Pi saves the bundle locally first, then rclone can copy it to Google Drive."
         )
+
+        drive_help = QLabel(
+            "Use the rclone target as the real upload destination, for example whisperwooddrive:Backups/Whisperwood. "
+            "The Google Drive folder link is only a human note so IT staff know which Drive folder the target points to.",
+            drive_panel,
+        )
+        drive_help.setWordWrap(True)
+        plain_label(drive_help, "font-size: 12px; color: #64748b; font-weight: 700")
+        drive_layout.addWidget(drive_help)
 
         drive_row_1 = QHBoxLayout()
         gdrive_target = QLineEdit(drive_panel)
-        gdrive_target.setPlaceholderText("rclone target, for example whisperwooddrive:Backups/Whisperwood")
+        gdrive_target.setPlaceholderText("Required for Drive upload: whisperwooddrive:Backups/Whisperwood")
         gdrive_target.setStyleSheet(self.input_style())
         drive_row_1.addWidget(gdrive_target, 2)
         gdrive_folder_link = QLineEdit(drive_panel)
-        gdrive_folder_link.setPlaceholderText("Google Drive folder link / note")
+        gdrive_folder_link.setPlaceholderText("Optional note: Google Drive folder link")
         gdrive_folder_link.setStyleSheet(self.input_style())
         drive_row_1.addWidget(gdrive_folder_link, 1)
         drive_layout.addLayout(drive_row_1)
@@ -6104,9 +6130,13 @@ class DashboardWindow(QWidget):
                 gdrive_folder_link.setText(data.get("gdrive_folder_link") or "")
                 gdrive_service_account_path.setText(data.get("gdrive_service_account_path") or "")
                 email_state = "SMTP ready" if data.get("email_configured") else "SMTP not ready"
-                drive_state = "Drive target ready" if data.get("google_drive_configured") else "Drive target not set"
-                rclone_state = "rclone installed" if data.get("rclone_available") else "rclone missing on Pi"
-                set_integration_status(f"{email_state}. {drive_state}. {rclone_state}.", "ok" if data.get("email_configured") else "pending")
+                if data.get("google_drive_configured") and data.get("rclone_available"):
+                    drive_state = "Google Drive upload ready"
+                elif data.get("google_drive_configured"):
+                    drive_state = "Drive target saved, but rclone is missing on the Pi"
+                else:
+                    drive_state = "Drive target not set; backups will stay local"
+                set_integration_status(f"{email_state}. {drive_state}.", "ok" if data.get("email_configured") and data.get("google_drive_configured") and data.get("rclone_available") else "pending")
             else:
                 set_integration_status(result.get("error") or "Could not load integration settings.", "error")
             battery_settings = self.load_battery_alert_settings(quiet=True, timeout=4.0)
@@ -6138,7 +6168,12 @@ class DashboardWindow(QWidget):
                 self.apply_battery_alert_settings_to_ui()
 
             email_state = "SMTP ready" if data.get("email_configured") else "SMTP saved but not complete"
-            drive_state = "Google Drive target saved" if data.get("google_drive_configured") else "Google Drive target not set"
+            if data.get("google_drive_configured") and data.get("rclone_available"):
+                drive_state = "Google Drive upload ready"
+            elif data.get("google_drive_configured"):
+                drive_state = "Drive target saved; install/configure rclone on the Pi before cloud uploads will work"
+            else:
+                drive_state = "Google Drive target not set; backups will stay local"
             set_integration_status(f"{email_state}. {drive_state}.", "ok" if data.get("email_configured") else "pending")
             if show_popup:
                 self.show_info("Settings Saved", "Email and backup integration settings were saved to the Raspberry Pi.")

@@ -46,6 +46,14 @@ def _readable_timezone_label(dt: datetime) -> str:
     return LOCAL_TIMEZONE_LABEL
 
 
+def _ordinal_day(day: int) -> str:
+    if 10 <= day % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
 def _clean_iso_value(value: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -118,9 +126,9 @@ def format_readable_datetime(value: Any, fallback: str = "") -> str:
     hour = dt.strftime("%I").lstrip("0") or "12"
     minute = dt.strftime("%M")
     am_pm = dt.strftime("%p")
-    date_part = f"{dt.strftime('%a')}, {dt.strftime('%b')} {dt.day}, {dt.year}"
+    date_part = f"{dt.strftime('%A')}, {_ordinal_day(dt.day)} {dt.strftime('%B')} {dt.year}"
     time_part = f"{hour}:{minute} {am_pm}"
-    return f"{date_part} {time_part} {tz_label}".strip()
+    return f"{date_part}, {time_part} {tz_label}".strip()
 
 
 def format_local_now() -> str:
