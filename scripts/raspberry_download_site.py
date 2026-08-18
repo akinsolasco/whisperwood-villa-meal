@@ -32,6 +32,7 @@ from typing import Optional
 
 DEFAULT_REPO = "akinsolasco/whisperwood-villa-meal"
 DEFAULT_ASSET = "WhisperwoodVillaSetup.exe"
+DEFAULT_TAG_PREFIX = "v"
 DEFAULT_PORT = 8090
 DEFAULT_ROOT = Path.home() / "whisperwood_download_site"
 DEFAULT_SLUG = "download"
@@ -76,8 +77,51 @@ def request_json(url: str, timeout: float) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def latest_release_asset(repo: str, preferred_asset: str, timeout: float) -> ReleaseAsset:
-    data = request_json(f"https://api.github.com/repos/{repo}/releases/latest", timeout)
+def release_version_key(tag_name: str, tag_prefix: str) -> tuple[int, ...]:
+    tag = str(tag_name or "").strip()
+    prefix = str(tag_prefix or "").strip()
+    if prefix and tag.lower().startswith(prefix.lower()):
+        tag = tag[len(prefix):]
+    elif tag.lower().startswith("v"):
+        tag = tag[1:]
+    parts = []
+    for chunk in tag.replace("-", ".").split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            break
+    return tuple(parts or [0])
+
+
+def release_matches_prefix(release: dict, tag_prefix: str) -> bool:
+    prefix = str(tag_prefix or "").strip()
+    if not prefix:
+        return True
+    return str(release.get("tag_name") or "").lower().startswith(prefix.lower())
+
+
+def newest_release(repo: str, preferred_asset: str, timeout: float, tag_prefix: str) -> dict:
+    if not tag_prefix:
+        data = request_json(f"https://api.github.com/repos/{repo}/releases/latest", timeout)
+        return data if isinstance(data, dict) else {}
+    data = request_json(f"https://api.github.com/repos/{repo}/releases?per_page=100", timeout)
+    releases = data if isinstance(data, list) else []
+    matches = []
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft"):
+            continue
+        if not release_matches_prefix(release, tag_prefix):
+            continue
+        assets = release.get("assets") or []
+        if any(item.get("name") == preferred_asset for item in assets):
+            matches.append(release)
+    if not matches:
+        raise RuntimeError(f"No release found with tag prefix '{tag_prefix}' and asset '{preferred_asset}'")
+    return max(matches, key=lambda item: release_version_key(item.get("tag_name") or "", tag_prefix))
+
+
+def latest_release_asset(repo: str, preferred_asset: str, timeout: float, tag_prefix: str = DEFAULT_TAG_PREFIX) -> ReleaseAsset:
+    data = newest_release(repo, preferred_asset, timeout, tag_prefix)
     assets = data.get("assets") or []
     asset = next((item for item in assets if item.get("name") == preferred_asset), None)
     if asset is None:
@@ -127,10 +171,10 @@ def write_metadata(path: Path, release: ReleaseAsset, installer_path: Path) -> N
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def cache_latest_installer(root: Path, repo: str, asset_name: str, timeout: float) -> tuple[dict, Path]:
+def cache_latest_installer(root: Path, repo: str, asset_name: str, timeout: float, tag_prefix: str) -> tuple[dict, Path]:
     cache_dir = root / "cache"
     metadata_path = root / "installer.json"
-    release = latest_release_asset(repo, asset_name, timeout)
+    release = latest_release_asset(repo, asset_name, timeout, tag_prefix)
     installer_path = cache_dir / release.asset_name
     existing = read_metadata(metadata_path)
     cached_size = installer_path.stat().st_size if installer_path.exists() else -1
@@ -154,10 +198,10 @@ def cache_latest_installer(root: Path, repo: str, asset_name: str, timeout: floa
     return read_metadata(metadata_path), installer_path
 
 
-def cache_or_fallback(root: Path, repo: str, asset_name: str, timeout: float) -> tuple[dict, Path]:
+def cache_or_fallback(root: Path, repo: str, asset_name: str, timeout: float, tag_prefix: str) -> tuple[dict, Path]:
     metadata_path = root / "installer.json"
     try:
-        return cache_latest_installer(root, repo, asset_name, timeout)
+        return cache_latest_installer(root, repo, asset_name, timeout, tag_prefix)
     except Exception as exc:
         metadata = read_metadata(metadata_path)
         cached_path = Path(metadata.get("cached_path") or root / "cache" / asset_name)
@@ -537,7 +581,7 @@ class DownloadHandler(SimpleHTTPRequestHandler):
 
 
 def rebuild(args: argparse.Namespace, site_path: str, scheme: str, public_host: str, logo_path: Optional[Path]) -> tuple[str, str]:
-    metadata, installer_path = cache_or_fallback(args.root, args.repo, args.asset, args.timeout)
+    metadata, installer_path = cache_or_fallback(args.root, args.repo, args.asset, args.timeout, args.tag_prefix)
     _, page_url, direct_url = build_static_site(
         args.root,
         site_path,
@@ -575,6 +619,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the latest Whisperwood desktop installer on the local network.")
     parser.add_argument("--repo", default=DEFAULT_REPO, help=f"GitHub repo, default: {DEFAULT_REPO}")
     parser.add_argument("--asset", default=DEFAULT_ASSET, help=f"Release asset name, default: {DEFAULT_ASSET}")
+    parser.add_argument("--tag-prefix", default=DEFAULT_TAG_PREFIX, help=f"Release tag prefix to follow, default: {DEFAULT_TAG_PREFIX}")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help=f"Storage folder, default: {DEFAULT_ROOT}")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address, default: 0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"HTTP port, default: {DEFAULT_PORT}")
