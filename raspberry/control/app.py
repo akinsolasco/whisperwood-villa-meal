@@ -11,9 +11,9 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-import configparser, hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time
+import configparser, hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time, threading
 
-APP_VERSION = "0.6.7"
+APP_VERSION = "0.6.8"
 LOCAL_TIMEZONE_NAME = os.getenv("WHISPERWOOD_TIMEZONE", "America/Halifax")
 LOCAL_TIMEZONE_LABEL = os.getenv("WHISPERWOOD_TIMEZONE_LABEL", "Atlantic Time")
 
@@ -123,6 +123,21 @@ DEFAULT_INTEGRATION_SETTINGS = {
     "gdrive_folder_link": "",
     "gdrive_service_account_path": "",
 }
+DEFAULT_BACKUP_AUTOMATION_SETTINGS = {
+    "enabled": False,
+    "frequency": "daily",
+    "run_time": "02:00",
+    "weekday": 0,
+    "upload_to_drive": True,
+    "updated_by": "system",
+    "updated_at": "",
+    "last_attempt_at": "",
+    "last_attempt_readable": "",
+    "last_status": "not run",
+    "last_message": "Automatic backups are off.",
+}
+BACKUP_AUTOMATION_LOCK = threading.Lock()
+BACKUP_AUTOMATION_THREAD_STARTED = False
 
 def require_key(x_whisperwood_key: str | None):
     if not CONTROL_API_KEY:
@@ -493,6 +508,79 @@ def save_system_setting(key: str, value: Any) -> None:
     """, {"key": key, "value_json": payload, "updated_at": now()})
 
 
+def normalize_run_time(value: str) -> str:
+    raw = str(value or "").strip()
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        hour = max(0, min(23, int(hour_text)))
+        minute = max(0, min(59, int(minute_text[:2])))
+        return f"{hour:02d}:{minute:02d}"
+    except Exception:
+        return "02:00"
+
+
+def normalize_backup_automation_settings(raw: Any = None) -> dict[str, Any]:
+    data = dict(DEFAULT_BACKUP_AUTOMATION_SETTINGS)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    if isinstance(raw, dict):
+        data.update(raw)
+    data["enabled"] = bool(data.get("enabled", False))
+    frequency = str(data.get("frequency") or "daily").strip().lower()
+    data["frequency"] = frequency if frequency in {"daily", "weekly"} else "daily"
+    data["run_time"] = normalize_run_time(data.get("run_time") or data.get("time") or "02:00")
+    try:
+        data["weekday"] = max(0, min(6, int(data.get("weekday") or 0)))
+    except Exception:
+        data["weekday"] = 0
+    data["upload_to_drive"] = bool(data.get("upload_to_drive", True))
+    for key in ("updated_by", "updated_at", "last_attempt_at", "last_attempt_readable", "last_status", "last_message"):
+        data[key] = str(data.get(key) or "").strip()
+    if not data["last_status"]:
+        data["last_status"] = "not run"
+    if not data["last_message"]:
+        data["last_message"] = "Automatic backups are off." if not data["enabled"] else "Automatic backups are waiting for the next scheduled run."
+    return data
+
+
+def get_backup_automation_settings() -> dict[str, Any]:
+    return normalize_backup_automation_settings(get_system_setting("backup_automation_settings", DEFAULT_BACKUP_AUTOMATION_SETTINGS))
+
+
+def backup_automation_due(settings: dict[str, Any], current: Optional[datetime] = None) -> bool:
+    if not settings.get("enabled"):
+        return False
+    current = current or local_now()
+    hour, minute = [int(part) for part in normalize_run_time(settings.get("run_time")).split(":")]
+    scheduled = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if current < scheduled:
+        return False
+    if settings.get("frequency") == "weekly" and current.weekday() != int(settings.get("weekday", 0)):
+        return False
+    last_raw = settings.get("last_attempt_at") or ""
+    if not last_raw:
+        return True
+    try:
+        last = datetime.fromisoformat(last_raw)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=LOCAL_TZ)
+        last = last.astimezone(LOCAL_TZ)
+    except Exception:
+        return True
+    if settings.get("frequency") == "weekly":
+        return (last.isocalendar().year, last.isocalendar().week) != (current.isocalendar().year, current.isocalendar().week)
+    return last.date() != current.date()
+
+
+def save_backup_automation_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_backup_automation_settings(settings)
+    save_system_setting("backup_automation_settings", normalized)
+    return normalized
+
+
 def smtp_configured(settings: Any = None) -> bool:
     cfg = normalize_integration_settings(settings if settings is not None else get_integration_settings())
     return bool(cfg.get("smtp_host") and cfg.get("smtp_from_email") and (cfg.get("smtp_username") or not cfg.get("smtp_password")))
@@ -805,6 +893,80 @@ def create_backup_archive(created_by: str = "system", upload_to_drive: bool = Tr
     return {"ok": True, "backup": info}
 
 
+def run_scheduled_backup_if_due() -> dict[str, Any]:
+    if not BACKUP_AUTOMATION_LOCK.acquire(blocking=False):
+        return {"ok": True, "ran": False, "message": "Automatic backup already running"}
+    try:
+        settings = get_backup_automation_settings()
+        if not backup_automation_due(settings):
+            return {"ok": True, "ran": False, "settings": settings}
+
+        attempt_at = now()
+        attempt_readable = readable_now()
+        settings["last_attempt_at"] = attempt_at
+        settings["last_attempt_readable"] = attempt_readable
+        settings["last_status"] = "running"
+        settings["last_message"] = f"Automatic backup started at {attempt_readable}."
+        save_backup_automation_settings(settings)
+
+        try:
+            result = create_backup_archive("automatic backup", upload_to_drive=bool(settings.get("upload_to_drive", True)))
+            backup = result.get("backup") or {}
+            upload = backup.get("upload") or {}
+            upload_ok = bool(upload.get("ok", True))
+            settings["last_status"] = "success" if upload_ok else "warning"
+            settings["last_message"] = upload.get("reason") or f"Automatic recovery bundle created: {backup.get('name') or 'backup'}"
+            save_backup_automation_settings(settings)
+            return {"ok": True, "ran": True, "backup": backup, "settings": settings}
+        except Exception as exc:
+            settings["last_status"] = "failed"
+            settings["last_message"] = f"Automatic backup failed: {exc}"
+            save_backup_automation_settings(settings)
+            log_action(
+                "system",
+                "backup_auto",
+                "automatic",
+                "failed",
+                settings["last_message"],
+                payload=settings,
+                response={"error": str(exc)},
+            )
+            return {"ok": False, "ran": True, "error": str(exc), "settings": settings}
+    finally:
+        BACKUP_AUTOMATION_LOCK.release()
+
+
+def backup_automation_loop() -> None:
+    while True:
+        try:
+            run_scheduled_backup_if_due()
+        except Exception as exc:
+            try:
+                log_action("system", "backup_auto", "scheduler", "failed", f"Automatic backup scheduler error: {exc}")
+            except Exception:
+                pass
+        time.sleep(60)
+
+
+@app.on_event("startup")
+def start_backup_automation() -> None:
+    global BACKUP_AUTOMATION_THREAD_STARTED
+    if BACKUP_AUTOMATION_THREAD_STARTED:
+        return
+    BACKUP_AUTOMATION_THREAD_STARTED = True
+    thread = threading.Thread(target=backup_automation_loop, name="backup-automation", daemon=True)
+    thread.start()
+
+
+def safe_extract_backup(tar: tarfile.TarFile, target: Path) -> None:
+    root = target.resolve()
+    for member in tar.getmembers():
+        member_path = (target / member.name).resolve()
+        if root not in [member_path, *member_path.parents]:
+            raise HTTPException(status_code=400, detail="Backup archive contains an unsafe file path")
+    tar.extractall(target)
+
+
 def restore_backup_archive(path_text: str, confirm_text: str, restored_by: str = "system") -> dict[str, Any]:
     if confirm_text != "RESTORE WHISPERWOOD BACKUP":
         raise HTTPException(status_code=400, detail="Restore confirmation text did not match")
@@ -815,7 +977,7 @@ def restore_backup_archive(path_text: str, confirm_text: str, restored_by: str =
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         with tarfile.open(archive_path, "r:gz") as tar:
-            tar.extractall(tmp_path)
+            safe_extract_backup(tar, tmp_path)
         dump_path = tmp_path / "control_database.dump"
         pg_restore = shutil.which("pg_restore")
         if dump_path.exists() and pg_restore and DATABASE_URL:
@@ -1469,6 +1631,15 @@ class BackupRestorePayload(BaseModel):
     path: str
     confirm_text: str
     restored_by: Optional[str] = "system"
+
+
+class BackupAutomationSettingsPayload(BaseModel):
+    enabled: bool = False
+    frequency: str = "daily"
+    run_time: str = "02:00"
+    weekday: int = 0
+    upload_to_drive: bool = True
+    updated_by: Optional[str] = "system"
 
 
 def resident_sql_values(payload: ResidentPayload, resident_id: int | None = None):
@@ -2542,21 +2713,77 @@ def firmware_release(release_id: int, payload: FirmwareReleasePayload, x_whisper
 def backups(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     integrations = public_integration_settings()
+    automation = get_backup_automation_settings()
     return {
         "ok": True,
         "backup_scope": "Pi recovery bundle",
         "backup_explanation": "Create Backup saves a local recovery bundle first, then uploads that same file to Google Drive when an rclone target is configured.",
         "restore_explanation": "Use this bundle after preparing a replacement Raspberry Pi. It restores the Whisperwood database, resident documents/images, LCD schedule/cache data, firmware files, and service configuration. It is not a bootable SD-card image.",
         "backups": list_local_backups(),
+        "automation": automation,
         "google_drive": {
             "configured": bool(integrations.get("gdrive_backup_target")),
             "target": integrations.get("gdrive_backup_target") or "",
             "folder_link": integrations.get("gdrive_folder_link") or "",
             "service_account_path": integrations.get("gdrive_service_account_path") or "",
             "rclone_available": bool(integrations.get("rclone_available")),
-            "how_it_works": "Set up rclone on the Pi, then enter a target like whisperwooddrive:Backups/Whisperwood. The folder link field is only a note for staff; rclone target controls the upload.",
+            "rclone_remote_configured": bool(integrations.get("rclone_remote_configured")),
+            "oauth_token_configured": bool(integrations.get("gdrive_oauth_token_configured")),
+            "google_drive_ready": bool(integrations.get("google_drive_ready")),
+            "how_it_works": "Set up Google authorization with an OAuth token JSON or service-account JSON path, then enter a target like whisperwooddrive:Backups/Whisperwood. The folder link field is only a note for staff; rclone target controls the upload.",
         },
     }
+
+
+@app.get("/backup-settings")
+def backup_settings(x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    settings = get_backup_automation_settings()
+    return {
+        "ok": True,
+        "settings": settings,
+        "server_time": now(),
+        "server_time_readable": readable_now(),
+        "timezone": LOCAL_TIMEZONE_NAME,
+        "timezone_label": LOCAL_TIMEZONE_LABEL,
+    }
+
+
+@app.post("/backup-settings")
+@app.put("/backup-settings")
+def save_backup_settings(payload: BackupAutomationSettingsPayload, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    current = get_backup_automation_settings()
+    incoming = payload.dict()
+    current.update(incoming)
+    current["updated_by"] = payload.updated_by or "system"
+    current["updated_at"] = now()
+    if not current.get("enabled"):
+        current["last_message"] = "Automatic backups are off."
+    settings = save_backup_automation_settings(current)
+    log_action(
+        payload.updated_by or "system",
+        "backup_settings",
+        "automatic",
+        "success",
+        "Automatic backup settings updated",
+        payload=settings,
+        response={"ok": True},
+    )
+    return {
+        "ok": True,
+        "settings": settings,
+        "server_time": now(),
+        "server_time_readable": readable_now(),
+        "timezone": LOCAL_TIMEZONE_NAME,
+        "timezone_label": LOCAL_TIMEZONE_LABEL,
+    }
+
+
+@app.post("/backup-settings/run-due")
+def run_due_backup_settings(x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    return run_scheduled_backup_if_due()
 
 
 @app.post("/backups")

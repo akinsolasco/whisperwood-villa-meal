@@ -200,6 +200,18 @@ class UpdaterService:
         if pending:
             self.clear_update_state()
 
+        try:
+            from core.app_settings import AppSettingsStore
+            if not AppSettingsStore().auto_update_enabled():
+                return {
+                    "enabled": False,
+                    "has_update": False,
+                    "latest_version": APP_VERSION,
+                    "message": "Automatic app updates are disabled in IT Admin Settings",
+                }
+        except Exception:
+            pass
+
         candidates = []
         errors = []
         try:

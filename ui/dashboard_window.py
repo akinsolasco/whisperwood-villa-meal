@@ -2473,8 +2473,55 @@ class DashboardWindow(QWidget):
         self.backup_status.setWordWrap(True)
         self.backup_status.setStyleSheet("font-size: 12px; color: #b45309; font-weight: 800;")
 
+        auto_panel = QFrame(page)
+        auto_panel.setGeometry(0, 200, 955, 116)
+        self.apply_frame_style(auto_panel, self.card_style())
+        auto_title = QLabel("Automatic Recovery Backup", auto_panel)
+        auto_title.setGeometry(18, 12, 250, 22)
+        auto_title.setStyleSheet("font-size: 14px; font-weight: 900; color: #0f172a;")
+        auto_note = QLabel("The Pi creates the local recovery bundle first, then uploads to Google Drive when Drive is ready.", auto_panel)
+        auto_note.setGeometry(18, 38, 430, 36)
+        auto_note.setWordWrap(True)
+        auto_note.setStyleSheet("font-size: 11px; color: #64748b; font-weight: 700;")
+
+        self.chk_auto_backup_enabled = QCheckBox("Enabled", auto_panel)
+        self.chk_auto_backup_enabled.setGeometry(470, 14, 100, 28)
+        self.chk_auto_backup_enabled.setStyleSheet(self.checkbox_style())
+
+        self.cmb_auto_backup_frequency = QComboBox(auto_panel)
+        self.cmb_auto_backup_frequency.setGeometry(570, 12, 112, 36)
+        self.cmb_auto_backup_frequency.addItem("Daily", "daily")
+        self.cmb_auto_backup_frequency.addItem("Weekly", "weekly")
+        self.cmb_auto_backup_frequency.setStyleSheet(self.input_style())
+
+        self.time_auto_backup = QTimeEdit(auto_panel)
+        self.time_auto_backup.setGeometry(694, 12, 96, 36)
+        self.time_auto_backup.setDisplayFormat("HH:mm")
+        self.time_auto_backup.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.time_auto_backup.setStyleSheet(self.input_style())
+
+        self.cmb_auto_backup_weekday = QComboBox(auto_panel)
+        self.cmb_auto_backup_weekday.setGeometry(802, 12, 134, 36)
+        for index, day in enumerate(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]):
+            self.cmb_auto_backup_weekday.addItem(day, index)
+        self.cmb_auto_backup_weekday.setStyleSheet(self.input_style())
+
+        self.chk_auto_backup_drive = QCheckBox("Upload to Google Drive", auto_panel)
+        self.chk_auto_backup_drive.setGeometry(470, 56, 180, 28)
+        self.chk_auto_backup_drive.setStyleSheet(self.checkbox_style())
+
+        self.btn_save_backup_settings = QPushButton("Save Auto Backup", auto_panel)
+        self.btn_save_backup_settings.setGeometry(668, 54, 160, 34)
+        self.btn_save_backup_settings.setStyleSheet(self.primary_btn_style())
+        self.btn_save_backup_settings.clicked.connect(self.save_control_backup_settings)
+
+        self.backup_auto_status = QLabel("Automatic backup setting has not loaded yet.", auto_panel)
+        self.backup_auto_status.setGeometry(18, 82, 918, 24)
+        self.backup_auto_status.setWordWrap(True)
+        self.backup_auto_status.setStyleSheet("font-size: 10px; color: #64748b; font-weight: 800;")
+
         self.backup_table = QTableWidget(page)
-        self.backup_table.setGeometry(0, 212, 955, 385)
+        self.backup_table.setGeometry(0, 338, 955, 265)
         self.backup_table.setColumnCount(5)
         self.backup_table.setHorizontalHeaderLabels(["Created", "Bundle", "Size", "Scope", "Status"])
         self.backup_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -4871,6 +4918,74 @@ class DashboardWindow(QWidget):
         item = self.backup_table.item(row, 1)
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
+    def set_backup_auto_status(self, message, state="info"):
+        if not hasattr(self, "backup_auto_status"):
+            return
+        colors = {"ok": "#047857", "error": "#b91c1c", "pending": "#b45309", "info": "#64748b"}
+        self.backup_auto_status.setText(message)
+        self.backup_auto_status.setStyleSheet(f"font-size: 10px; color: {colors.get(state, '#64748b')}; font-weight: 800;")
+
+    def apply_backup_settings_to_ui(self, settings):
+        if not hasattr(self, "chk_auto_backup_enabled"):
+            return
+        settings = settings or {}
+        self.chk_auto_backup_enabled.setChecked(bool(settings.get("enabled", False)))
+        frequency = settings.get("frequency") or "daily"
+        index = self.cmb_auto_backup_frequency.findData(frequency)
+        self.cmb_auto_backup_frequency.setCurrentIndex(index if index >= 0 else 0)
+        run_time = str(settings.get("run_time") or "02:00")
+        parsed = QTime.fromString(run_time, "HH:mm")
+        self.time_auto_backup.setTime(parsed if parsed.isValid() else QTime(2, 0))
+        try:
+            weekday = int(settings.get("weekday") or 0)
+        except Exception:
+            weekday = 0
+        day_index = self.cmb_auto_backup_weekday.findData(max(0, min(6, weekday)))
+        self.cmb_auto_backup_weekday.setCurrentIndex(day_index if day_index >= 0 else 0)
+        self.chk_auto_backup_drive.setChecked(bool(settings.get("upload_to_drive", True)))
+        status = settings.get("last_status") or "not run"
+        message = settings.get("last_message") or ("Automatic backups are on." if settings.get("enabled") else "Automatic backups are off.")
+        state = "ok" if status == "success" else ("error" if status == "failed" else "pending" if settings.get("enabled") else "info")
+        self.set_backup_auto_status(message, state)
+
+    def load_control_backup_settings(self):
+        if not hasattr(self, "chk_auto_backup_enabled"):
+            return
+        result = self.control_client(timeout=6.0).get_backup_settings()
+        if result.get("ok"):
+            data = result.get("data") or {}
+            self.apply_backup_settings_to_ui(data.get("settings") or {})
+        else:
+            self.set_backup_auto_status(result.get("error") or "Could not load automatic backup settings.", "error")
+
+    def save_control_backup_settings(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can change backup settings.")
+            return
+        payload = {
+            "enabled": self.chk_auto_backup_enabled.isChecked(),
+            "frequency": self.cmb_auto_backup_frequency.currentData() or "daily",
+            "run_time": self.time_auto_backup.time().toString("HH:mm"),
+            "weekday": self.cmb_auto_backup_weekday.currentData() or 0,
+            "upload_to_drive": self.chk_auto_backup_drive.isChecked(),
+            "updated_by": self.current_user.get("username") or "itadmin",
+        }
+        busy = self.begin_button_busy(getattr(self, "btn_save_backup_settings", None), "Saving...")
+        try:
+            result = self.control_client(timeout=8.0).save_backup_settings(payload)
+            if result.get("ok"):
+                data = result.get("data") or {}
+                self.apply_backup_settings_to_ui(data.get("settings") or {})
+                time_text = data.get("server_time_readable") or ""
+                suffix = f" Server time: {time_text}" if time_text else ""
+                self.backup_status.setText(f"Automatic recovery backup settings saved.{suffix}")
+                self.backup_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+            else:
+                self.set_backup_auto_status(result.get("error") or "Automatic backup settings could not be saved.", "error")
+                self.show_error("Automatic Backup", result.get("error") or "Automatic backup settings could not be saved.")
+        finally:
+            self.end_button_busy(busy)
+
     def load_control_backups(self):
         if not hasattr(self, "backup_table"):
             return
@@ -4883,6 +4998,7 @@ class DashboardWindow(QWidget):
         data = result.get("data") or {}
         rows = data.get("backups") or []
         drive = data.get("google_drive") or {}
+        self.apply_backup_settings_to_ui(data.get("automation") or {})
         self.backup_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             values = [
@@ -4897,8 +5013,10 @@ class DashboardWindow(QWidget):
                 if c == 1:
                     item.setData(Qt.ItemDataRole.UserRole, row.get("path"))
                 self.backup_table.setItem(r, c, item)
-        if drive.get("configured") and drive.get("rclone_available"):
+        if drive.get("google_drive_ready") or (drive.get("configured") and drive.get("rclone_available") and drive.get("rclone_remote_configured")):
             drive_text = f"Google Drive ready: {drive.get('target') or 'saved target'}"
+        elif drive.get("configured") and drive.get("rclone_available"):
+            drive_text = "Google Drive target saved, but Google authorization is not complete"
         elif drive.get("configured"):
             drive_text = "Google Drive target saved, but rclone is missing on the Pi"
         else:
@@ -5801,6 +5919,36 @@ class DashboardWindow(QWidget):
         password_actions.addStretch(1)
         account_card_layout.addLayout(password_actions)
         account_layout.addWidget(account_card)
+
+        update_card, update_card_layout = make_card(
+            account_tab,
+            "Desktop App Updates",
+            "When enabled, the splash screen checks the release source and applies a newer installer silently before login."
+        )
+        update_row = QHBoxLayout()
+        auto_update_enabled = QCheckBox("Automatically install approved desktop updates", update_card)
+        auto_update_enabled.setStyleSheet(self.checkbox_style())
+        auto_update_enabled.setChecked(self.settings.auto_update_enabled())
+        update_row.addWidget(auto_update_enabled, 1)
+        save_update_preference_btn = QPushButton("Save Update Setting", update_card)
+        save_update_preference_btn.setStyleSheet(self.primary_btn_style())
+        compact_button(save_update_preference_btn, 190)
+        update_row.addWidget(save_update_preference_btn)
+        update_card_layout.addLayout(update_row)
+
+        update_status = QLabel("Automatic updates are checked before the login page opens.", update_card)
+        update_status.setWordWrap(True)
+        plain_label(update_status, "font-size: 12px; color: #64748b; font-weight: 700")
+        update_card_layout.addWidget(update_status)
+
+        def save_update_preference():
+            self.settings.set_auto_update_enabled(auto_update_enabled.isChecked())
+            state = "enabled" if auto_update_enabled.isChecked() else "disabled"
+            update_status.setText(f"Automatic desktop updates are now {state} on this computer.")
+            plain_label(update_status, "font-size: 12px; color: #047857; font-weight: 800")
+
+        save_update_preference_btn.clicked.connect(save_update_preference)
+        account_layout.addWidget(update_card)
         account_layout.addStretch(1)
         tabs.addTab(account_tab, "Account Security")
 

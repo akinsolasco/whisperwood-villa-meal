@@ -114,6 +114,7 @@ class AppSettingsStore:
         profiles[0]["is_active"] = True
         return {
             "app_mode": APP_MODE_SERVER,
+            "auto_update_enabled": True,
             "active_profile_id": profiles[0]["id"],
             "profiles": profiles,
         }
@@ -152,6 +153,7 @@ class AppSettingsStore:
     def _normalize(self, settings: Dict) -> Dict:
         settings = settings or {}
         settings.setdefault("app_mode", APP_MODE_SERVER)
+        settings["auto_update_enabled"] = bool(settings.get("auto_update_enabled", True))
         if settings.get("app_mode") not in {APP_MODE_SERVER, APP_MODE_DEMO}:
             settings["app_mode"] = APP_MODE_SERVER
         profiles = settings.get("profiles") or self.default_settings()["profiles"]
@@ -200,6 +202,14 @@ class AppSettingsStore:
 
     def is_server_mode(self) -> bool:
         return self.get_mode() == APP_MODE_SERVER
+
+    def auto_update_enabled(self) -> bool:
+        return bool(self.load().get("auto_update_enabled", True))
+
+    def set_auto_update_enabled(self, enabled: bool):
+        settings = self.load()
+        settings["auto_update_enabled"] = bool(enabled)
+        self.save(settings)
 
     def list_profiles(self) -> List[Dict]:
         return [self._public_profile(p) for p in self.load().get("profiles", [])]

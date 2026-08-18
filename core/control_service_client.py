@@ -404,6 +404,16 @@ class ControlServiceClient:
     def get_backups(self) -> Dict[str, Any]:
         return self._request("GET", "/backups")
 
+    def get_backup_settings(self) -> Dict[str, Any]:
+        return self._request("GET", "/backup-settings")
+
+    def save_backup_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(settings or {})
+        primary = self._request("PUT", "/backup-settings", payload)
+        if primary.get("ok") or primary.get("status_code") not in {404, 405}:
+            return primary
+        return self._request("POST", "/backup-settings", payload)
+
     def create_backup(self, created_by: str = "system", upload_to_drive: bool = True) -> Dict[str, Any]:
         return self._request("POST", "/backups", {
             "created_by": created_by or "system",
