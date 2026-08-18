@@ -2554,7 +2554,10 @@ def backups(x_whisperwood_key: str | None = Header(default=None)):
             "folder_link": integrations.get("gdrive_folder_link") or "",
             "service_account_path": integrations.get("gdrive_service_account_path") or "",
             "rclone_available": bool(integrations.get("rclone_available")),
-            "how_it_works": "Set up rclone on the Pi, then enter a target like whisperwooddrive:Backups/Whisperwood. The folder link field is only a note for staff; rclone target controls the upload.",
+            "rclone_remote_configured": bool(integrations.get("rclone_remote_configured")),
+            "oauth_token_configured": bool(integrations.get("gdrive_oauth_token_configured")),
+            "google_drive_ready": bool(integrations.get("google_drive_ready")),
+            "how_it_works": "Set up Google authorization with an OAuth token JSON or service-account JSON path, then enter a target like whisperwooddrive:Backups/Whisperwood. The folder link field is only a note for staff; rclone target controls the upload.",
         },
     }
 

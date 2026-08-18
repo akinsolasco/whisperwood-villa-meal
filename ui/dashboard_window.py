@@ -4897,8 +4897,10 @@ class DashboardWindow(QWidget):
                 if c == 1:
                     item.setData(Qt.ItemDataRole.UserRole, row.get("path"))
                 self.backup_table.setItem(r, c, item)
-        if drive.get("configured") and drive.get("rclone_available"):
+        if drive.get("google_drive_ready") or (drive.get("configured") and drive.get("rclone_available") and drive.get("rclone_remote_configured")):
             drive_text = f"Google Drive ready: {drive.get('target') or 'saved target'}"
+        elif drive.get("configured") and drive.get("rclone_available"):
+            drive_text = "Google Drive target saved, but Google authorization is not complete"
         elif drive.get("configured"):
             drive_text = "Google Drive target saved, but rclone is missing on the Pi"
         else:
