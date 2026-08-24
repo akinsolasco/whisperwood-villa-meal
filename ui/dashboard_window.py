@@ -3513,9 +3513,11 @@ class DashboardWindow(QWidget):
 
     def result_error_message(self, result, fallback="The request could not be completed."):
         status_code = result.get("status_code") if isinstance(result, dict) else None
+        endpoint = result.get("endpoint") if isinstance(result, dict) else ""
         body = result.get("body") if isinstance(result, dict) else None
         message = fallback
         if isinstance(body, dict):
+            endpoint = endpoint or body.get("endpoint") or ""
             value = body.get("message") or body.get("error") or body.get("err") or body.get("detail")
             if isinstance(value, dict):
                 value = value.get("message") or value.get("error") or value.get("err") or value.get("line")
@@ -3523,7 +3525,7 @@ class DashboardWindow(QWidget):
                 message = str(value)
         elif body:
             message = str(body)
-        return friendly_error_message(message, status_code=status_code, data=body)
+        return friendly_error_message(message, endpoint=endpoint, status_code=status_code, data=body)
 
     def set_gateway_state(self, online: bool):
         self.gateway_online = bool(online)
@@ -3682,6 +3684,36 @@ class DashboardWindow(QWidget):
     def require_network_for_write(self, action_name: str) -> bool:
         if self.server_mode and self.control_service_online:
             return True
+        if self.server_mode:
+            profile = self.current_control_profile()
+            if not profile.get("host"):
+                self.show_error(
+                    "Control Service Required",
+                    f"{action_name} needs the Raspberry Pi Control Service. Ask IT to configure the Control Service host."
+                )
+                return False
+            if not profile.get("api_key"):
+                self.show_error(
+                    "Control Service Key Required",
+                    f"{action_name} needs the Raspberry Pi Control Service API key. Ask IT to verify the connection profile."
+                )
+                return False
+            live_result = self.control_client(timeout=4.0).operation_status()
+            self.control_last_results["operation"] = live_result
+            if live_result.get("ok"):
+                self.control_service_online = True
+                self.gateway_online = True
+                self.apply_write_lock()
+                return True
+            health = self.control_client(timeout=2.0).health()
+            self.control_last_results["health"] = health
+            self.set_control_gateway_state(live_result)
+            self.show_error(
+                "Control Service Check Failed",
+                f"{action_name} could not start. "
+                f"{friendly_error_message(live_result.get('error') or health.get('error') or 'Control Service Offline or Unreachable', endpoint=live_result.get('endpoint') or '', status_code=live_result.get('status_code'), data=live_result.get('data'))}"
+            )
+            return False
         if not self.server_mode and self.gateway_online:
             return True
         self.show_error(

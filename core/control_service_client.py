@@ -41,7 +41,15 @@ def friendly_error_message(
         return "The LCD photo is still uploading. Wait until it finishes, then send the e-paper text again."
     if status_code == 409 or "busy" in lowered:
         return "The device is busy finishing the previous request. Wait a few seconds, then try again."
-    if status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered:
+    if endpoint.startswith("/operation/send") and (status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered):
+        return "The selected smart label did not confirm the e-paper text update in time. Make sure the device is powered, online, and not restarting, then try again."
+    if endpoint.startswith("/operation/resident-display") and (status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered):
+        return "The selected smart label did not finish the resident display update in time. Wait a few seconds, confirm the device is online, then try again."
+    if endpoint.startswith("/operation/") and (status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered):
+        return "The Raspberry Pi Control Service is reachable, but the device operation did not complete in time. Check the selected display and try again."
+    if status_code in {502, 504}:
+        return "The Raspberry Pi Control Service is reachable, but a backend service did not complete the request in time. Ask IT to check the Pi services."
+    if "timeout" in lowered or "timed out" in lowered:
         return f"The Raspberry Pi server did not complete the request in time. {FACILITY_NETWORK_GUIDANCE}"
     if status_code and status_code >= 500:
         return "The Raspberry Pi server reported an internal service error. Ask IT to check the Control Service and Operation Manager logs."

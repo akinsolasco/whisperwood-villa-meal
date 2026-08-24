@@ -10,7 +10,7 @@ else:
 ASSETS_DIR = BASE_DIR / "assets"
 
 APP_NAME = "Enhanced Living Whisperwood"
-APP_VERSION = "2.1.15"
+APP_VERSION = "2.1.16"
 APP_CHANNEL = "main"
 RELEASE_TAG_PREFIX = "v"
 LATEST_ESP32_FIRMWARE_VERSION = "fw27"
