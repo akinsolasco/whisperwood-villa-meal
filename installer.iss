@@ -1,7 +1,7 @@
 [Setup]
 AppId={{C4B9F4F2-9F0D-4F86-9E55-DE05B91CF001}
 AppName=Whisperwood Villa Demo
-AppVersion=2.1.13
+AppVersion=2.1.14
 AppPublisher=Enhanced Living Whisperwood
 DefaultDirName={localappdata}\Programs\Whisperwood Villa Demo
 DefaultGroupName=Whisperwood Villa Demo

@@ -1738,6 +1738,34 @@ def unpair_device(payload: UnpairPayload, x_whisperwood_key: str | None = Header
     log_action("system", "unpair_device", payload.device_id, "success", "Device unpaired", payload=payload.dict(), response=old)
     return {"ok": True}
 
+@app.delete("/devices/{device_id}")
+def delete_device(device_id: str, deleted_by: str = "system", x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    device_id = (device_id or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    old = db_one("SELECT * FROM devices WHERE device_id=:d", {"d": device_id})
+    if not old:
+        raise HTTPException(status_code=404, detail="Device was not found in the saved registry")
+    schedule_count = db_one("SELECT COUNT(*) c FROM schedules WHERE device_id=:d", {"d": device_id}) or {"c": 0}
+    db_exec("DELETE FROM schedules WHERE device_id=:d", {"d": device_id})
+    db_exec("DELETE FROM devices WHERE device_id=:d", {"d": device_id})
+    log_action(
+        deleted_by or "system",
+        "delete_device",
+        device_id,
+        "success",
+        "Device removed from saved registry",
+        payload={"device_id": device_id},
+        response={"device": old, "device_schedules_removed": schedule_count.get("c", 0)},
+    )
+    return {
+        "ok": True,
+        "device_id": device_id,
+        "device_schedules_removed": schedule_count.get("c", 0),
+        "message": "Device removed from saved registry. Online devices will reappear automatically when they reconnect.",
+    }
+
 @app.get("/schedules")
 def schedules(x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)

@@ -17,7 +17,7 @@ def configure_windows_identity():
         return
     try:
         import ctypes
-        app_id = f"EnhancedLiving.Whisperwood.{APP_CHANNEL}.{APP_VERSION}"
+        app_id = f"EnhancedLiving.Whisperwood.{APP_CHANNEL}"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     except Exception:
         pass
@@ -29,7 +29,8 @@ def acquire_single_instance_lock():
         return True
     try:
         import ctypes
-        mutex_name = f"Local\\EnhancedLivingWhisperwood_{APP_CHANNEL}"
+        safe_channel = "".join(ch if ch.isalnum() else "_" for ch in APP_CHANNEL)
+        mutex_name = f"Local\\EnhancedLivingWhisperwood_{safe_channel}"
         _APP_MUTEX_HANDLE = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
         return ctypes.windll.kernel32.GetLastError() != 183
     except Exception:

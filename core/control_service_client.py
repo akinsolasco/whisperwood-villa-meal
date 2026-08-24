@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 import requests
 
@@ -261,6 +262,10 @@ class ControlServiceClient:
 
     def unpair_device(self, device_id: str) -> Dict[str, Any]:
         return self._request("POST", "/devices/unpair", {"device_id": device_id})
+
+    def delete_device(self, device_id: str, deleted_by: str = "itadmin") -> Dict[str, Any]:
+        safe_device_id = quote(str(device_id or "").strip(), safe="")
+        return self._request("DELETE", f"/devices/{safe_device_id}", params={"deleted_by": deleted_by or "itadmin"})
 
     def get_schedules(self) -> Dict[str, Any]:
         return self._request("GET", "/schedules")
