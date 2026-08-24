@@ -458,6 +458,17 @@ def handle_line(st: ConnState, line: str) -> None:
         st.battery_plugged = parse_bool(kv.get("battery_plugged"))
         st.battery_charging = parse_bool(kv.get("battery_charging"))
         st.battery_full = parse_bool(kv.get("battery_full"))
+        if st.battery_ok is False:
+            # Firmware can still report charger GPIO flags when the battery
+            # level source is unreadable. Do not surface contradictory states
+            # such as "unknown battery + low + full" or trigger low alerts.
+            st.battery_level = None
+            st.battery_mv = None
+            st.battery_voltage = None
+            st.battery_raw_percent = None
+            st.battery_low = False
+            st.battery_alert = False
+            st.battery_full = False
         st.heap = parse_int(kv.get("heap"), minimum=0)
         st.rssi = parse_int(kv.get("rssi"))
         st.uptime_ms = parse_int(kv.get("uptime_ms"), minimum=0)
@@ -789,6 +800,21 @@ def get_device_state(device_id: str) -> ConnState:
 def device_to_json(st: ConnState) -> Dict[str, Any]:
     age = max(0, int(time.time() - st.last_seen))
     online = st.online
+    battery_level = st.battery_level
+    battery_mv = st.battery_mv
+    battery_voltage = st.battery_voltage
+    battery_raw_percent = st.battery_raw_percent
+    battery_low = st.battery_low
+    battery_alert = st.battery_alert
+    battery_full = st.battery_full
+    if st.battery_ok is False:
+        battery_level = None
+        battery_mv = None
+        battery_voltage = None
+        battery_raw_percent = None
+        battery_low = False
+        battery_alert = False
+        battery_full = False
     return {
         "id": st.device_id,
         "device_id": st.device_id,
@@ -811,17 +837,17 @@ def device_to_json(st: ConnState) -> Dict[str, Any]:
         "status": "online" if online else "offline",
         "connection_state": "online" if online else "offline",
         "offline_reason": "" if online else (st.offline_reason or "stale"),
-        "battery_level": st.battery_level,
-        "battery": st.battery_level,
+        "battery_level": battery_level,
+        "battery": battery_level,
         "battery_ok": st.battery_ok,
-        "battery_mv": st.battery_mv,
-        "battery_voltage": st.battery_voltage,
-        "battery_raw_percent": st.battery_raw_percent,
-        "battery_low": st.battery_low,
-        "battery_alert": st.battery_alert,
+        "battery_mv": battery_mv,
+        "battery_voltage": battery_voltage,
+        "battery_raw_percent": battery_raw_percent,
+        "battery_low": battery_low,
+        "battery_alert": battery_alert,
         "battery_plugged": st.battery_plugged,
         "battery_charging": st.battery_charging,
-        "battery_full": st.battery_full,
+        "battery_full": battery_full,
         "heap": st.heap,
         "rssi": st.rssi,
         "uptime_ms": st.uptime_ms,

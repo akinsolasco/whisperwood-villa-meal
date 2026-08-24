@@ -251,6 +251,8 @@ class DashboardWindow(QWidget):
         return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "ok"}
 
     def battery_display_text(self, device: Dict[str, Any], compact: bool = False) -> str:
+        if device.get("battery_ok") is False or str(device.get("battery_ok")).lower() == "false":
+            return "Gauge not detected" if not compact else "Gauge N/A"
         level = device.get("battery_level")
         if level is None or level == "":
             return "N/A"
@@ -266,14 +268,16 @@ class DashboardWindow(QWidget):
         return text
 
     def power_state_text(self, device: Dict[str, Any]) -> str:
+        if device.get("battery_ok") is False or str(device.get("battery_ok")).lower() == "false":
+            if self.truthy(device.get("battery_plugged")):
+                return "Plugged in; gauge not detected"
+            return "Gauge not detected"
         if self.truthy(device.get("battery_full")):
             return "Fully charged"
         if self.truthy(device.get("battery_charging")):
             return "Charging"
         if self.truthy(device.get("battery_plugged")):
             return "Plugged in"
-        if device.get("battery_ok") is False or str(device.get("battery_ok")).lower() == "false":
-            return "Gauge not detected"
         return "On battery"
 
     # ---------------------------- styles ----------------------------
