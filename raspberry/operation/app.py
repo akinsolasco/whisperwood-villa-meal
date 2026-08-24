@@ -469,6 +469,10 @@ def handle_line(st: ConnState, line: str) -> None:
             st.battery_low = False
             st.battery_alert = False
             st.battery_full = False
+        elif st.battery_level is not None:
+            st.battery_low = st.battery_level <= 20
+            if st.battery_level < 95:
+                st.battery_full = False
         st.heap = parse_int(kv.get("heap"), minimum=0)
         st.rssi = parse_int(kv.get("rssi"))
         st.uptime_ms = parse_int(kv.get("uptime_ms"), minimum=0)

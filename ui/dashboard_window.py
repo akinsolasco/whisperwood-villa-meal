@@ -253,6 +253,12 @@ class DashboardWindow(QWidget):
     def battery_display_text(self, device: Dict[str, Any], compact: bool = False) -> str:
         if device.get("battery_ok") is False or str(device.get("battery_ok")).lower() == "false":
             return "Gauge not detected" if not compact else "Gauge N/A"
+        if self.truthy(device.get("battery_full")):
+            return "Fully charged"
+        if self.truthy(device.get("battery_charging")):
+            return "Charging"
+        if self.truthy(device.get("battery_plugged")):
+            return "Plugged in"
         level = device.get("battery_level")
         if level is None or level == "":
             return "N/A"
@@ -4415,11 +4421,11 @@ class DashboardWindow(QWidget):
             percent = int(device.get("battery_level"))
         except Exception:
             percent = None
-        if percent is None and not self.truthy(device.get("battery_low")):
-            return None
+        if percent is None:
+            return "low" if self.truthy(device.get("battery_low")) else None
         if percent is not None and percent <= int(settings.get("critical_threshold", 10)):
             return "critical"
-        if self.truthy(device.get("battery_low")) or (percent is not None and percent <= int(settings.get("low_threshold", 20))):
+        if percent <= int(settings.get("low_threshold", 20)):
             return "low"
         return None
 
@@ -4930,7 +4936,7 @@ class DashboardWindow(QWidget):
                 battery = int(d.get("battery_level"))
             except Exception:
                 battery = None
-            if (battery is not None and battery <= low_threshold) or self.truthy(d.get("battery_low")):
+            if (battery is not None and battery <= low_threshold) or (battery is None and self.truthy(d.get("battery_low"))):
                 low_battery += 1
         needs_update = sum(1 for d in devices if self.device_needs_firmware_update(d, latest_version))
         if hasattr(self, "control_device_summary"):
