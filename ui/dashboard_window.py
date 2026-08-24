@@ -6778,6 +6778,9 @@ class DashboardWindow(QWidget):
             )
 
             self.load_residents()
+            saved_row = self.db.get_resident(self.selected_resident_id)
+            if saved_row:
+                self.apply_resident_row_to_form(saved_row)
             self.load_recent_logs()
             self.load_pairing_views()
             self.load_verification_page()
@@ -7236,6 +7239,10 @@ class DashboardWindow(QWidget):
         )
         self.load_recent_logs()
         self.refresh_devices()
+        if task.get("refresh_resident_after") and self.selected_resident_id:
+            fresh_row = self.db.get_resident(self.selected_resident_id)
+            if fresh_row:
+                self.apply_resident_row_to_form(fresh_row)
         if task.get("notify_on_success") and task.get("success"):
             self.show_info(task.get("success_title") or "Success", task.get("message") or "The request completed successfully.")
         if task.get("notify_on_failure") and not task.get("success"):
@@ -7592,7 +7599,10 @@ class DashboardWindow(QWidget):
             result = gateway.send_text(task.get("base_url"), task.get("payload"))
             body = result.get("body") or {}
             success = result.get("status_code") == 200 and not (isinstance(body, dict) and body.get("ok") is False)
-            message = "Text update sent successfully." if success else self.result_error_message(result, "Text update failed.")
+            if success and isinstance(body, dict) and body.get("ack_timeout"):
+                message = body.get("warning") or "Text update was sent. Please visually confirm the e-paper screen."
+            else:
+                message = "Text update sent successfully." if success else self.result_error_message(result, "Text update failed.")
             task.update({"success": success, "message": message, "response": body})
         except Exception as exc:
             task.update({
@@ -7857,6 +7867,7 @@ class DashboardWindow(QWidget):
         busy = self.begin_button_busy(button, "Sending...")
         task = {
             "row": dict(row or {}),
+            "resident_id": self.selected_resident_id,
             "device_id": device_id,
             "payload": payload,
             "image_path": self.selected_image_path,
@@ -7871,13 +7882,26 @@ class DashboardWindow(QWidget):
             "username": self.current_user.get("username"),
             "server_mode": self.server_mode,
             "base_url": self.base_url(),
+            "sync_shared_photo": self.server_mode,
         }
         threading.Thread(target=self._resident_photo_worker, args=(task,), daemon=True).start()
 
     def _resident_photo_worker(self, task):
         try:
+            image_path = task.get("image_path")
+            if task.get("sync_shared_photo"):
+                data_service = ServerDataService()
+                if not data_service.is_shared_photo_path(image_path):
+                    data_service.upload_resident_image(task.get("resident_id"), image_path)
+                    fresh_row = data_service.get_resident(task.get("resident_id")) or {}
+                    shared_path = fresh_row.get("lcd_image_path")
+                    if shared_path and os.path.isfile(str(shared_path)):
+                        image_path = shared_path
+                        task["image_path"] = shared_path
+                        task["row"] = fresh_row
+                        task["refresh_resident_after"] = True
             gateway = ServerGatewayClient() if task.get("server_mode") else GatewayClient()
-            result = gateway.send_image(task.get("base_url"), task.get("device_id"), task.get("image_path"))
+            result = gateway.send_image(task.get("base_url"), task.get("device_id"), image_path)
             body = result.get("body") or {}
             success = result.get("status_code") == 200 and not (isinstance(body, dict) and body.get("ok") is False)
             message = "Resident photo sent to LCD successfully." if success else self.result_error_message(result, "LCD photo send failed.")

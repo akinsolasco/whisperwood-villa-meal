@@ -186,6 +186,48 @@ class ControlServiceClient:
 
         return self._result(True, endpoint, response.status_code, data)
 
+    def _download_file(self, endpoint: str, destination_path: str) -> Dict[str, Any]:
+        if not self.host:
+            return self._result(False, endpoint, error="Control Service host is not configured.")
+        if not self.port or self.port < 1 or self.port > 65535:
+            return self._result(False, endpoint, error="Control Service port is not valid.")
+        if not self.api_key:
+            return self._result(False, endpoint, error="Missing Control Service API key.")
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}{endpoint}",
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        except requests.Timeout:
+            return self._result(False, endpoint, error=friendly_error_message("Control Service request timed out.", endpoint))
+        except requests.ConnectionError as exc:
+            return self._result(False, endpoint, error=friendly_error_message(str(exc), endpoint))
+        except requests.RequestException as exc:
+            return self._result(False, endpoint, error=friendly_error_message(str(exc), endpoint))
+
+        if response.status_code >= 400:
+            detail = response.reason
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+            return self._result(False, endpoint, response.status_code, data, friendly_error_message(str(detail), endpoint, response.status_code, data))
+
+        try:
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            with open(destination_path, "wb") as fh:
+                fh.write(response.content)
+        except OSError as exc:
+            return self._result(False, endpoint, response.status_code, error=f"Could not save downloaded file: {exc}")
+
+        return self._result(True, endpoint, response.status_code, {
+            "path": destination_path,
+            "content_type": response.headers.get("content-type", ""),
+            "size": len(response.content),
+        })
+
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/health", require_key=False)
 
@@ -258,6 +300,9 @@ class ControlServiceClient:
 
     def get_image(self, resident_id: int) -> Dict[str, Any]:
         return self._request("GET", f"/residents/{resident_id}/image")
+
+    def download_image(self, resident_id: int, destination_path: str) -> Dict[str, Any]:
+        return self._download_file(f"/residents/{resident_id}/image", destination_path)
 
     def get_devices(self) -> Dict[str, Any]:
         return self._request("GET", "/devices")

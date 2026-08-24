@@ -1233,6 +1233,7 @@ def init_db():
         "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_on_time TEXT",
         "ALTER TABLE residents ADD COLUMN IF NOT EXISTS lcd_off_time TEXT",
         "ALTER TABLE residents ADD COLUMN IF NOT EXISTS sleep_if_no_image BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE residents ADD COLUMN IF NOT EXISTS image_updated_at TEXT",
     ]:
         db_exec(sql)
 
@@ -1828,7 +1829,7 @@ async def upload_image(
     path = os.path.join(IMG_DIR, f"resident_{resident_id}_{safe_name}")
     with open(path, "wb") as f:
         f.write(await file.read())
-    db_exec("UPDATE residents SET image_path=:p, image_name=:n, updated_at=:t WHERE id=:id",
+    db_exec("UPDATE residents SET image_path=:p, image_name=:n, image_updated_at=:t, updated_at=:t WHERE id=:id",
             {"p": path, "n": safe_name, "t": now(), "id": resident_id})
     row = db_one("SELECT * FROM residents WHERE id=:id", {"id": resident_id}) or {"id": resident_id}
     log_resident_audit("system", "resident_photo_upload", row, old_values={}, new_values={"image_path": path, "image_name": safe_name}, reason="Resident photo uploaded")

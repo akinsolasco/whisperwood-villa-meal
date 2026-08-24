@@ -297,7 +297,11 @@ def create_ack(st: ConnState, kind: str, seq: int) -> threading.Event:
 def record_ack(st: ConnState, kind: str, seq: int, line: str) -> None:
     key = ack_key(kind, seq)
     kv = parse_kv_line(line)
-    ok = str(kv.get("ok", "")).lower() in {"1", "true", "yes", "ok"}
+    raw_ok = kv.get("ok")
+    if raw_ok is None or raw_ok == "":
+        ok = not any(k in kv for k in ("err", "error"))
+    else:
+        ok = str(raw_ok).lower() in {"1", "true", "yes", "ok"}
     with LOCK:
         event = st.ack_events.get(key)
         if event:
@@ -313,6 +317,12 @@ def pop_ack_result(st: ConnState, kind: str, seq: int, timed_out: bool = False) 
     if result:
         return result
     return {"ok": False, "timeout": timed_out, "line": "", "values": {}, "time": utc_now()}
+
+
+def can_soft_accept_text_ack_timeout(st: ConnState) -> bool:
+    # If the device is still heartbeating and does not report the e-paper as
+    # busy, the update was very likely rendered but the ACK line was missed.
+    return st.online and st.epaper_busy is not True
 
 
 def send_all(st: ConnState, data: bytes, timeout: float = 20.0) -> None:
@@ -929,6 +939,15 @@ def send_text_to_device(body: Dict[str, Any]) -> Dict[str, Any]:
         if st.pending_seq == seq:
             st.pending_seq = None
     if not result.get("ok"):
+        if result.get("timeout") and can_soft_accept_text_ack_timeout(st):
+            return {
+                "ok": True,
+                "seq": seq,
+                "ack": result,
+                "line": line,
+                "ack_timeout": True,
+                "warning": "Text update was sent and the device is online, but the e-paper ACK was not received in time. Please visually confirm the screen.",
+            }
         raise HTTPException(status_code=504 if result.get("timeout") else 502, detail=result)
     return {"ok": True, "seq": seq, "ack": result, "line": line}
 

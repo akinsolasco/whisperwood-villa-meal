@@ -1,9 +1,14 @@
 import json
+import hashlib
+import mimetypes
 import os
+import re
 from datetime import datetime
 from core.time_utils import format_readable_datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from config import APP_DATA_DIR
 from core.app_settings import AppSettingsStore
 from core.control_service_client import ControlServiceClient
 
@@ -138,6 +143,46 @@ class ServerDataService:
         self._require_ok(result)
         return True
 
+    def _safe_filename_part(self, value: Any, fallback: str = "image") -> str:
+        text = str(value or "").strip() or fallback
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
+        return safe or fallback
+
+    def _resident_image_cache_path(self, row: Dict[str, Any]) -> str:
+        resident_id = row.get("id") or row.get("resident_id")
+        image_marker = row.get("image_path") or row.get("lcd_image_path") or row.get("resident_photo_path") or row.get("image_name")
+        if not resident_id or not image_marker:
+            return ""
+
+        image_name = row.get("image_name") or os.path.basename(str(image_marker)) or "resident_photo.jpg"
+        suffix = Path(str(image_name)).suffix or mimetypes.guess_extension(row.get("image_mime") or "") or ".jpg"
+        marker = row.get("image_updated_at") or hashlib.sha1(str(image_marker).encode("utf-8")).hexdigest()[:12]
+        updated = self._safe_filename_part(marker)
+        stem = self._safe_filename_part(f"resident_{resident_id}_{updated}")
+        cache_dir = APP_DATA_DIR / "shared_resident_photos"
+        cache_path = cache_dir / f"{stem}{suffix}"
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return str(cache_path)
+
+        result = self.client(timeout=20.0).download_image(resident_id, str(cache_path))
+        if result.get("ok") and os.path.isfile(str(cache_path)):
+            return str(cache_path)
+        return ""
+
+    def _is_shared_photo_cache_path(self, path: Any) -> bool:
+        if not path:
+            return False
+        try:
+            candidate = Path(str(path)).resolve()
+            cache_dir = (APP_DATA_DIR / "shared_resident_photos").resolve()
+            candidate.relative_to(cache_dir)
+            return True
+        except Exception:
+            return False
+
+    def is_shared_photo_path(self, path: Any) -> bool:
+        return self._is_shared_photo_cache_path(path)
+
     def _normalize_resident(self, row: Dict[str, Any], devices: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         row = dict(row or {})
         resident_id = row.get("id") or row.get("resident_id")
@@ -145,13 +190,15 @@ class ServerDataService:
         status_alert = row.get("status_alert") or row.get("status") or row.get("alert") or "Stable"
         texture = row.get("texture") or row.get("allergies") or ""
         fluids = row.get("fluids") or row.get("schedule") or ""
-        image_path = (
+        raw_image_path = (
             row.get("resident_photo_path")
             or row.get("lcd_image_path")
             or row.get("image_path")
             or row.get("image_url")
             or ""
         )
+        shared_image_path = self._resident_image_cache_path(row)
+        image_path = shared_image_path or (raw_image_path if raw_image_path and os.path.isfile(str(raw_image_path)) else "")
         return {
             **row,
             "id": resident_id,
@@ -170,6 +217,8 @@ class ServerDataService:
             "safety_review_note": row.get("safety_review_note") or "",
             "needs_safety_review": bool(row.get("needs_safety_review", False)),
             "lcd_image_path": image_path,
+            "resident_photo_shared_path": image_path,
+            "resident_photo_server_path": raw_image_path,
             "lcd_schedule_enabled": bool(row.get("lcd_schedule_enabled", False)),
             "lcd_on_time": row.get("lcd_on_time"),
             "lcd_off_time": row.get("lcd_off_time"),
@@ -240,10 +289,26 @@ class ServerDataService:
             result = self.client(timeout=20.0).upload_document(resident_id, data.get("source_document"))
             if not result.get("ok"):
                 raise RuntimeError(result.get("error") or "Source document upload failed.")
-        if data.get("lcd_image_path") and os.path.isfile(str(data.get("lcd_image_path"))):
+        if (
+            data.get("lcd_image_path")
+            and os.path.isfile(str(data.get("lcd_image_path")))
+            and not self._is_shared_photo_cache_path(data.get("lcd_image_path"))
+        ):
             result = self.client(timeout=30.0).upload_image(resident_id, data.get("lcd_image_path"))
             if not result.get("ok"):
                 raise RuntimeError(result.get("error") or "Resident image upload failed.")
+
+    def upload_resident_image(self, resident_id, image_path):
+        if not resident_id:
+            raise RuntimeError("Resident must be saved before uploading a photo.")
+        if not image_path or not os.path.isfile(str(image_path)):
+            raise RuntimeError("Resident image file was not found.")
+        if self._is_shared_photo_cache_path(image_path):
+            return True
+        result = self.client(timeout=30.0).upload_image(resident_id, str(image_path))
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or "Resident image upload failed.")
+        return True
 
     def delete_resident(self, resident_id):
         self._require_ok(self.client(timeout=8.0).archive_resident(resident_id))
