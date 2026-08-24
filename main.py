@@ -4,7 +4,7 @@ from pathlib import Path
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
-from config import APP_NAME, APP_VERSION, ASSETS_DIR
+from config import APP_CHANNEL, APP_NAME, APP_VERSION, ASSETS_DIR
 from ui.splash_screen import SplashScreen
 from ui.login_window import LoginWindow
 from ui.dashboard_window import DashboardWindow
@@ -17,7 +17,7 @@ def configure_windows_identity():
         return
     try:
         import ctypes
-        app_id = f"EnhancedLiving.Whisperwood.{APP_VERSION}"
+        app_id = f"EnhancedLiving.Whisperwood.{APP_CHANNEL}"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     except Exception:
         pass
@@ -29,7 +29,8 @@ def acquire_single_instance_lock():
         return True
     try:
         import ctypes
-        mutex_name = "Local\\EnhancedLivingWhisperwood"
+        safe_channel = "".join(ch if ch.isalnum() else "_" for ch in APP_CHANNEL)
+        mutex_name = f"Local\\EnhancedLivingWhisperwood_{safe_channel}"
         _APP_MUTEX_HANDLE = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
         return ctypes.windll.kernel32.GetLastError() != 183
     except Exception:

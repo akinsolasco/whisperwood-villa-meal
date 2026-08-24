@@ -8,7 +8,7 @@ import time
 from typing import Optional, List, Dict, Any
 
 from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, pyqtSignal, QEvent, QPoint, QSize
-from PyQt6.QtGui import QCursor, QPixmap, QGuiApplication, QTextDocument, QPageSize, QDesktopServices
+from PyQt6.QtGui import QColor, QCursor, QPixmap, QGuiApplication, QTextDocument, QPageSize, QDesktopServices
 from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFrame, QLabel, QPushButton, QLineEdit, QTextEdit,
@@ -18,7 +18,15 @@ from PyQt6.QtWidgets import (
     QInputDialog, QApplication, QTabWidget
 )
 
-from config import APP_NAME, APP_VERSION, DEFAULT_PI_BASE_URL, ASSETS_DIR, ROLE_LABELS, APP_DATA_DIR
+from config import (
+    APP_NAME,
+    APP_VERSION,
+    DEFAULT_PI_BASE_URL,
+    ASSETS_DIR,
+    ROLE_LABELS,
+    APP_DATA_DIR,
+    LATEST_ESP32_FIRMWARE_VERSION,
+)
 from auth.auth_service import AuthService
 from core.app_settings import APP_MODE_DEMO, APP_MODE_SERVER, AppSettingsStore
 from core.control_service_client import ControlServiceClient, friendly_error_message
@@ -55,6 +63,10 @@ class DashboardWindow(QWidget):
         self.control_last_results: Dict[str, Dict[str, Any]] = {}
         self.battery_alert_settings = self.default_battery_alert_settings()
         self.battery_alert_last_popup: Dict[str, float] = {}
+        self.latest_firmware_version = LATEST_ESP32_FIRMWARE_VERSION
+        self.latest_firmware_release: Dict[str, Any] = {}
+        self.latest_firmware_checked_at = 0.0
+        self.firmware_update_last_popup: Dict[str, float] = {}
 
         self.drag_pos = None
         self.normal_geometry = None
@@ -306,6 +318,27 @@ class DashboardWindow(QWidget):
                 background-color: #f1f5f9;
                 color: #94a3b8;
                 border: 1px solid #d8e1ea;
+            }
+        """
+
+    def danger_btn_style(self):
+        return """
+            QPushButton {
+                background-color: #ffffff;
+                color: #b91c1c;
+                border: 1px solid #fecaca;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 800;
+            }
+            QPushButton:hover {
+                background-color: #fef2f2;
+                border: 1px solid #f87171;
+            }
+            QPushButton:disabled {
+                background-color: #f8fafc;
+                color: #cbd5e1;
+                border: 1px solid #e2e8f0;
             }
         """
 
@@ -2168,33 +2201,46 @@ class DashboardWindow(QWidget):
         self.control_device_summary = {}
         for key, label, x in [
             ("total", "Total Devices", 0),
-            ("online", "Online Devices", 195),
-            ("offline", "Offline Devices", 390),
-            ("low_battery", "Low Battery", 585),
-            ("firmware", "Firmware Status", 780),
+            ("online", "Online", 160),
+            ("offline", "Offline", 320),
+            ("low_battery", "Low Battery", 480),
+            ("needs_update", "Needs Update", 640),
+            ("firmware", "Latest Firmware", 800),
         ]:
             card = QFrame(page)
-            card.setGeometry(x, 48, 175, 94)
+            card.setGeometry(x, 48, 150, 94)
             self.apply_frame_style(card, self.card_style())
             small = QLabel(label, card)
-            small.setGeometry(14, 12, 145, 18)
+            small.setGeometry(14, 12, 122, 18)
             small.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 800;")
             value = QLabel("0", card)
-            value.setGeometry(14, 38, 145, 34)
-            value.setStyleSheet("font-size: 24px; color: #0f172a; font-weight: 800;")
+            value.setGeometry(14, 38, 122, 34)
+            value.setStyleSheet("font-size: 21px; color: #0f172a; font-weight: 800;")
             self.control_device_summary[key] = value
 
         message = QLabel("ESP32 registry is refreshed from the Operation Manager in real time.", page)
-        message.setGeometry(0, 166, 600, 26)
+        message.setGeometry(0, 166, 570, 26)
         message.setStyleSheet("font-size: 13px; color: #475569; font-weight: 700;")
+
+        self.btn_refresh_control_devices = QPushButton("Refresh", page)
+        self.btn_refresh_control_devices.setGeometry(650, 158, 130, 40)
+        self.btn_refresh_control_devices.setStyleSheet(self.secondary_btn_style())
+        self.btn_refresh_control_devices.clicked.connect(self.load_control_devices)
+
+        self.btn_delete_control_device = QPushButton("Delete Device", page)
+        self.btn_delete_control_device.setGeometry(795, 158, 160, 40)
+        self.btn_delete_control_device.setStyleSheet(self.danger_btn_style())
+        self.btn_delete_control_device.clicked.connect(self.delete_selected_control_device)
 
         self.it_device_table = QTableWidget(page)
         self.it_device_table.setGeometry(0, 205, 955, 220)
-        self.it_device_table.setColumnCount(8)
-        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Battery", "Power", "Last Seen"])
+        self.it_device_table.setColumnCount(9)
+        self.it_device_table.setHorizontalHeaderLabels(["Device", "Online", "IP", "Port", "FW", "Update", "Battery", "Power", "Last Seen"])
         self.it_device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.it_device_table.verticalHeader().setVisible(False)
         self.it_device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.it_device_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.it_device_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.it_device_table.setStyleSheet(self.table_style())
 
         battery_panel = QFrame(page)
@@ -4377,6 +4423,106 @@ class DashboardWindow(QWidget):
             "One or more connected smart labels need battery attention.\n\n" + "\n".join(lines),
         )
 
+    def firmware_version_key(self, version: Any):
+        text = str(version or "").strip().lower()
+        numbers = re.findall(r"\d+", text)
+        if not numbers:
+            return tuple()
+        return tuple(int(part) for part in numbers)
+
+    def firmware_version_label(self, version: Any) -> str:
+        text = str(version or "").strip()
+        if not text:
+            return "Not uploaded"
+        if text.lower().startswith("fw"):
+            return text
+        if re.fullmatch(r"\d+", text):
+            return f"fw{text}"
+        return text
+
+    def release_sort_key(self, release: Dict[str, Any]):
+        version_key = self.firmware_version_key(release.get("version"))
+        try:
+            row_id = int(release.get("id") or 0)
+        except Exception:
+            row_id = 0
+        return version_key, row_id
+
+    def apply_latest_firmware_from_releases(self, releases: List[Dict[str, Any]]):
+        baseline = {
+            "version": LATEST_ESP32_FIRMWARE_VERSION,
+            "status": "configured",
+            "source": "app target",
+        }
+        candidates = [baseline]
+        candidates.extend([row for row in releases or [] if str(row.get("version") or "").strip()])
+        latest = max(candidates, key=self.release_sort_key) if candidates else baseline
+        self.latest_firmware_release = latest
+        self.latest_firmware_version = latest.get("version") or LATEST_ESP32_FIRMWARE_VERSION
+        self.latest_firmware_checked_at = time.time()
+        return latest
+
+    def refresh_latest_firmware_info(self, quiet: bool = True):
+        if self.latest_firmware_release and time.time() - self.latest_firmware_checked_at < 30:
+            return self.latest_firmware_release
+        latest = self.apply_latest_firmware_from_releases([])
+        if self.server_mode:
+            result = self.control_client(timeout=4.0).get_firmware_releases()
+            if result.get("ok"):
+                releases = (result.get("data") or {}).get("releases") or []
+                latest = self.apply_latest_firmware_from_releases(releases)
+            elif not quiet and hasattr(self, "ota_status"):
+                self.ota_status.setText(result.get("error") or "Could not load firmware releases.")
+                self.ota_status.setStyleSheet("font-size: 12px; color: #b91c1c; font-weight: 800;")
+        return latest
+
+    def device_needs_firmware_update(self, device: Dict[str, Any], latest_version: Any = None) -> bool:
+        latest_key = self.firmware_version_key(latest_version or self.latest_firmware_version)
+        current_key = self.firmware_version_key(device.get("fw") or device.get("firmware"))
+        if not latest_key or not current_key:
+            return False
+        return current_key < latest_key
+
+    def firmware_update_status_text(self, device: Dict[str, Any], latest_version: Any = None) -> str:
+        current = self.firmware_version_label(device.get("fw") or device.get("firmware") or "")
+        latest = self.firmware_version_label(latest_version or self.latest_firmware_version)
+        if current == "Not uploaded":
+            return "Not reported"
+        if self.device_needs_firmware_update(device, latest_version):
+            return f"Update to {latest}"
+        return "Current"
+
+    def check_firmware_update_alerts(self, devices: List[Dict[str, Any]], latest_version: Any = None):
+        if not self.is_it_admin():
+            return
+        latest = latest_version or self.latest_firmware_version
+        latest_key = self.firmware_version_key(latest)
+        if not latest_key:
+            return
+        now_ts = time.time()
+        due = []
+        for device in devices:
+            if not self.device_needs_firmware_update(device, latest):
+                continue
+            device_id = str(device.get("device_id") or device.get("id") or "unknown")
+            key = f"{device_id}:{self.firmware_version_label(latest)}"
+            last = self.firmware_update_last_popup.get(key, 0)
+            if now_ts - last < 60 * 60:
+                continue
+            self.firmware_update_last_popup[key] = now_ts
+            due.append((device_id, self.firmware_version_label(device.get("fw") or device.get("firmware")), device.get("resident_name") or device.get("paired_resident_name") or "Unassigned"))
+        if not due:
+            return
+        lines = [f"{device_id} | current {current} | {resident}" for device_id, current, resident in due[:8]]
+        if len(due) > 8:
+            lines.append(f"...and {len(due) - 8} more device(s).")
+        QMessageBox.warning(
+            self,
+            "Firmware Update Needed",
+            f"Latest approved ESP32 firmware is {self.firmware_version_label(latest)}.\n\n"
+            "These smart label PCB(s) are running older firmware:\n\n" + "\n".join(lines),
+        )
+
     def control_client_from_form(self, timeout=2.0):
         if not hasattr(self, "control_host"):
             return self.control_client(timeout=timeout)
@@ -4736,6 +4882,8 @@ class DashboardWindow(QWidget):
     def load_control_devices(self):
         if not hasattr(self, "it_device_table"):
             return
+        latest = self.refresh_latest_firmware_info(quiet=True)
+        latest_version = latest.get("version") or self.latest_firmware_version
         devices = self.safe_get_devices()
         offline = sum(1 for d in devices if not d.get("is_online"))
         settings = self.normalize_battery_alert_settings(self.battery_alert_settings)
@@ -4748,13 +4896,14 @@ class DashboardWindow(QWidget):
                 battery = None
             if (battery is not None and battery <= low_threshold) or self.truthy(d.get("battery_low")):
                 low_battery += 1
+        needs_update = sum(1 for d in devices if self.device_needs_firmware_update(d, latest_version))
         if hasattr(self, "control_device_summary"):
             self.control_device_summary["total"].setText(str(len(devices)))
             self.control_device_summary["online"].setText(str(len(devices) - offline))
             self.control_device_summary["offline"].setText(str(offline))
             self.control_device_summary["low_battery"].setText(str(low_battery))
-            versions = sorted({str(d.get("fw") or d.get("firmware") or "").strip() for d in devices if str(d.get("fw") or d.get("firmware") or "").strip()})
-            self.control_device_summary["firmware"].setText(", ".join(versions) if versions else "Not reported")
+            self.control_device_summary["needs_update"].setText(str(needs_update))
+            self.control_device_summary["firmware"].setText(self.firmware_version_label(latest_version))
 
         self.it_device_table.setRowCount(len(devices))
         for r, d in enumerate(devices):
@@ -4764,12 +4913,19 @@ class DashboardWindow(QWidget):
                 d.get("ip") or "",
                 str(d.get("port") or ""),
                 d.get("fw") or "",
+                self.firmware_update_status_text(d, latest_version),
                 self.battery_display_text(d),
                 self.power_state_text(d),
                 format_elapsed_seconds(d.get("last_seen_s")),
             ]
             for c, value in enumerate(values):
-                self.it_device_table.setItem(r, c, QTableWidgetItem(str(value)))
+                item = QTableWidgetItem(str(value))
+                if c == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, d.get("device_id") or d.get("id") or "")
+                if c == 5 and self.device_needs_firmware_update(d, latest_version):
+                    item.setForeground(QColor("#b91c1c"))
+                self.it_device_table.setItem(r, c, item)
+        self.check_firmware_update_alerts(devices, latest_version)
         if hasattr(self, "esp32_pi_host") and not self.esp32_pi_host.text().strip():
             profile = self.current_control_profile()
             self.esp32_pi_host.setText(profile.get("host") or "")
@@ -4803,6 +4959,52 @@ class DashboardWindow(QWidget):
             size = size / 1024
         return str(size)
 
+    def selected_control_device_id(self):
+        if not hasattr(self, "it_device_table"):
+            return ""
+        row = self.it_device_table.currentRow()
+        if row < 0:
+            return ""
+        item = self.it_device_table.item(row, 0)
+        if not item:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or item.text() or "").strip()
+
+    def delete_selected_control_device(self):
+        if not self.is_it_admin():
+            self.show_error("Permission Required", "Only IT admins can delete saved devices.")
+            return
+        device_id = self.selected_control_device_id()
+        if not device_id:
+            self.show_error("No device selected", "Select a device row first.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Device",
+            f"Delete {device_id} from the saved device registry?\n\n"
+            "Resident records will not be deleted. If this PCB is still online, it may reappear automatically when it reconnects.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        busy = self.begin_button_busy(getattr(self, "btn_delete_control_device", None), "Deleting...")
+        try:
+            result = self.control_client(timeout=8.0).delete_device(
+                device_id,
+                self.current_user.get("username") or "itadmin",
+            )
+            if result.get("ok"):
+                message = (result.get("data") or {}).get("message") or f"{device_id} was removed from the saved registry."
+                self.show_info("Device Deleted", message)
+                self.load_control_devices()
+                self.load_pairing_views()
+                self.refresh_dashboard_summary()
+                self.load_schedule_view()
+            else:
+                self.show_error("Delete Device", result.get("error") or "Device delete failed.")
+        finally:
+            self.end_button_busy(busy)
+
     def selected_ota_release_id(self):
         if not hasattr(self, "ota_table"):
             return None
@@ -4830,6 +5032,7 @@ class DashboardWindow(QWidget):
             self.ota_table.setRowCount(0)
             return
         rows = (result.get("data") or {}).get("releases") or []
+        latest = self.apply_latest_firmware_from_releases(rows)
         self.ota_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             values = [
@@ -4845,8 +5048,10 @@ class DashboardWindow(QWidget):
                 if c == 0:
                     item.setData(Qt.ItemDataRole.UserRole, row.get("id"))
                 self.ota_table.setItem(r, c, item)
-        self.ota_status.setText(f"{len(rows)} firmware release(s) available.")
+        self.ota_status.setText(f"{len(rows)} firmware release(s) available. Latest target: {self.firmware_version_label(latest.get('version'))}.")
         self.ota_status.setStyleSheet("font-size: 12px; color: #047857; font-weight: 800;")
+        if hasattr(self, "control_device_summary"):
+            self.control_device_summary["firmware"].setText(self.firmware_version_label(latest.get("version")))
 
     def upload_ota_firmware(self):
         if not self.is_it_admin():
