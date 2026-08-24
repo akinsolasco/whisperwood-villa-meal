@@ -7555,49 +7555,42 @@ class DashboardWindow(QWidget):
         payload = self.build_gateway_payload(device_id)
 
         busy = self.begin_button_busy(getattr(self, "btn_send_text", None), "Sending...")
+        task = {
+            "row": {
+                "id": self.selected_resident_id,
+                "resident_uid": self.current_resident_uid(),
+            },
+            "device_id": device_id,
+            "payload": payload,
+            "action_type": "send_text",
+            "label": "Text update",
+            "busy_state": busy,
+            "notify_on_success": True,
+            "notify_on_failure": True,
+            "success_title": "Text Update",
+            "failure_title": "Text Update",
+            "user_id": self.current_user.get("id"),
+            "username": self.current_user.get("username"),
+            "server_mode": self.server_mode,
+            "base_url": self.base_url(),
+        }
+        threading.Thread(target=self._text_update_worker, args=(task,), daemon=True).start()
+
+    def _text_update_worker(self, task):
         try:
-            result = self.gateway.send_text(self.base_url(), payload)
-            success = result["status_code"] == 200
-            message = "Text update sent successfully" if success else self.result_error_message(result, "Text update failed.")
-
-            self.db.log_update(
-                "send_text",
-                self.selected_resident_id,
-                self.current_resident_uid(),
-                device_id,
-                self.current_user.get("id"),
-                self.current_user.get("username"),
-                payload,
-                result["body"],
-                success,
-                message
-            )
-
-            self.load_recent_logs()
-            self.refresh_devices()
-
-            if success:
-                self.show_info("Success", message)
-            else:
-                self.show_error("Send failed", message)
-
-        except Exception as e:
-            self.db.log_update(
-                "send_text",
-                self.selected_resident_id,
-                self.current_resident_uid(),
-                device_id,
-                self.current_user.get("id"),
-                self.current_user.get("username"),
-                payload,
-                {"error": str(e)},
-                False,
-                str(e)
-            )
-            self.load_recent_logs()
-            self.show_error("Network Error", str(e))
-        finally:
-            self.end_button_busy(busy)
+            gateway = ServerGatewayClient() if task.get("server_mode") else GatewayClient()
+            result = gateway.send_text(task.get("base_url"), task.get("payload"))
+            body = result.get("body") or {}
+            success = result.get("status_code") == 200 and not (isinstance(body, dict) and body.get("ok") is False)
+            message = "Text update sent successfully." if success else self.result_error_message(result, "Text update failed.")
+            task.update({"success": success, "message": message, "response": body})
+        except Exception as exc:
+            task.update({
+                "success": False,
+                "message": f"Text update could not finish. {friendly_error_message(str(exc))}",
+                "response": {"error": str(exc)},
+            })
+        self.resident_display_finished.emit(task)
 
     def send_lcd_command(self, command, device_id=None):
         if not self.require_network_for_write("Sending LCD command"):
