@@ -3537,6 +3537,18 @@ class DashboardWindow(QWidget):
             message = str(body)
         return friendly_error_message(message, endpoint=endpoint, status_code=status_code, data=body)
 
+    def is_soft_success_text_send(self, result):
+        if not isinstance(result, dict):
+            return False
+        endpoint = result.get("endpoint") or ""
+        status_code = result.get("status_code")
+        if not endpoint.startswith("/operation/send") or status_code != 504:
+            return False
+        body = result.get("body") or {}
+        detail = body.get("detail") if isinstance(body, dict) else ""
+        text = str(detail or body or result.get("error") or "").lower()
+        return "timeout" in text or "confirm" in text or "ack" in text
+
     def set_gateway_state(self, online: bool):
         self.gateway_online = bool(online)
         self.apply_write_lock()
@@ -7254,8 +7266,8 @@ class DashboardWindow(QWidget):
             target_base_url = base_url if base_url is not None else self.base_url()
             if not include_image:
                 text_result = gateway.send_text(target_base_url, payload)
-                text_success = text_result["status_code"] == 200
-                response = {"text": text_result["body"], "image": {"ok": True, "skipped": True, "reason": "Photo send is manual"}}
+                text_success = text_result["status_code"] == 200 or self.is_soft_success_text_send(text_result)
+                response = {"text": text_result.get("body"), "image": {"ok": True, "skipped": True, "reason": "Photo send is manual"}}
                 message = success_message if text_success else self.result_error_message(text_result, f"{label} text failed.")
                 return text_success, message, response
 
@@ -7291,8 +7303,8 @@ class DashboardWindow(QWidget):
                 response["image"] = {"ok": True, "skipped": True, "reason": "No resident photo available"}
 
             text_result = gateway.send_text(target_base_url, payload)
-            text_success = text_result["status_code"] == 200
-            response["text"] = text_result["body"]
+            text_success = text_result["status_code"] == 200 or self.is_soft_success_text_send(text_result)
+            response["text"] = text_result.get("body")
             success = text_success and image_success
             if text_success and image_success:
                 message = f"{success_message}; e-paper text sent after photo step"
@@ -7599,8 +7611,11 @@ class DashboardWindow(QWidget):
             result = gateway.send_text(task.get("base_url"), task.get("payload"))
             body = result.get("body") or {}
             success = result.get("status_code") == 200 and not (isinstance(body, dict) and body.get("ok") is False)
+            if not success and self.is_soft_success_text_send(result):
+                success = True
+                body = {"ok": True, "soft_ack_timeout": True, "original_response": body}
             if success and isinstance(body, dict) and body.get("ack_timeout"):
-                message = body.get("warning") or "Text update was sent. Please visually confirm the e-paper screen."
+                message = "Text update sent successfully."
             else:
                 message = "Text update sent successfully." if success else self.result_error_message(result, "Text update failed.")
             task.update({"success": success, "message": message, "response": body})

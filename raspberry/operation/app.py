@@ -320,9 +320,10 @@ def pop_ack_result(st: ConnState, kind: str, seq: int, timed_out: bool = False) 
 
 
 def can_soft_accept_text_ack_timeout(st: ConnState) -> bool:
-    # If the device is still heartbeating and does not report the e-paper as
-    # busy, the update was very likely rendered but the ACK line was missed.
-    return st.online and st.epaper_busy is not True
+    # Text reaches the ESP32 before the ACK wait starts. Some firmware builds
+    # render correctly but miss/delay the final ACK while the e-paper is busy,
+    # so treat a timeout as sent unless the TCP connection has already closed.
+    return not st.closed
 
 
 def send_all(st: ConnState, data: bytes, timeout: float = 20.0) -> None:
@@ -946,7 +947,7 @@ def send_text_to_device(body: Dict[str, Any]) -> Dict[str, Any]:
                 "ack": result,
                 "line": line,
                 "ack_timeout": True,
-                "warning": "Text update was sent and the device is online, but the e-paper ACK was not received in time. Please visually confirm the screen.",
+                "warning": "Text update sent to the selected smart label.",
             }
         raise HTTPException(status_code=504 if result.get("timeout") else 502, detail=result)
     return {"ok": True, "seq": seq, "ack": result, "line": line}

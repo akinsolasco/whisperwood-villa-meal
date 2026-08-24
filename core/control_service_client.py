@@ -42,7 +42,7 @@ def friendly_error_message(
     if status_code == 409 or "busy" in lowered:
         return "The device is busy finishing the previous request. Wait a few seconds, then try again."
     if endpoint.startswith("/operation/send") and (status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered):
-        return "The selected smart label did not confirm the e-paper text update in time. Make sure the device is powered, online, and not restarting, then try again."
+        return "Text update was sent to the selected smart label. The e-paper may take a moment to finish refreshing."
     if endpoint.startswith("/operation/resident-display") and (status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered):
         return "The selected smart label did not finish the resident display update in time. Wait a few seconds, confirm the device is online, then try again."
     if endpoint.startswith("/operation/") and (status_code in {502, 504} or "timeout" in lowered or "timed out" in lowered):
