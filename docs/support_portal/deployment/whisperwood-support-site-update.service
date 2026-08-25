@@ -1,0 +1,10 @@
+[Unit]
+Description=Update Enhanced Living Whisperwood Smart Label Support Site from GitHub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=WHISPERWOOD_SUPPORT_REPO_DIR=/opt/whisperwood-support-site/repo
+Environment=WHISPERWOOD_SUPPORT_BRANCH=main
+ExecStart=/opt/whisperwood-support-site/update_support_site.sh

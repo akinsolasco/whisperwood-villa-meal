@@ -1,0 +1,10 @@
+[Unit]
+Description=Check GitHub for Enhanced Living Whisperwood support site updates
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

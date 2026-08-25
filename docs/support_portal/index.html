@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enhanced Living Whisperwood Smart Label Support Site</title>
+  <meta name="description" content="Role-based user manual, installation guide, recovery playbook, hardware troubleshooting, and support portal for Enhanced Living Whisperwood.">
+  <link rel="icon" href="assets/favicon.ico">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to manual</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <img src="assets/logo.png" alt="Enhanced Living Whisperwood" class="brand-logo">
+      <div>
+        <p class="eyebrow">Smart Label support site</p>
+        <h1>Enhanced Living Whisperwood</h1>
+      </div>
+    </div>
+    <nav class="top-actions" aria-label="Primary">
+      <a href="#ask">Ask Support</a>
+      <a href="#downloads">Downloads</a>
+      <a href="#recovery">Recovery</a>
+      <button type="button" id="printGuide">Print guide</button>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Operational manual and automated help desk</p>
+        <h2>Find the right answer before a support call is needed.</h2>
+        <p class="hero-text">
+          Use this portal to train staff, install the desktop app, recover a damaged Raspberry Pi,
+          troubleshoot display devices, and understand each role in the Whisperwood workflow.
+        </p>
+        <div class="hero-search" id="ask">
+          <label for="supportSearch">Ask a question or describe the issue</label>
+          <div class="search-row">
+            <input id="supportSearch" type="search" placeholder="Example: device offline, restore backup, nurse approval, LCD white screen">
+            <button type="button" id="searchButton">Search</button>
+          </div>
+          <div class="quick-prompts" aria-label="Common support questions">
+            <button type="button" data-query="How do I install the desktop app">Install app</button>
+            <button type="button" data-query="Device is offline">Device offline</button>
+            <button type="button" data-query="How do I restore from Google Drive backup">Restore backup</button>
+            <button type="button" data-query="LCD image is white">LCD photo issue</button>
+          </div>
+        </div>
+      </div>
+      <aside class="status-panel" aria-label="System overview">
+        <div class="status-card strong">
+          <span>Manual status</span>
+          <strong>Draft for site review</strong>
+          <p>Ready for your circuit drawings, final contact list, and hospital policy text.</p>
+        </div>
+        <div class="status-grid">
+          <div><span>Roles</span><strong>4</strong></div>
+          <div><span>Playbooks</span><strong>12</strong></div>
+          <div><span>Hardware topics</span><strong>8</strong></div>
+          <div><span>Recovery path</span><strong>Yes</strong></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="support-results" aria-live="polite">
+      <div class="section-heading">
+        <p class="eyebrow">Smart help</p>
+        <h2>Recommended answers</h2>
+      </div>
+      <div id="results" class="results-grid"></div>
+    </section>
+
+    <section class="section" id="start">
+      <div class="section-heading">
+        <p class="eyebrow">Start here</p>
+        <h2>Use the system in the right order</h2>
+        <p>The safest daily flow is resident-first: save the resident, pair the device, send display text, send photo when needed, and check logs.</p>
+      </div>
+      <div class="flow">
+        <article>
+          <span>01</span>
+          <h3>Confirm network</h3>
+          <p>Connect the laptop to the facility network or approved VPN before login. If the control service is unreachable, do not edit resident data.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h3>Save resident record</h3>
+          <p>Enter name, room, diet, texture, fluids, note, drinks, source document, safety review, and resident photo.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h3>Pair display device</h3>
+          <p>Select one resident and one online ESP32 display unit. Pairing automatically prepares that device for updates.</p>
+        </article>
+        <article>
+          <span>04</span>
+          <h3>Send display updates</h3>
+          <p>Save sends the e-paper text. Use the resident photo button when the LCD picture needs to be pushed separately.</p>
+        </article>
+        <article>
+          <span>05</span>
+          <h3>Schedule LCD sleep</h3>
+          <p>IT Admin or authorised users can set global LCD on/off schedule entries. Multiple schedule entries may be used.</p>
+        </article>
+        <article>
+          <span>06</span>
+          <h3>Verify and audit</h3>
+          <p>Verifier confirms software data matches the physical e-paper. Admin reviews change requests and resident audit history.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="roles">
+      <div class="section-heading">
+        <p class="eyebrow">Role manuals</p>
+        <h2>Choose the guide for your responsibility</h2>
+      </div>
+      <div class="role-grid">
+        <article class="role-card">
+          <div class="role-icon">IT</div>
+          <h3>IT Admin</h3>
+          <p>Owns technical health, control service, users, backups, firmware, device provisioning, battery policy, and system recovery.</p>
+          <ul>
+            <li>Create and deactivate users.</li>
+            <li>Set temporary passwords and enforce password change.</li>
+            <li>Configure Google Drive backup, SMTP alerts, OTA firmware, and operation manager.</li>
+            <li>Troubleshoot Raspberry Pi, network, ESP32, LCD, e-paper, and download site issues.</li>
+          </ul>
+        </article>
+        <article class="role-card">
+          <div class="role-icon">AD</div>
+          <h3>Admin / Nurse Admin</h3>
+          <p>Owns resident accuracy and approval. Admin can create or edit residents and approve staff change requests.</p>
+          <ul>
+            <li>Create resident records with source documents.</li>
+            <li>Review staff comments before pushing changes.</li>
+            <li>Check resident audit history and attached proof documents.</li>
+            <li>Keep resident photo, diet, texture, fluids, notes, and drinks current.</li>
+          </ul>
+        </article>
+        <article class="role-card">
+          <div class="role-icon">ST</div>
+          <h3>Staff / Nurse</h3>
+          <p>Views resident information and submits comments or requested updates for Admin approval.</p>
+          <ul>
+            <li>Search residents and confirm current display information.</li>
+            <li>Submit a resident change request with a clear reason.</li>
+            <li>Do not directly change live display data unless given Admin access.</li>
+            <li>Report device or screen concerns with room, resident, and device ID.</li>
+          </ul>
+        </article>
+        <article class="role-card">
+          <div class="role-icon">VF</div>
+          <h3>Verifier</h3>
+          <p>Checks that the software resident record matches what is physically shown on the e-paper display.</p>
+          <ul>
+            <li>Select the resident or unit assigned for checking.</li>
+            <li>Compare name, room, diet, texture, fluids, note, and drinks.</li>
+            <li>Mark verified when correct, or mismatch when not correct.</li>
+            <li>Escalate mismatch to Admin and IT Admin if the device did not update.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section split" id="playbooks">
+      <div class="section-heading">
+        <p class="eyebrow">Operational playbooks</p>
+        <h2>Step-by-step workflows</h2>
+      </div>
+      <div class="accordion" data-accordion>
+        <button type="button" aria-expanded="true">Create or update a resident</button>
+        <div>
+          <ol>
+            <li>Confirm you are on the facility network or approved VPN.</li>
+            <li>Open Resident Records and search first to avoid duplicates.</li>
+            <li>Enter resident UID, full name, room, diet, texture, fluids, note, drinks, and active status.</li>
+            <li>Attach the source document used to confirm the information.</li>
+            <li>Attach or replace the resident photo for the LCD screen.</li>
+            <li>If information needs later checking, enable safety review and document what must be checked.</li>
+            <li>Save. If paired, e-paper text should update automatically.</li>
+          </ol>
+        </div>
+
+        <button type="button" aria-expanded="false">Pair a resident to a display device</button>
+        <div hidden>
+          <ol>
+            <li>Open Device Pairing.</li>
+            <li>Select one resident first. Keep the resident selected before choosing a device.</li>
+            <li>Select an online ESP32 device from available devices.</li>
+            <li>Click Pair Selected.</li>
+            <li>Confirm the paired table shows resident, resident UID, online status, and battery details.</li>
+            <li>After pairing, the latest resident text is prepared for the display pipeline.</li>
+          </ol>
+        </div>
+
+        <button type="button" aria-expanded="false">Send the resident photo</button>
+        <div hidden>
+          <ol>
+            <li>Open Resident Records and select the resident.</li>
+            <li>Attach the resident photo if it is missing or wrong.</li>
+            <li>Use Send Resident Photo when the LCD image needs to be pushed separately.</li>
+            <li>Wait for the success response before sending another photo.</li>
+            <li>If the LCD turns white but updates after device reboot, use the LCD/photo troubleshooting guide.</li>
+          </ol>
+        </div>
+
+        <button type="button" aria-expanded="false">Use LCD schedule</button>
+        <div hidden>
+          <ol>
+            <li>Open LCD Schedule.</li>
+            <li>Add one or more global on/off entries as required by the care workflow.</li>
+            <li>Save schedule. The Operation Manager should receive the schedule.</li>
+            <li>Use manual LCD control only for the selected device when testing one unit.</li>
+            <li>Delete old schedule entries that are no longer required.</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="troubleshooting">
+      <div class="section-heading">
+        <p class="eyebrow">Troubleshooting</p>
+        <h2>Common issues and what to do first</h2>
+        <p>Start with simple checks before assuming a hardware failure. Capture exact error text, device ID, time, room, and user role.</p>
+      </div>
+      <div class="issue-grid">
+        <article>
+          <h3>Cannot log in</h3>
+          <p><strong>Likely cause:</strong> laptop is not on the facility network/VPN, server is unreachable, or credentials are wrong.</p>
+          <ol>
+            <li>Connect to the dedicated facility network or approved VPN.</li>
+            <li>Ask IT Admin to confirm the Control Service is online.</li>
+            <li>If password was reset, use the temporary password and change it after login.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>ESP32 shows offline</h3>
+          <p><strong>Likely cause:</strong> device WiFi is down, Pi gateway unreachable, TCP connection dropped, or firmware not reconnecting.</p>
+          <ol>
+            <li>Confirm the device has power and the correct WiFi credentials.</li>
+            <li>Check IT Admin device list for last seen time and IP.</li>
+            <li>Use USB provisioning if WiFi credentials changed.</li>
+            <li>Restart the display unit only after network checks are done.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>LCD photo turns white</h3>
+          <p><strong>Likely cause:</strong> LCD bus reclaim, image orientation, or firmware/display refresh path.</p>
+          <ol>
+            <li>Do not send text and photo repeatedly at the same time.</li>
+            <li>Send photo once and wait for acknowledgement.</li>
+            <li>Confirm the firmware version includes the shared-bus LCD refresh fix.</li>
+            <li>If it only appears after reboot, escalate to IT Admin with firmware version and device ID.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>E-paper looks dirty or partial</h3>
+          <p><strong>Likely cause:</strong> incomplete refresh, old content not fully wiped, busy pin timing, or wrong display driver sequence.</p>
+          <ol>
+            <li>Wait for the e-paper update to finish before sending another update.</li>
+            <li>Confirm the firmware performs a full clear before drawing resident text.</li>
+            <li>Check battery/power stability.</li>
+            <li>Capture a photo and serial logs for IT Admin.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>Google Drive backup fails</h3>
+          <p><strong>Likely cause:</strong> Drive token missing, rclone remote missing, bad folder target, or internet unavailable.</p>
+          <ol>
+            <li>Open IT Admin Settings, then Integrations.</li>
+            <li>Confirm Google Drive target, OAuth token or service account, and Test Drive status.</li>
+            <li>Create Backup still saves locally even if cloud upload fails.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>Download page unreachable</h3>
+          <p><strong>Likely cause:</strong> wrong network, download-site service stopped, firewall, or wrong hostname.</p>
+          <ol>
+            <li>Use the Pi IP address first, then hostname after it works.</li>
+            <li>Check the download service status on the Pi.</li>
+            <li>Confirm port 8090 for installer downloads and port 8092 for this support portal.</li>
+          </ol>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="recovery">
+      <div class="section-heading">
+        <p class="eyebrow">Recovery and damage control</p>
+        <h2>If the Raspberry Pi or SD card fails</h2>
+      </div>
+      <div class="recovery-grid">
+        <article class="checklist">
+          <h3>Before a failure</h3>
+          <label><input type="checkbox"> IT Admin configures Google Drive backup.</label>
+          <label><input type="checkbox"> Automatic recovery backup is enabled.</label>
+          <label><input type="checkbox"> Latest local backup appears in IT Admin > Backups.</label>
+          <label><input type="checkbox"> Download site serves the correct installer.</label>
+          <label><input type="checkbox"> Firmware files and operation settings are included in recovery bundle.</label>
+        </article>
+        <article class="checklist">
+          <h3>After replacing the Pi</h3>
+          <label><input type="checkbox"> Install Raspberry Pi OS and enable SSH.</label>
+          <label><input type="checkbox"> Install Whisperwood Control Service and Operation Manager.</label>
+          <label><input type="checkbox"> Copy the recovery bundle to the Pi backup folder.</label>
+          <label><input type="checkbox"> Sign in as IT Admin and restore selected backup.</label>
+          <label><input type="checkbox"> Confirm residents, documents, images, schedules, devices, and logs.</label>
+        </article>
+        <article class="callout">
+          <h3>Important recovery note</h3>
+          <p>The backup is a Whisperwood recovery bundle, not a bootable SD-card image. It restores the application database, documents, resident images, schedule/cache files, firmware files, and key service configuration after a replacement Pi has been prepared.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="technical">
+      <div class="section-heading">
+        <p class="eyebrow">Technical section</p>
+        <h2>For IT Admin and implementation engineers</h2>
+      </div>
+      <div class="technical-grid">
+        <article>
+          <h3>Core services</h3>
+          <dl>
+            <dt>Desktop app</dt><dd>Resident records, role access, pairing, LCD schedule, logs, backups, firmware tools.</dd>
+            <dt>Control Service</dt><dd>Authentication, residents, devices, schedules, backup/restore, integrations, firmware releases.</dd>
+            <dt>Operation Manager</dt><dd>ESP32 gateway, TCP device communication, LCD commands, image processing, OTA handoff.</dd>
+            <dt>ESP32 firmware</dt><dd>WiFi reconnect, resident text rendering, LCD image receive, battery telemetry, OTA firmware.</dd>
+          </dl>
+        </article>
+        <article>
+          <h3>Device communication chain</h3>
+          <ol>
+            <li>Desktop saves resident record to server database.</li>
+            <li>Control Service builds resident display payload.</li>
+            <li>Operation Manager sends text or image to paired ESP32.</li>
+            <li>ESP32 updates e-paper or LCD and returns ACK.</li>
+            <li>Control Service logs success or failure for review.</li>
+          </ol>
+        </article>
+        <article>
+          <h3>Hardware documentation coming next</h3>
+          <p>This section is prepared for your circuit design writeup, pin map, charger behaviour, battery policy, screen orientation, and field replacement steps.</p>
+          <ul>
+            <li>ESP32-S3 pinout and bus sharing notes.</li>
+            <li>LCD and e-paper wiring checklist.</li>
+            <li>Battery voltage, charge detect, full-charge LED, and backlight policy.</li>
+            <li>Known-good firmware build and Arduino upload settings.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="downloads">
+      <div class="section-heading">
+        <p class="eyebrow">Downloads and links</p>
+        <h2>Installer, portals, and support references</h2>
+      </div>
+      <div class="download-grid">
+        <a class="download-card" id="desktopDownload" href="http://192.168.2.37:8090/download/">
+          <span>Main link</span>
+          <strong>Download desktop installer</strong>
+          <p>Use while connected to the same network as the Raspberry Pi.</p>
+        </a>
+        <a class="download-card" id="manualHome" href="/">
+          <span>Manual</span>
+          <strong>Open this Smart Label support site</strong>
+          <p>Bookmark this page for training, recovery, and troubleshooting.</p>
+        </a>
+        <a class="download-card" href="#technical">
+          <span>Technical</span>
+          <strong>Implementation notes</strong>
+          <p>Control Service, Operation Manager, ESP32 firmware, and hardware notes.</p>
+        </a>
+      </div>
+    </section>
+
+    <section class="section contact" id="contact">
+      <div>
+        <p class="eyebrow">When support is needed</p>
+        <h2>Collect the right information before escalating</h2>
+        <p>Send the device ID, resident UID or room, exact time, laptop network, app version, user role, screenshot/photo, and any serial or Pi logs. This cuts support time sharply.</p>
+      </div>
+      <button type="button" id="copyChecklist">Copy support checklist</button>
+    </section>
+  </main>
+
+  <footer>
+    <img src="assets/logo.png" alt="" aria-hidden="true">
+    <p>Enhanced Living Whisperwood Smart Label Support Site. Draft documentation portal for site review.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

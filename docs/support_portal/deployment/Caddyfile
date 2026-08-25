@@ -1,0 +1,15 @@
+# Caddy example for the Enhanced Living Whisperwood Smart Label Support Site.
+#
+# Replace support.your-domain.com with the real subdomain.
+# Caddy will automatically request HTTPS certificates when DNS points here.
+
+support.your-domain.com {
+    root * /var/www/whisperwood-support-site
+    file_server
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}
