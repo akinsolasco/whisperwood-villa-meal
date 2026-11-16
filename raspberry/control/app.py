@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form, Body
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form, Body, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Any
 from sqlalchemy import create_engine, text
 from argon2 import PasswordHasher
@@ -13,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import configparser, hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time, threading
 
-APP_VERSION = "0.6.8"
+APP_VERSION = "0.6.9"
 LOCAL_TIMEZONE_NAME = os.getenv("WHISPERWOOD_TIMEZONE", "America/Halifax")
 LOCAL_TIMEZONE_LABEL = os.getenv("WHISPERWOOD_TIMEZONE_LABEL", "Atlantic Time")
 
@@ -144,6 +144,72 @@ def require_key(x_whisperwood_key: str | None):
         raise HTTPException(status_code=500, detail="Control key not configured")
     if x_whisperwood_key != CONTROL_API_KEY:
         raise HTTPException(status_code=403, detail="Unauthorized")
+
+
+NOTEBOOK_DEFAULT_SCOPES = [
+    "residents:read",
+    "change_requests:create",
+    "change_requests:read_own",
+]
+NOTEBOOK_ALLOWED_SCOPES = {
+    "residents:read",
+    "attachments:read",
+    "change_requests:create",
+    "change_requests:read_own",
+    "change_requests:read_all",
+}
+
+
+def notebook_token_hash(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def notebook_token_scopes(row: dict) -> set[str]:
+    raw_scopes = row.get("scopes") or []
+    if isinstance(raw_scopes, str):
+        try:
+            raw_scopes = json.loads(raw_scopes)
+        except Exception:
+            raw_scopes = []
+    return {str(scope).strip() for scope in raw_scopes if str(scope).strip()}
+
+
+def require_notebook_token(request: Request, required_scope: str) -> dict:
+    raw_token = (request.headers.get("X-Whisperwood-Notebook-Key") or "").strip()
+    if not raw_token:
+        authorization = (request.headers.get("Authorization") or "").strip()
+        if authorization.lower().startswith("bearer "):
+            raw_token = authorization[7:].strip()
+    if not raw_token:
+        raise HTTPException(status_code=401, detail="Notebook API key is required")
+
+    token = db_one(
+        "SELECT * FROM notebook_api_tokens WHERE token_hash=:token_hash AND active=TRUE",
+        {"token_hash": notebook_token_hash(raw_token)},
+    )
+    if not token:
+        raise HTTPException(status_code=401, detail="Notebook API key is invalid or revoked")
+
+    expires_at = str(token.get("expires_at") or "").strip()
+    if expires_at:
+        try:
+            expiry = datetime.fromisoformat(expires_at)
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=LOCAL_TZ)
+            if expiry <= local_now():
+                raise HTTPException(status_code=401, detail="Notebook API key has expired")
+        except ValueError:
+            raise HTTPException(status_code=500, detail="Notebook API key expiry is invalid")
+
+    scopes = notebook_token_scopes(token)
+    if required_scope not in scopes:
+        raise HTTPException(status_code=403, detail=f"Notebook API key lacks scope: {required_scope}")
+
+    db_exec(
+        "UPDATE notebook_api_tokens SET last_used_at=:last_used_at WHERE id=:id",
+        {"last_used_at": now(), "id": token["id"]},
+    )
+    return token
 
 def db_exec(sql, params=None):
     with engine.begin() as conn:
@@ -1344,6 +1410,21 @@ def init_db():
     """)
 
     db_exec("""
+    CREATE TABLE IF NOT EXISTS notebook_api_tokens (
+        id SERIAL PRIMARY KEY,
+        token_hash TEXT UNIQUE NOT NULL,
+        token_prefix TEXT NOT NULL,
+        label TEXT NOT NULL,
+        scopes JSONB NOT NULL,
+        active BOOLEAN DEFAULT TRUE,
+        expires_at TEXT,
+        created_at TEXT,
+        last_used_at TEXT,
+        revoked_at TEXT
+    );
+    """)
+
+    db_exec("""
     CREATE TABLE IF NOT EXISTS schedules (
         id SERIAL PRIMARY KEY,
         resident_id INTEGER,
@@ -1547,6 +1628,21 @@ class ChangeRequestPayload(BaseModel):
     requested_by: Optional[str] = ""
     reason: Optional[str] = ""
 
+
+class NotebookTokenCreatePayload(BaseModel):
+    label: str = "care-notebook"
+    scopes: list[str] = Field(default_factory=lambda: list(NOTEBOOK_DEFAULT_SCOPES))
+    expires_in_days: int = 30
+
+
+class NotebookChangeRequestPayload(BaseModel):
+    resident_id: Optional[int] = None
+    resident_uid: Optional[str] = ""
+    comment: str = ""
+    proposed_payload: dict[str, Any] = Field(default_factory=dict)
+    client_note_id: Optional[str] = ""
+
+
 class DecisionPayload(BaseModel):
     decision: Optional[str] = ""
     status: Optional[str] = ""
@@ -1673,6 +1769,81 @@ def health():
         "uptime_s": uptime_s,
         "last_restart": STARTED_AT.isoformat(timespec="seconds"),
     }
+
+
+@app.post("/notebook/tokens")
+def create_notebook_token(
+    payload: NotebookTokenCreatePayload,
+    x_whisperwood_key: str | None = Header(default=None),
+):
+    """Create a scoped notebook key; the raw key is returned only once."""
+    require_key(x_whisperwood_key)
+    label = (payload.label or "care-notebook").strip()[:100]
+    if not label:
+        raise HTTPException(status_code=400, detail="Notebook token label is required")
+    if payload.expires_in_days < 1 or payload.expires_in_days > 3650:
+        raise HTTPException(status_code=400, detail="expires_in_days must be between 1 and 3650")
+
+    scopes = sorted({str(scope).strip() for scope in payload.scopes if str(scope).strip()})
+    invalid_scopes = sorted(set(scopes) - NOTEBOOK_ALLOWED_SCOPES)
+    if invalid_scopes:
+        raise HTTPException(status_code=400, detail={"invalid_scopes": invalid_scopes})
+    if not scopes:
+        raise HTTPException(status_code=400, detail="At least one notebook scope is required")
+
+    raw_token = f"wwnb_{secrets.token_urlsafe(32)}"
+    created_at = now()
+    expires_at = (local_now() + timedelta(days=payload.expires_in_days)).isoformat(timespec="seconds")
+    row = db_one("""
+        INSERT INTO notebook_api_tokens(
+            token_hash, token_prefix, label, scopes, active, expires_at, created_at
+        )
+        VALUES(:token_hash, :token_prefix, :label, :scopes, TRUE, :expires_at, :created_at)
+        RETURNING id, token_prefix, label, scopes, active, expires_at, created_at
+    """, {
+        "token_hash": notebook_token_hash(raw_token),
+        "token_prefix": raw_token[:16],
+        "label": label,
+        "scopes": json_value(scopes),
+        "expires_at": expires_at,
+        "created_at": created_at,
+    })
+    log_action(
+        "system",
+        "notebook_token_create",
+        label,
+        "success",
+        "Scoped notebook API key created",
+        payload={"label": label, "scopes": scopes, "expires_at": expires_at},
+        response=row,
+    )
+    return {"ok": True, "token": raw_token, "metadata": row}
+
+
+@app.get("/notebook/tokens")
+def list_notebook_tokens(x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    rows = db_all("""
+        SELECT id, token_prefix, label, scopes, active, expires_at,
+               created_at, last_used_at, revoked_at
+        FROM notebook_api_tokens
+        ORDER BY id DESC
+    """)
+    return {"ok": True, "tokens": rows}
+
+
+@app.post("/notebook/tokens/{token_id}/revoke")
+def revoke_notebook_token(token_id: int, x_whisperwood_key: str | None = Header(default=None)):
+    require_key(x_whisperwood_key)
+    updated = db_exec("""
+        UPDATE notebook_api_tokens
+        SET active=FALSE, revoked_at=:revoked_at
+        WHERE id=:id
+    """, {"revoked_at": now(), "id": token_id})
+    if not updated.rowcount:
+        raise HTTPException(status_code=404, detail="Notebook API key not found")
+    log_action("system", "notebook_token_revoke", str(token_id), "success", "Notebook API key revoked")
+    return {"ok": True, "id": token_id, "revoked": True}
 
 @app.post("/auth/login")
 def login(payload: LoginPayload, x_whisperwood_key: str | None = Header(default=None)):
@@ -2109,6 +2280,185 @@ def resident_audit_for_resident(resident_id: int, limit: int = 200, x_whisperwoo
     """, {"resident_id": resident_id, "limit": limit})
     return {"ok": True, "audit": rows, "logs": rows}
 
+def notebook_resident_view(row: dict) -> dict:
+    """Return resident information without exposing server filesystem paths."""
+    return {
+        "id": row.get("id"),
+        "resident_uid": row.get("resident_uid") or "",
+        "full_name": row.get("full_name") or "",
+        "room": row.get("room") or "",
+        "active": bool(row.get("active", True)),
+        "diet": row.get("diet") or "",
+        "texture": row.get("texture") or row.get("allergies") or "",
+        "fluids": row.get("fluids") or row.get("schedule") or "",
+        "note": row.get("note") or "",
+        "drinks": row.get("drinks") or "",
+        "safety_review_flag": bool(row.get("safety_review_flag", False)),
+        "safety_review_note": row.get("safety_review_note") or "",
+        "source_document_name": row.get("source_document_name") or "",
+        "image_name": row.get("image_name") or "",
+        "updated_at": row.get("updated_at") or "",
+        "created_at": row.get("created_at") or "",
+    }
+
+
+@app.get("/notebook/health")
+def notebook_health(request: Request):
+    token = require_notebook_token(request, "residents:read")
+    return {
+        "ok": True,
+        "service": "notebook",
+        "label": token.get("label") or "care-notebook",
+        "timezone": LOCAL_TIMEZONE_NAME,
+        "time": now(),
+    }
+
+
+@app.get("/notebook/residents")
+def notebook_residents(request: Request, since: Optional[str] = None, limit: int = 500):
+    require_notebook_token(request, "residents:read")
+    limit = max(1, min(int(limit or 500), 500))
+    params = {"limit": limit}
+    if since:
+        rows = db_all("""
+            SELECT * FROM residents
+            WHERE archived=FALSE AND updated_at > :since
+            ORDER BY updated_at ASC, id ASC
+            LIMIT :limit
+        """, {"since": since, **params})
+    else:
+        rows = db_all("""
+            SELECT * FROM residents
+            WHERE archived=FALSE
+            ORDER BY id DESC
+            LIMIT :limit
+        """, params)
+    return {
+        "ok": True,
+        "server_time": now(),
+        "residents": [notebook_resident_view(row) for row in rows],
+    }
+
+
+@app.get("/notebook/residents/{resident_id}")
+def notebook_resident(resident_id: int, request: Request):
+    require_notebook_token(request, "residents:read")
+    row = db_one("SELECT * FROM residents WHERE id=:id AND archived=FALSE", {"id": resident_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="Resident not found")
+    return {"ok": True, "server_time": now(), "resident": notebook_resident_view(row)}
+
+
+@app.get("/notebook/residents/{resident_id}/document")
+def notebook_document(resident_id: int, request: Request):
+    require_notebook_token(request, "attachments:read")
+    row = db_one("""
+        SELECT source_document_path, source_document_name
+        FROM residents
+        WHERE id=:id AND archived=FALSE
+    """, {"id": resident_id})
+    if not row or not row.get("source_document_path") or not os.path.exists(row["source_document_path"]):
+        raise HTTPException(status_code=404, detail="Source document not found")
+    return FileResponse(row["source_document_path"], filename=row.get("source_document_name") or "source-document")
+
+
+@app.get("/notebook/residents/{resident_id}/image")
+def notebook_image(resident_id: int, request: Request):
+    require_notebook_token(request, "attachments:read")
+    row = db_one("""
+        SELECT image_path, image_name
+        FROM residents
+        WHERE id=:id AND archived=FALSE
+    """, {"id": resident_id})
+    if not row or not row.get("image_path") or not os.path.exists(row["image_path"]):
+        raise HTTPException(status_code=404, detail="Resident image not found")
+    return FileResponse(row["image_path"], filename=row.get("image_name") or "resident-image")
+
+
+@app.get("/notebook/change-requests")
+def notebook_change_requests(request: Request, status: Optional[str] = None, limit: int = 100):
+    token = require_notebook_token(request, "change_requests:read_own")
+    limit = max(1, min(int(limit or 100), 200))
+    params = {"limit": limit}
+    filters = []
+    if status:
+        filters.append("upper(cr.status)=upper(:status)")
+        params["status"] = status
+    scopes = notebook_token_scopes(token)
+    if "change_requests:read_all" not in scopes:
+        filters.append("cr.requested_by_username=:requester")
+        params["requester"] = token.get("label") or "care-notebook"
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    rows = db_all(f"""
+        SELECT cr.id, cr.resident_id, cr.resident_uid, cr.status,
+               COALESCE(cr.proposed_payload, cr.proposed_new) AS proposed_payload,
+               COALESCE(cr.comment, cr.reason, '') AS comment,
+               COALESCE(cr.requested_by_username, cr.requested_by, '') AS requested_by_username,
+               COALESCE(cr.reviewed_by_username, cr.decision_by, '') AS reviewed_by_username,
+               COALESCE(cr.review_note, cr.decision_note, '') AS review_note,
+               COALESCE(cr.reviewed_at, cr.decided_at, '') AS reviewed_at,
+               cr.created_at, r.full_name, r.room
+        FROM resident_change_requests cr
+        LEFT JOIN residents r ON r.id=cr.resident_id
+        {where}
+        ORDER BY cr.id DESC
+        LIMIT :limit
+    """, params)
+    return {"ok": True, "requests": rows}
+
+
+@app.post("/notebook/change-requests")
+def notebook_create_change_request(payload: NotebookChangeRequestPayload, request: Request):
+    token = require_notebook_token(request, "change_requests:create")
+    resident = None
+    if payload.resident_id:
+        resident = db_one("SELECT * FROM residents WHERE id=:id AND archived=FALSE", {"id": payload.resident_id})
+    elif payload.resident_uid:
+        resident = db_one("SELECT * FROM residents WHERE resident_uid=:uid AND archived=FALSE", {"uid": payload.resident_uid})
+    if not resident:
+        raise HTTPException(status_code=404, detail="Resident not found")
+
+    comment = (payload.comment or "").strip()
+    proposed = dict(payload.proposed_payload or {})
+    if not comment and not proposed:
+        raise HTTPException(status_code=400, detail="A note or proposed resident change is required")
+
+    requester = token.get("label") or "care-notebook"
+    inserted = db_one("""
+        INSERT INTO resident_change_requests(
+            resident_id, resident_uid, requested_by, status,
+            proposed_new, proposed_payload, reason, comment,
+            requested_by_user_id, requested_by_username, created_at
+        )
+        VALUES(
+            :resident_id, :resident_uid, :requested_by, 'PENDING',
+            :proposed_new, :proposed_payload, :reason, :comment,
+            NULL, :requested_by_username, :created_at
+        )
+        RETURNING *
+    """, {
+        "resident_id": resident["id"],
+        "resident_uid": resident.get("resident_uid") or "",
+        "requested_by": requester,
+        "proposed_new": json_value(proposed),
+        "proposed_payload": json_value(proposed),
+        "reason": comment,
+        "comment": comment,
+        "requested_by_username": requester,
+        "created_at": now(),
+    })
+    log_action(
+        requester,
+        "notebook_change_request",
+        resident.get("resident_uid") or str(resident["id"]),
+        "success",
+        "Notebook change request submitted for approval",
+        payload={"resident_id": resident["id"], "comment": comment, "proposed_payload": proposed, "client_note_id": payload.client_note_id or ""},
+        response={"request_id": inserted.get("id") if inserted else None},
+    )
+    return {"ok": True, "request": inserted}
+
+
 @app.post("/resident-change-requests")
 def create_change_request(payload: ChangeRequestPayload, x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
@@ -2170,12 +2520,116 @@ def change_requests(status: Optional[str] = None, limit: int = 100, x_whisperwoo
     """, params)
     return {"ok": True, "requests": rows}
 
+APPROVED_RESIDENT_FIELDS = {
+    "resident_uid",
+    "full_name",
+    "room",
+    "status_alert",
+    "diet",
+    "texture",
+    "allergies",
+    "note",
+    "drinks",
+    "fluids",
+    "schedule",
+    "active",
+    "safety_review_flag",
+    "needs_safety_review",
+    "safety_review_note",
+    "lcd_schedule_enabled",
+    "lcd_on_time",
+    "lcd_off_time",
+    "sleep_if_no_image",
+}
+
+
+def apply_approved_resident_request(request_row: dict, reviewed_by: str) -> tuple[dict, list[str]]:
+    resident_id = request_row.get("resident_id")
+    resident = db_one("SELECT * FROM residents WHERE id=:id", {"id": resident_id})
+    if not resident:
+        raise HTTPException(status_code=404, detail="Resident linked to request was not found")
+
+    proposed = request_row.get("proposed_payload") or request_row.get("proposed_new") or {}
+    if isinstance(proposed, str):
+        try:
+            proposed = json.loads(proposed)
+        except Exception:
+            proposed = {}
+    proposed = proposed if isinstance(proposed, dict) else {}
+
+    values: dict[str, Any] = {}
+    changed_fields: list[str] = []
+    for key, value in proposed.items():
+        if key not in APPROVED_RESIDENT_FIELDS:
+            continue
+        if key in {"needs_safety_review"}:
+            key = "safety_review_flag"
+        if key == "texture":
+            values["texture"] = value or ""
+            values["allergies"] = value or ""
+            changed_fields.extend(["texture", "allergies"])
+        elif key == "allergies":
+            values["texture"] = value or ""
+            values["allergies"] = value or ""
+            changed_fields.extend(["texture", "allergies"])
+        elif key == "fluids":
+            values["fluids"] = value or ""
+            values["schedule"] = value or ""
+            changed_fields.extend(["fluids", "schedule"])
+        elif key == "schedule":
+            values["fluids"] = value or ""
+            values["schedule"] = value or ""
+            changed_fields.extend(["fluids", "schedule"])
+        else:
+            values[key] = value
+            changed_fields.append(key)
+
+    changed_fields = sorted(set(changed_fields))
+    if values:
+        values.update({"id": resident_id, "updated_at": now()})
+        assignments = ", ".join(f"{key}=:{key}" for key in values if key not in {"id", "updated_at"})
+        db_exec(
+            f"UPDATE residents SET {assignments}, updated_at=:updated_at WHERE id=:id",
+            values,
+        )
+
+    updated = db_one("SELECT * FROM residents WHERE id=:id", {"id": resident_id}) or resident
+    log_resident_audit(
+        reviewed_by,
+        "resident_update_approved",
+        updated,
+        old_values=resident,
+        new_values=updated,
+        reason=request_row.get("comment") or request_row.get("reason") or "Resident change request approved",
+    )
+    return updated, changed_fields
+
+
+def send_approved_resident_display(resident_id: int) -> dict:
+    row = db_one("""
+        SELECT r.*, d.device_id AS paired_device_id
+        FROM residents r
+        LEFT JOIN devices d ON d.paired_resident_id = r.id
+        WHERE r.id=:id
+        LIMIT 1
+    """, {"id": resident_id})
+    if not row or not row.get("paired_device_id"):
+        return {"ok": True, "sent": False, "reason": "Resident is not paired to a device"}
+    outbound = resident_display_payload(row, row.get("paired_device_id") or "")
+    result = operation_request("POST", "/resident_display", json=outbound, timeout=150)
+    return {"ok": bool(result.get("ok", True)), "sent": True, "device_id": outbound.get("device_id"), "response": result}
+
+
 @app.put("/resident-change-requests/{request_id}/decision")
 def decide_change_request(request_id: int, payload: DecisionPayload, x_whisperwood_key: str | None = Header(default=None)):
     require_key(x_whisperwood_key)
     status = (payload.status or payload.decision or "REVIEWED").upper()
     reviewed_by = payload.reviewed_by_username or payload.decision_by or "admin"
     note = payload.review_note or payload.decision_note or ""
+    existing = db_one("SELECT * FROM resident_change_requests WHERE id=:id", {"id": request_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Change request not found")
+
     db_exec("""
         UPDATE resident_change_requests
         SET status=:status,
@@ -2199,8 +2653,34 @@ def decide_change_request(request_id: int, payload: DecisionPayload, x_whisperwo
         "id": request_id,
     })
     request = db_one("SELECT * FROM resident_change_requests WHERE id=:id", {"id": request_id}) or {}
+    display_sync = {"ok": True, "sent": False, "reason": "Not approved"}
+    approved_fields: list[str] = []
+    if status == "APPROVED" and str(existing.get("status") or "").upper() != "APPROVED":
+        _, approved_fields = apply_approved_resident_request(request, reviewed_by)
+        try:
+            display_sync = send_approved_resident_display(int(request.get("resident_id")))
+            log_action(
+                reviewed_by,
+                "approved_resident_display",
+                request.get("resident_uid") or str(request.get("resident_id") or ""),
+                "success" if display_sync.get("ok") else "warning",
+                "Approved resident update forwarded to display pipeline",
+                payload={"request_id": request_id, "fields": approved_fields},
+                response=display_sync,
+            )
+        except Exception as exc:
+            display_sync = {"ok": False, "sent": False, "reason": str(exc)}
+            log_action(
+                reviewed_by,
+                "approved_resident_display",
+                request.get("resident_uid") or str(request.get("resident_id") or ""),
+                "warning",
+                "Resident approval saved but display forwarding needs retry",
+                payload={"request_id": request_id, "fields": approved_fields},
+                response=display_sync,
+            )
     log_action(reviewed_by, "resident_review_decision", request.get("resident_uid") or "", "success", f"Review request {status.lower()}", payload=payload.dict(), response=request)
-    return {"ok": True, "request": request}
+    return {"ok": True, "request": request, "approved_fields": approved_fields, "display_sync": display_sync}
 
 @app.post("/verification-checks")
 def create_verification_check(payload: VerificationPayload, x_whisperwood_key: str | None = Header(default=None)):
