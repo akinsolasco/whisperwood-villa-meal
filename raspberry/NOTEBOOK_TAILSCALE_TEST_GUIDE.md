@@ -64,8 +64,10 @@ The test checks:
 
 Only run this after choosing a demo resident. It creates a real pending approval request, so the nurse admin must reject it after confirming the test.
 
+Replace `<resident-id>` with an ID returned by the read-only resident test:
+
 ```powershell
-python scripts/test_notebook_api.py --submit-note --resident-id 26 --comment "Notebook voice-note test; reject after review."
+python scripts/test_notebook_api.py --submit-note --resident-id <resident-id> --comment "Notebook voice-note test; reject after review."
 ```
 
 The request should appear in the desktop application's existing **Approvals** section as `PENDING`.
