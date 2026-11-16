@@ -34,6 +34,12 @@ Test-NetConnection 100.108.80.111 -Port 8095
 ```
 
 The TCP test should report `TcpTestSucceeded : True`.
+The demo host firewall separately blocks TCP `7000` on `tailscale0`; the desktop
+Control Service remains available only through its intended local/application path.
+In the Tailscale admin policy, grant the tester group access to the demo host on
+TCP `8095` only. Remove any `7000` destination from that group. The notebook key
+is still required after the network rule, so the port rule alone does not grant
+resident access.
 
 ## 3. Set the notebook key without saving it in the project
 

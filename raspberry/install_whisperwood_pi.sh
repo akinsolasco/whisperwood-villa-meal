@@ -292,7 +292,15 @@ configure_firewall() {
   fi
   ufw allow 22/tcp
   ufw allow "${CONTROL_PORT}/tcp"
-  ufw allow "${NOTEBOOK_PORT}/tcp"
+  if ip link show tailscale0 >/dev/null 2>&1; then
+    # The notebook is the only service intended for the remote Tailscale group.
+    ufw allow in on tailscale0 to any port "${NOTEBOOK_PORT}" proto tcp
+    ufw delete deny in on tailscale0 to any port "${CONTROL_PORT}" proto tcp >/dev/null 2>&1 || true
+    ufw insert 1 deny in on tailscale0 to any port "${CONTROL_PORT}" proto tcp
+  else
+    # Keep first-boot installs reachable; tighten to tailscale0 after Tailscale is installed.
+    ufw allow "${NOTEBOOK_PORT}/tcp"
+  fi
   ufw allow "${ESP32_TCP_PORT}/tcp"
   if [[ "${INSTALL_DOWNLOAD_SITE}" == "1" ]]; then
     ufw allow "${DOWNLOAD_PORT}/tcp"
