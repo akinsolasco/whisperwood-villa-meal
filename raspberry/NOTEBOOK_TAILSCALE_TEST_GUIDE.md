@@ -17,10 +17,11 @@ The demo address is:
 100.108.80.111
 ```
 
-The notebook API is on port `7000` through the Tailscale network:
+The notebook API is on its dedicated port `8095` through the Tailscale network.
+The tester does not need access to the main Control Service port `7000`:
 
 ```text
-http://100.108.80.111:7000
+http://100.108.80.111:8095
 ```
 
 ## 2. Confirm the route
@@ -29,7 +30,7 @@ On Windows PowerShell:
 
 ```powershell
 tailscale ping 100.108.80.111
-Test-NetConnection 100.108.80.111 -Port 7000
+Test-NetConnection 100.108.80.111 -Port 8095
 ```
 
 The TCP test should report `TcpTestSucceeded : True`.
@@ -39,7 +40,7 @@ The TCP test should report `TcpTestSucceeded : True`.
 Open PowerShell and set the values only for the current terminal window:
 
 ```powershell
-$env:NOTEBOOK_API_BASE_URL = "http://100.108.80.111:7000"
+$env:NOTEBOOK_API_BASE_URL = "http://100.108.80.111:8095"
 $env:NOTEBOOK_API_KEY = "PASTE_THE_NOTEBOOK_KEY_HERE"
 ```
 

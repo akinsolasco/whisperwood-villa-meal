@@ -4,7 +4,7 @@ This is a restricted API for a remote care notebook or large-screen interface. I
 
 ## Access Model
 
-Use Tailscale Serve for private testing or an outbound HTTPS tunnel for a production URL. Only expose the notebook service. Do not port-forward PostgreSQL, SSH, Operation Manager, or the full Control Service.
+Use the dedicated notebook service port `8095` for private testing or an outbound HTTPS tunnel for a production URL. Add only TCP `8095` to the approved Tailscale group. Do not grant that group TCP `7000`, and do not port-forward PostgreSQL, SSH, Operation Manager, or the full Control Service.
 
 The notebook key is sent as either:
 

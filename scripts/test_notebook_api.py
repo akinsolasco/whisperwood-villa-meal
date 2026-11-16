@@ -54,7 +54,9 @@ def main() -> int:
     for label, method, path in checks:
         status, body = request_json(session, method, f"{base_url}{path}")
         if label == "protected full API is blocked":
-            passed = status in {401, 403}
+            # The dedicated service intentionally does not mount the full
+            # Control Service routes, so 404 is also a successful boundary.
+            passed = status in {401, 403, 404}
         else:
             passed = status == 200 and isinstance(body, dict) and body.get("ok") is True
         print(f"{'PASS' if passed else 'FAIL'} {label}: HTTP {status}")

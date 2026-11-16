@@ -20,6 +20,7 @@ set -euo pipefail
 #   OPERATION_HTTP_PORT     Local Operation Manager HTTP port. Default: 8000.
 #   ESP32_TCP_PORT          ESP32 TCP gateway port. Default: 5000.
 #   DOWNLOAD_PORT           Installer download-site port. Default: 8090.
+#   NOTEBOOK_PORT           Restricted Care Notebook API port. Default: 8095.
 #   INSTALL_DOWNLOAD_SITE   1 to install download page, 0 to skip. Default: 1.
 #   ENABLE_UFW              1 to configure firewall, 0 to skip. Default: 1.
 #   HOSTNAME_VALUE          Optional system hostname to set.
@@ -38,6 +39,7 @@ CONTROL_PORT="${CONTROL_PORT:-7000}"
 OPERATION_HTTP_PORT="${OPERATION_HTTP_PORT:-8000}"
 ESP32_TCP_PORT="${ESP32_TCP_PORT:-5000}"
 DOWNLOAD_PORT="${DOWNLOAD_PORT:-8090}"
+NOTEBOOK_PORT="${NOTEBOOK_PORT:-8095}"
 INSTALL_DOWNLOAD_SITE="${INSTALL_DOWNLOAD_SITE:-1}"
 ENABLE_UFW="${ENABLE_UFW:-1}"
 HOSTNAME_VALUE="${HOSTNAME_VALUE:-}"
@@ -52,6 +54,7 @@ WHISPERWOOD_SMTP_TLS="${WHISPERWOOD_SMTP_TLS:-1}"
 WHISPERWOOD_SMTP_SSL="${WHISPERWOOD_SMTP_SSL:-0}"
 
 CONTROL_SOURCE="${REPO_ROOT}/raspberry/control/app.py"
+NOTEBOOK_SOURCE="${REPO_ROOT}/raspberry/control/notebook_service.py"
 OPERATION_SOURCE="${REPO_ROOT}/raspberry/operation/app.py"
 DOWNLOAD_INSTALLER="${REPO_ROOT}/scripts/install_raspberry_download_site.sh"
 
@@ -62,6 +65,11 @@ fi
 
 if [[ ! -f "${CONTROL_SOURCE}" ]]; then
   echo "Missing ${CONTROL_SOURCE}. Run this script from the repo root."
+  exit 1
+fi
+
+if [[ ! -f "${NOTEBOOK_SOURCE}" ]]; then
+  echo "Missing ${NOTEBOOK_SOURCE}. Run this script from the repo root."
   exit 1
 fi
 
@@ -169,9 +177,11 @@ install_python_apps() {
     "${DATA_DIR}/backups" "${DATA_DIR}/firmware"
 
   backup_existing "${CONTROL_DIR}/app.py"
+  backup_existing "${CONTROL_DIR}/notebook_service.py"
   backup_existing "${OPERATION_DIR}/app.py"
 
   install -m 0644 "${CONTROL_SOURCE}" "${CONTROL_DIR}/app.py"
+  install -m 0644 "${NOTEBOOK_SOURCE}" "${CONTROL_DIR}/notebook_service.py"
   install -m 0644 "${OPERATION_SOURCE}" "${OPERATION_DIR}/app.py"
   write_requirements
 
@@ -184,6 +194,7 @@ install_python_apps() {
   "${OPERATION_DIR}/venv/bin/pip" install -r "${OPERATION_DIR}/requirements.txt"
 
   "${CONTROL_DIR}/venv/bin/python" -m py_compile "${CONTROL_DIR}/app.py"
+  "${CONTROL_DIR}/venv/bin/python" -m py_compile "${CONTROL_DIR}/notebook_service.py"
   "${OPERATION_DIR}/venv/bin/python" -m py_compile "${OPERATION_DIR}/app.py"
 }
 
@@ -255,6 +266,24 @@ EnvironmentFile=${OPERATION_DIR}/.env
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  cat > /etc/systemd/system/whisperwood-notebook.service <<EOF
+[Unit]
+Description=Whisperwood Care Notebook API (restricted)
+After=network-online.target postgresql.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=${CONTROL_DIR}
+ExecStart=${CONTROL_DIR}/venv/bin/uvicorn notebook_service:app --host 0.0.0.0 --port ${NOTEBOOK_PORT}
+Restart=always
+RestartSec=5
+User=${SERVICE_USER}
+EnvironmentFile=${CONTROL_DIR}/.env
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 configure_firewall() {
@@ -263,6 +292,7 @@ configure_firewall() {
   fi
   ufw allow 22/tcp
   ufw allow "${CONTROL_PORT}/tcp"
+  ufw allow "${NOTEBOOK_PORT}/tcp"
   ufw allow "${ESP32_TCP_PORT}/tcp"
   if [[ "${INSTALL_DOWNLOAD_SITE}" == "1" ]]; then
     ufw allow "${DOWNLOAD_PORT}/tcp"
@@ -294,17 +324,21 @@ start_services() {
   systemctl daemon-reload
   systemctl enable --now whisperwood-operation.service
   systemctl enable --now whisperwood-control.service
+  systemctl enable --now whisperwood-notebook.service
   systemctl restart whisperwood-operation.service
   systemctl restart whisperwood-control.service
+  systemctl restart whisperwood-notebook.service
 }
 
 verify_services() {
   sleep 5
   systemctl --no-pager --full status whisperwood-operation.service >/dev/null
   systemctl --no-pager --full status whisperwood-control.service >/dev/null
+  systemctl --no-pager --full status whisperwood-notebook.service >/dev/null
 
   curl -fsS "http://127.0.0.1:${OPERATION_HTTP_PORT}/health" >/dev/null
   curl -fsS -H "X-Whisperwood-Key: ${CONTROL_API_KEY}" "http://127.0.0.1:${CONTROL_PORT}/health" >/dev/null
+  curl -fsS "http://127.0.0.1:${NOTEBOOK_PORT}/health" >/dev/null
 
   if [[ "${INSTALL_DOWNLOAD_SITE}" == "1" ]]; then
     systemctl --no-pager --full status whisperwood-download-site.service >/dev/null
@@ -320,6 +354,7 @@ print_summary() {
   echo
   echo "Services:"
   echo "  whisperwood-control      http://0.0.0.0:${CONTROL_PORT}"
+  echo "  whisperwood-notebook     http://0.0.0.0:${NOTEBOOK_PORT} (restricted; grant only this Tailscale TCP port)"
   echo "  whisperwood-operation    http://127.0.0.1:${OPERATION_HTTP_PORT}"
   echo "  ESP32 TCP gateway        0.0.0.0:${ESP32_TCP_PORT}"
   if [[ "${INSTALL_DOWNLOAD_SITE}" == "1" ]]; then
