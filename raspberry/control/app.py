@@ -13,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import configparser, hashlib, os, json, platform, subprocess, shutil, psutil, requests, secrets, smtplib, string, tarfile, tempfile, time, threading
 
-APP_VERSION = "0.6.9"
+APP_VERSION = "0.7.0"
 LOCAL_TIMEZONE_NAME = os.getenv("WHISPERWOOD_TIMEZONE", "America/Halifax")
 LOCAL_TIMEZONE_LABEL = os.getenv("WHISPERWOOD_TIMEZONE_LABEL", "Atlantic Time")
 
