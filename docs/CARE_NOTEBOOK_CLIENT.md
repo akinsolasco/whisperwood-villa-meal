@@ -11,6 +11,7 @@ does not need to install Python, PyQt, or a separate Qt runtime.
 
 - connect to the dedicated notebook API using a scoped `wwnb_...` key;
 - search and select active residents;
+- refresh the resident list automatically every five seconds while connected;
 - show approved resident display fields, safety-review state, and attachment names;
 - submit an observation or note for nurse/admin approval; and
 - show the status of notes created by this notebook.
@@ -21,7 +22,7 @@ Control Service, access the database, or access Raspberry Pi administration.
 ## Run the packaged demo
 
 1. Extract `EnhancedLivingCareNotebook-demo-v0.1.0.zip`.
-2. Start `EnhancedLivingCareNotebook.exe` (client v0.1.1).
+2. Start `EnhancedLivingCareNotebook.exe` (client v0.1.2).
 3. Confirm the notebook API address supplied by the project owner.
 4. Paste the separate notebook API key into the API key field.
 5. Select **Connect**, then select a resident.

@@ -20,8 +20,9 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 
-CLIENT_VERSION = "0.1.1"
+CLIENT_VERSION = "0.1.2"
 DEFAULT_BASE_URL = "https://consistent-gilbert-graphs-adjacent.trycloudflare.com"
+AUTO_REFRESH_MS = 5000
 APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "EnhancedLivingCareNotebook"
 SETTINGS_PATH = APP_DATA_DIR / "settings.json"
 
@@ -109,11 +110,13 @@ class CareNotebookApp:
         self.visible_residents: list[dict[str, Any]] = []
         self.selected_resident: Optional[dict[str, Any]] = None
         self.busy = False
+        self.connected_once = False
 
         self._configure_style()
         self._build_ui()
         self._load_settings()
         self.set_status("Enter the notebook key, then select Connect.", "info")
+        self.root.after(AUTO_REFRESH_MS, self.auto_refresh)
 
     def _configure_style(self) -> None:
         style = ttk.Style(self.root)
@@ -246,7 +249,7 @@ class CareNotebookApp:
     def api(self) -> NotebookApi:
         return NotebookApi(self.base_url.get(), self.api_key.get())
 
-    def run_async(self, operation: Callable[[], Any], on_success: Callable[[Any], None]) -> None:
+    def run_async(self, operation: Callable[[], Any], on_success: Callable[[Any], None], show_errors: bool = True) -> None:
         if self.busy:
             return
         self.busy = True
@@ -259,7 +262,11 @@ class CareNotebookApp:
                 result = operation()
                 self.root.after(0, lambda: self.finish_async(lambda: on_success(result)))
             except Exception as exc:
-                self.root.after(0, lambda: self.finish_async(lambda: self.show_error(str(exc))))
+                if show_errors:
+                    callback = lambda: self.show_error(str(exc))
+                else:
+                    callback = lambda: self.set_status(f"Auto-refresh unavailable: {exc}", "error")
+                self.root.after(0, lambda: self.finish_async(callback))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -278,18 +285,29 @@ class CareNotebookApp:
         self.run_async(lambda: self.api().health(), self.connected)
 
     def connected(self, payload: dict[str, Any]) -> None:
+        self.connected_once = True
         self.set_status(f"Connected to {payload.get('label') or 'notebook'}. Loading residents...", "ok")
         self.refresh()
 
-    def refresh(self) -> None:
-        self.run_async(lambda: self.api().residents(), self.residents_loaded)
+    def auto_refresh(self) -> None:
+        if self.connected_once and not self.busy and self.api_key.get().strip():
+            self.refresh(silent=True)
+        self.root.after(AUTO_REFRESH_MS, self.auto_refresh)
 
-    def residents_loaded(self, residents: list[dict[str, Any]]) -> None:
+    def refresh(self, silent: bool = False) -> None:
+        self.run_async(
+            lambda: self.api().residents(),
+            lambda rows: self.residents_loaded(rows, silent=silent),
+            show_errors=not silent,
+        )
+
+    def residents_loaded(self, residents: list[dict[str, Any]], silent: bool = False) -> None:
         self.residents_data = residents
         self.filter_residents()
         self.set_status(f"Connected. {len(residents)} active resident(s) available.", "ok")
 
     def filter_residents(self) -> None:
+        selected_id = self.selected_resident.get("id") if self.selected_resident else None
         query = self.search.get().strip().lower()
         if query == "search name, room, or uid":
             query = ""
@@ -303,7 +321,9 @@ class CareNotebookApp:
             self.listbox.insert("end", f"{value(resident.get('full_name'), 'Unnamed resident')}  |  Room {value(resident.get('room'), '-')}" )
         self.count_label.configure(text=f"{len(self.visible_residents)} of {len(self.residents_data)} resident(s)")
         if self.visible_residents:
-            self.listbox.selection_set(0)
+            target = next((index for index, resident in enumerate(self.visible_residents) if resident.get("id") == selected_id), 0)
+            self.listbox.selection_set(target)
+            self.listbox.see(target)
             self.select_resident()
         else:
             self.selected_resident = None

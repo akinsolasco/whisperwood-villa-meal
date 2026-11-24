@@ -19,7 +19,7 @@ $exe = Join-Path $root "dist\EnhancedLivingCareNotebook.exe"
 Copy-Item $exe (Join-Path $artifactDir "EnhancedLivingCareNotebook.exe") -Force
 Copy-Item (Join-Path $root "docs\CARE_NOTEBOOK_CLIENT.md") (Join-Path $artifactDir "README.md") -Force
 
-$zip = Join-Path $artifactDir "EnhancedLivingCareNotebook-demo-v0.1.1.zip"
+$zip = Join-Path $artifactDir "EnhancedLivingCareNotebook-demo-v0.1.2.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path (Join-Path $artifactDir "EnhancedLivingCareNotebook.exe"), (Join-Path $artifactDir "README.md") -DestinationPath $zip
 Write-Host "Built: $exe"
