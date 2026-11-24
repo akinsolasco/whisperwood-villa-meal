@@ -4,6 +4,9 @@ This is a small Windows demonstration client for the restricted Whisperwood
 Notebook API. It is intended as a starting point for a large-screen or voice
 notebook project.
 
+The packaged client uses standard Windows Tkinter rather than Qt, so the team
+does not need to install Python, PyQt, or a separate Qt runtime.
+
 ## What it can do
 
 - connect to the dedicated notebook API using a scoped `wwnb_...` key;
@@ -18,7 +21,7 @@ Control Service, access the database, or access Raspberry Pi administration.
 ## Run the packaged demo
 
 1. Extract `EnhancedLivingCareNotebook-demo-v0.1.0.zip`.
-2. Start `EnhancedLivingCareNotebook.exe`.
+2. Start `EnhancedLivingCareNotebook.exe` (client v0.1.1).
 3. Confirm the notebook API address supplied by the project owner.
 4. Paste the separate notebook API key into the API key field.
 5. Select **Connect**, then select a resident.

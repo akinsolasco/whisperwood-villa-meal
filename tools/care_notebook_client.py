@@ -1,8 +1,8 @@
-"""Small external client for the restricted Whisperwood Care Notebook API.
+"""Portable Windows client for the restricted Whisperwood Care Notebook API.
 
-This is intentionally not the desktop administration application. It only
-reads the notebook API and creates approval requests; it never edits residents
-directly and never talks to the full Control Service.
+This client uses only Tkinter and requests so the packaged EXE does not depend
+on Qt DLLs. It can read resident display information and submit notes for
+approval; it cannot edit residents directly.
 """
 
 from __future__ import annotations
@@ -10,34 +10,29 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import uuid
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
-from PyQt6 import QtCore, QtGui, QtWidgets
+import tkinter as tk
+from tkinter import messagebox, ttk
 
 
-CLIENT_VERSION = "0.1.0"
+CLIENT_VERSION = "0.1.1"
 DEFAULT_BASE_URL = "https://consistent-gilbert-graphs-adjacent.trycloudflare.com"
 APP_DATA_DIR = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "EnhancedLivingCareNotebook"
 SETTINGS_PATH = APP_DATA_DIR / "settings.json"
 
 
-def display_value(value: Any, fallback: str = "Not provided") -> str:
+class ApiFailure(Exception):
+    pass
+
+
+def value(value: Any, fallback: str = "Not provided") -> str:
     text = str(value or "").strip()
     return text or fallback
-
-
-@dataclass
-class ApiFailure(Exception):
-    message: str
-    status_code: Optional[int] = None
-
-    def __str__(self) -> str:
-        return self.message
 
 
 class NotebookApi:
@@ -52,7 +47,7 @@ class NotebookApi:
             "User-Agent": f"EnhancedLivingCareNotebook/{CLIENT_VERSION}",
         })
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    def request_json(self, method: str, path: str, **kwargs: Any) -> Any:
         if not self.base_url:
             raise ApiFailure("Enter the notebook API address first.")
         if not self.api_key:
@@ -60,7 +55,7 @@ class NotebookApi:
         try:
             response = self.session.request(method, f"{self.base_url}{path}", timeout=self.timeout, **kwargs)
         except requests.exceptions.Timeout as exc:
-            raise ApiFailure("The notebook service took too long to respond. Check the network or try again.") from exc
+            raise ApiFailure("The notebook service took too long to respond. Check the network and try again.") from exc
         except requests.exceptions.RequestException as exc:
             raise ApiFailure(f"Could not reach the notebook service. Check the API address and network.\n\n{exc}") from exc
 
@@ -75,26 +70,20 @@ class NotebookApi:
                 detail = "The notebook API key was rejected. Check that the key is correct and active."
             elif response.status_code == 403:
                 detail = "This notebook key does not have permission for that action."
-            raise ApiFailure(detail or f"Notebook service returned HTTP {response.status_code}.", response.status_code)
-
+            raise ApiFailure(detail or f"Notebook service returned HTTP {response.status_code}.")
         try:
             return response.json()
         except ValueError as exc:
             raise ApiFailure("The notebook service returned an unreadable response.") from exc
 
     def health(self) -> dict[str, Any]:
-        return self._request("GET", "/notebook/health")
+        return self.request_json("GET", "/notebook/health")
 
     def residents(self) -> list[dict[str, Any]]:
-        payload = self._request("GET", "/notebook/residents", params={"limit": 500})
-        return list(payload.get("residents") or [])
-
-    def resident(self, resident_id: int) -> dict[str, Any]:
-        payload = self._request("GET", f"/notebook/residents/{resident_id}")
-        return dict(payload.get("resident") or {})
+        return list(self.request_json("GET", "/notebook/residents", params={"limit": 500}).get("residents") or [])
 
     def submit_note(self, resident_id: int, comment: str) -> dict[str, Any]:
-        return self._request(
+        return self.request_json(
             "POST",
             "/notebook/change-requests",
             json={
@@ -106,381 +95,283 @@ class NotebookApi:
         )
 
     def requests(self) -> list[dict[str, Any]]:
-        payload = self._request("GET", "/notebook/change-requests", params={"limit": 50})
-        return list(payload.get("requests") or [])
+        return list(self.request_json("GET", "/notebook/change-requests", params={"limit": 50}).get("requests") or [])
 
 
-class ApiWorker(QtCore.QObject):
-    finished = QtCore.pyqtSignal(object)
-    failed = QtCore.pyqtSignal(str)
-
-    def __init__(self, operation: Any):
-        super().__init__()
-        self.operation = operation
-
-    @QtCore.pyqtSlot()
-    def run(self) -> None:
-        try:
-            self.finished.emit(self.operation())
-        except ApiFailure as exc:
-            self.failed.emit(str(exc))
-        except Exception as exc:  # Keep unexpected failures visible instead of closing the window.
-            self.failed.emit(f"Unexpected client error: {exc}")
-
-
-class CareNotebookWindow(QtWidgets.QMainWindow):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowTitle("Enhanced Living Care Notebook")
-        self.setMinimumSize(920, 620)
-        self.resize(1120, 720)
-        self.setWindowIcon(QtGui.QIcon(self._asset_path("enhanced_living_whisperwood_icon.ico")))
-
+class CareNotebookApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("Enhanced Living Care Notebook")
+        self.root.geometry("1100x720")
+        self.root.minsize(860, 560)
+        self.root.configure(bg="#f4f7fb")
         self.residents_data: list[dict[str, Any]] = []
+        self.visible_residents: list[dict[str, Any]] = []
         self.selected_resident: Optional[dict[str, Any]] = None
-        self.thread: Optional[QtCore.QThread] = None
-        self.worker: Optional[ApiWorker] = None
+        self.busy = False
 
+        self._configure_style()
         self._build_ui()
         self._load_settings()
-        self._set_status("Enter the notebook key, then select Connect.", "info")
+        self.set_status("Enter the notebook key, then select Connect.", "info")
 
-    @staticmethod
-    def _asset_path(name: str) -> str:
-        candidates = [
-            Path(__file__).resolve().parents[1] / "assets" / name,
-            Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "assets" / name,
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-        return ""
+    def _configure_style(self) -> None:
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            pass
+        style.configure("App.TFrame", background="#f4f7fb")
+        style.configure("Card.TFrame", background="#ffffff", relief="solid", borderwidth=1)
+        style.configure("Title.TLabel", background="#ffffff", foreground="#123d3d", font=("Segoe UI", 20, "bold"))
+        style.configure("Muted.TLabel", background="#ffffff", foreground="#64748b", font=("Segoe UI", 9))
+        style.configure("Section.TLabel", background="#ffffff", foreground="#123d3d", font=("Segoe UI", 12, "bold"))
+        style.configure("Status.TLabel", background="#f4f7fb", font=("Segoe UI", 9))
+        style.configure("Primary.TButton", font=("Segoe UI", 9, "bold"))
 
     def _build_ui(self) -> None:
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background: #f5f7fb; color: #172033; }
-            QFrame#topbar, QFrame#card { background: #ffffff; border: 1px solid #dce3ee; border-radius: 12px; }
-            QLabel#brand { color: #123d3d; font-size: 21px; font-weight: 800; }
-            QLabel#subtitle { color: #64748b; font-size: 12px; }
-            QLabel#section { color: #123d3d; font-size: 15px; font-weight: 800; }
-            QLabel#muted { color: #64748b; }
-            QLineEdit, QTextEdit, QListWidget { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 7px; }
-            QLineEdit:focus, QTextEdit:focus, QListWidget:focus { border: 1px solid #ee9f12; }
-            QListWidget::item { padding: 9px 8px; border-bottom: 1px solid #eef2f7; }
-            QListWidget::item:selected { background: #fff2ce; color: #172033; border-left: 3px solid #ee9f12; }
-            QPushButton { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 14px; font-weight: 700; }
-            QPushButton:hover { border-color: #ee9f12; background: #fffaf0; }
-            QPushButton#primary { background: #eea900; border-color: #d58f00; color: #1d1d1d; }
-            QPushButton#primary:hover { background: #f6b915; }
-            QPushButton:disabled { color: #94a3b8; background: #f1f5f9; }
-            QScrollArea { border: none; background: transparent; }
-        """)
+        outer = ttk.Frame(self.root, style="App.TFrame", padding=18)
+        outer.pack(fill="both", expand=True)
 
-        central = QtWidgets.QWidget()
-        outer = QtWidgets.QVBoxLayout(central)
-        outer.setContentsMargins(22, 18, 22, 18)
-        outer.setSpacing(14)
+        header = ttk.Frame(outer, style="Card.TFrame", padding=16)
+        header.pack(fill="x", pady=(0, 10))
+        title_row = ttk.Frame(header, style="Card.TFrame")
+        title_row.pack(fill="x")
+        title_box = ttk.Frame(title_row, style="Card.TFrame")
+        title_box.pack(side="left", fill="x", expand=True)
+        ttk.Label(title_box, text="Enhanced Living Care Notebook", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(title_box, text="Resident information viewer and approval-note channel", style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(title_row, text=f"Client v{CLIENT_VERSION}", style="Muted.TLabel").pack(side="right", anchor="n")
 
-        topbar = QtWidgets.QFrame(objectName="topbar")
-        top_layout = QtWidgets.QVBoxLayout(topbar)
-        top_layout.setContentsMargins(18, 14, 18, 14)
-        title_row = QtWidgets.QHBoxLayout()
-        title_box = QtWidgets.QVBoxLayout()
-        brand = QtWidgets.QLabel("Enhanced Living Care Notebook", objectName="brand")
-        subtitle = QtWidgets.QLabel("Resident information viewer and approval-note channel", objectName="subtitle")
-        title_box.addWidget(brand)
-        title_box.addWidget(subtitle)
-        title_row.addLayout(title_box)
-        title_row.addStretch(1)
-        title_row.addWidget(QtWidgets.QLabel(f"Client v{CLIENT_VERSION}", objectName="muted"))
-        top_layout.addLayout(title_row)
+        connection = ttk.Frame(header, style="Card.TFrame")
+        connection.pack(fill="x", pady=(14, 0))
+        ttk.Label(connection, text="Notebook API", background="#ffffff").pack(side="left", padx=(0, 7))
+        self.base_url = ttk.Entry(connection)
+        self.base_url.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        ttk.Label(connection, text="API key", background="#ffffff").pack(side="left", padx=(0, 7))
+        self.api_key = ttk.Entry(connection, show="*")
+        self.api_key.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.connect_button = ttk.Button(connection, text="Connect", style="Primary.TButton", command=self.connect)
+        self.connect_button.pack(side="left")
 
-        connection_row = QtWidgets.QHBoxLayout()
-        connection_row.addWidget(QtWidgets.QLabel("Notebook API"))
-        self.base_url_edit = QtWidgets.QLineEdit()
-        self.base_url_edit.setPlaceholderText("https://your-notebook-address")
-        connection_row.addWidget(self.base_url_edit, 3)
-        connection_row.addWidget(QtWidgets.QLabel("API key"))
-        self.api_key_edit = QtWidgets.QLineEdit()
-        self.api_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self.api_key_edit.setPlaceholderText("wwnb_...")
-        connection_row.addWidget(self.api_key_edit, 2)
-        self.connect_button = QtWidgets.QPushButton("Connect")
-        self.connect_button.setObjectName("primary")
-        self.connect_button.clicked.connect(self.connect_api)
-        connection_row.addWidget(self.connect_button)
-        top_layout.addLayout(connection_row)
-        outer.addWidget(topbar)
+        self.status = ttk.Label(outer, text="", style="Status.TLabel")
+        self.status.pack(fill="x", pady=(0, 10))
 
-        self.status_label = QtWidgets.QLabel()
-        self.status_label.setWordWrap(True)
-        self.status_label.setObjectName("muted")
-        outer.addWidget(self.status_label)
+        pane = ttk.PanedWindow(outer, orient="horizontal")
+        pane.pack(fill="both", expand=True)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        outer.addWidget(splitter, 1)
+        left = ttk.Frame(pane, style="Card.TFrame", padding=14)
+        right = ttk.Frame(pane, style="Card.TFrame", padding=16)
+        pane.add(left, weight=1)
+        pane.add(right, weight=2)
 
-        left_card = QtWidgets.QFrame(objectName="card")
-        left_layout = QtWidgets.QVBoxLayout(left_card)
-        left_layout.setContentsMargins(14, 14, 14, 14)
-        left_layout.addWidget(QtWidgets.QLabel("Residents", objectName="section"))
-        search_row = QtWidgets.QHBoxLayout()
-        self.search_edit = QtWidgets.QLineEdit()
-        self.search_edit.setPlaceholderText("Search name, room, or resident UID")
-        self.search_edit.textChanged.connect(self._filter_residents)
-        search_row.addWidget(self.search_edit)
-        self.refresh_button = QtWidgets.QPushButton("Refresh")
-        self.refresh_button.clicked.connect(self.refresh_residents)
-        search_row.addWidget(self.refresh_button)
-        left_layout.addLayout(search_row)
-        self.resident_list = QtWidgets.QListWidget()
-        self.resident_list.currentRowChanged.connect(self._select_resident)
-        left_layout.addWidget(self.resident_list, 1)
-        self.resident_count_label = QtWidgets.QLabel("No residents loaded", objectName="muted")
-        left_layout.addWidget(self.resident_count_label)
-        splitter.addWidget(left_card)
+        ttk.Label(left, text="Residents", style="Section.TLabel").pack(anchor="w")
+        search_row = ttk.Frame(left, style="Card.TFrame")
+        search_row.pack(fill="x", pady=(10, 8))
+        self.search = ttk.Entry(search_row)
+        self.search.pack(side="left", fill="x", expand=True)
+        self.search.insert(0, "Search name, room, or UID")
+        self.search.configure(foreground="#64748b")
+        self.search.bind("<FocusIn>", self._clear_search_hint)
+        self.search.bind("<KeyRelease>", lambda _event: self.filter_residents())
+        ttk.Button(search_row, text="Refresh", command=self.refresh).pack(side="left", padx=(7, 0))
+        list_frame = ttk.Frame(left, style="Card.TFrame")
+        list_frame.pack(fill="both", expand=True)
+        self.listbox = tk.Listbox(list_frame, activestyle="none", selectmode="browse", font=("Segoe UI", 10), bg="#ffffff", fg="#172033", selectbackground="#fff0c4", selectforeground="#172033", relief="solid", borderwidth=1, highlightthickness=0)
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.listbox.bind("<<ListboxSelect>>", self.select_resident)
+        self.count_label = ttk.Label(left, text="No residents loaded", style="Muted.TLabel")
+        self.count_label.pack(anchor="w", pady=(8, 0))
 
-        right_card = QtWidgets.QFrame(objectName="card")
-        right_layout = QtWidgets.QVBoxLayout(right_card)
-        right_layout.setContentsMargins(18, 16, 18, 16)
-        heading_row = QtWidgets.QHBoxLayout()
-        self.resident_heading = QtWidgets.QLabel("Select a resident", objectName="section")
-        heading_row.addWidget(self.resident_heading)
-        heading_row.addStretch(1)
-        self.updated_label = QtWidgets.QLabel("", objectName="muted")
-        heading_row.addWidget(self.updated_label)
-        right_layout.addLayout(heading_row)
+        heading = ttk.Frame(right, style="Card.TFrame")
+        heading.pack(fill="x")
+        self.resident_heading = ttk.Label(heading, text="Select a resident", style="Section.TLabel")
+        self.resident_heading.pack(side="left")
+        self.updated = ttk.Label(heading, text="", style="Muted.TLabel")
+        self.updated.pack(side="right")
 
-        details = QtWidgets.QGridLayout()
-        details.setHorizontalSpacing(22)
-        details.setVerticalSpacing(10)
-        self.detail_labels: dict[str, QtWidgets.QLabel] = {}
-        detail_fields = [
-            ("resident_uid", "Resident UID"), ("room", "Room"),
-            ("diet", "Diet"), ("texture", "Texture"),
-            ("fluids", "Fluids"), ("drinks", "Drinks"),
-            ("note", "Care note"), ("safety_review", "Safety review"),
-            ("attachments", "Attachments"),
-        ]
-        for index, (key, label_text) in enumerate(detail_fields):
-            row, col = divmod(index, 2)
-            label = QtWidgets.QLabel(label_text + "\nNot provided")
-            label.setWordWrap(True)
-            label.setObjectName("muted")
-            self.detail_labels[key] = label
-            details.addWidget(label, row, col)
-        right_layout.addLayout(details)
-        right_layout.addSpacing(8)
+        detail_frame = ttk.Frame(right, style="Card.TFrame")
+        detail_frame.pack(fill="x", pady=(16, 8))
+        self.detail_vars: dict[str, tk.StringVar] = {}
+        fields = [("resident_uid", "Resident UID"), ("room", "Room"), ("diet", "Diet"), ("texture", "Texture"), ("fluids", "Fluids"), ("drinks", "Drinks"), ("note", "Care note"), ("safety", "Safety review"), ("attachments", "Attachments")]
+        for index, (key, caption) in enumerate(fields):
+            row, column = divmod(index, 2)
+            detail = ttk.Frame(detail_frame, style="Card.TFrame")
+            detail.grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 14, 12), pady=(0, 10))
+            detail_frame.columnconfigure(column, weight=1)
+            ttk.Label(detail, text=caption, style="Muted.TLabel").pack(anchor="w")
+            var = tk.StringVar(value="Not provided")
+            self.detail_vars[key] = var
+            ttk.Label(detail, textvariable=var, style="Section.TLabel", wraplength=320).pack(anchor="w", pady=(2, 0))
 
-        right_layout.addWidget(QtWidgets.QLabel("Add a note for nurse/admin approval", objectName="section"))
-        note_hint = QtWidgets.QLabel("Notes are submitted as pending requests. They do not change the resident record directly.", objectName="muted")
-        note_hint.setWordWrap(True)
-        right_layout.addWidget(note_hint)
-        self.note_edit = QtWidgets.QTextEdit()
-        self.note_edit.setPlaceholderText("Describe what happened or what should be reviewed...")
-        self.note_edit.setMaximumHeight(130)
-        right_layout.addWidget(self.note_edit)
-        note_actions = QtWidgets.QHBoxLayout()
-        self.submit_note_button = QtWidgets.QPushButton("Send for approval")
-        self.submit_note_button.setObjectName("primary")
-        self.submit_note_button.setEnabled(False)
-        self.submit_note_button.clicked.connect(self.submit_note)
-        note_actions.addWidget(self.submit_note_button)
-        self.requests_button = QtWidgets.QPushButton("View my requests")
-        self.requests_button.clicked.connect(self.load_requests)
-        note_actions.addWidget(self.requests_button)
-        note_actions.addStretch(1)
-        right_layout.addLayout(note_actions)
-        splitter.addWidget(right_card)
-        splitter.setSizes([340, 700])
+        ttk.Label(right, text="Add a note for nurse/admin approval", style="Section.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(right, text="Notes are submitted as pending requests. They do not change the resident record directly.", style="Muted.TLabel", wraplength=700).pack(anchor="w", pady=(3, 7))
+        self.note = tk.Text(right, height=5, wrap="word", font=("Segoe UI", 10), relief="solid", borderwidth=1, padx=7, pady=7)
+        self.note.pack(fill="x")
+        actions = ttk.Frame(right, style="Card.TFrame")
+        actions.pack(fill="x", pady=(8, 0))
+        self.submit_button = ttk.Button(actions, text="Send for approval", style="Primary.TButton", command=self.submit_note, state="disabled")
+        self.submit_button.pack(side="left")
+        ttk.Button(actions, text="View my requests", command=self.load_requests).pack(side="left", padx=(8, 0))
 
-        self.setCentralWidget(central)
+    def _clear_search_hint(self, _event: Any) -> None:
+        if self.search.get() == "Search name, room, or UID":
+            self.search.delete(0, "end")
+            self.search.configure(foreground="#172033")
 
     def _load_settings(self) -> None:
-        self.base_url_edit.setText(os.getenv("NOTEBOOK_API_BASE_URL", DEFAULT_BASE_URL))
+        self.base_url.insert(0, os.getenv("NOTEBOOK_API_BASE_URL", DEFAULT_BASE_URL))
         try:
-            data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-            if data.get("base_url"):
-                self.base_url_edit.setText(str(data["base_url"]))
+            saved = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if saved.get("base_url"):
+                self.base_url.delete(0, "end")
+                self.base_url.insert(0, str(saved["base_url"]))
         except (OSError, ValueError):
             pass
 
     def _save_settings(self) -> None:
         try:
             APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-            SETTINGS_PATH.write_text(json.dumps({"base_url": self.base_url_edit.text().strip()}, indent=2), encoding="utf-8")
+            SETTINGS_PATH.write_text(json.dumps({"base_url": self.base_url.get().strip()}, indent=2), encoding="utf-8")
         except OSError:
             pass
 
-    def _set_status(self, text: str, kind: str = "info") -> None:
-        color = {"ok": "#166534", "error": "#b42318", "working": "#9a6700"}.get(kind, "#64748b")
-        self.status_label.setStyleSheet(f"color: {color}; padding: 2px 4px;")
-        self.status_label.setText(text)
+    def set_status(self, text: str, kind: str = "info") -> None:
+        colors = {"ok": "#166534", "error": "#b42318", "working": "#9a6700", "info": "#64748b"}
+        self.status.configure(text=text, foreground=colors.get(kind, colors["info"]))
 
-    def _api(self) -> NotebookApi:
-        return NotebookApi(self.base_url_edit.text(), self.api_key_edit.text())
+    def api(self) -> NotebookApi:
+        return NotebookApi(self.base_url.get(), self.api_key.get())
 
-    def _run_async(self, operation: Any, on_success: Any) -> None:
-        self._set_status("Working...", "working")
-        self.connect_button.setEnabled(False)
-        self.refresh_button.setEnabled(False)
-        self.submit_note_button.setEnabled(False)
-        self.thread = QtCore.QThread(self)
-        self.worker = ApiWorker(operation)
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.finished.connect(self._finish_worker)
-        self.worker.finished.connect(on_success)
-        self.worker.failed.connect(self._finish_worker)
-        self.worker.failed.connect(self._worker_failed)
-        self.thread.start()
+    def run_async(self, operation: Callable[[], Any], on_success: Callable[[Any], None]) -> None:
+        if self.busy:
+            return
+        self.busy = True
+        self.connect_button.configure(state="disabled")
+        self.submit_button.configure(state="disabled")
+        self.set_status("Working...", "working")
 
-    @QtCore.pyqtSlot()
-    def _finish_worker(self) -> None:
-        if self.thread:
-            self.thread.quit()
-            self.thread.wait(3000)
-        self.thread = None
-        self.worker = None
-        self.connect_button.setEnabled(True)
-        self.refresh_button.setEnabled(True)
-        self.submit_note_button.setEnabled(bool(self.selected_resident))
+        def task() -> None:
+            try:
+                result = operation()
+                self.root.after(0, lambda: self.finish_async(lambda: on_success(result)))
+            except Exception as exc:
+                self.root.after(0, lambda: self.finish_async(lambda: self.show_error(str(exc))))
 
-    @QtCore.pyqtSlot(str)
-    def _worker_failed(self, message: str) -> None:
-        self._set_status(message, "error")
-        QtWidgets.QMessageBox.warning(self, "Notebook connection", message)
+        threading.Thread(target=task, daemon=True).start()
 
-    def connect_api(self) -> None:
+    def finish_async(self, callback: Callable[[], None]) -> None:
+        self.busy = False
+        self.connect_button.configure(state="normal")
+        self.submit_button.configure(state="normal" if self.selected_resident else "disabled")
+        callback()
+
+    def show_error(self, text: str) -> None:
+        self.set_status(text, "error")
+        messagebox.showerror("Notebook connection", text, parent=self.root)
+
+    def connect(self) -> None:
         self._save_settings()
-        self._run_async(lambda: self._api().health(), self._connected)
+        self.run_async(lambda: self.api().health(), self.connected)
 
-    def _connected(self, payload: dict[str, Any]) -> None:
-        label = payload.get("label") or "notebook"
-        self._set_status(f"Connected to {label}. Loading residents...", "ok")
-        self.refresh_residents()
+    def connected(self, payload: dict[str, Any]) -> None:
+        self.set_status(f"Connected to {payload.get('label') or 'notebook'}. Loading residents...", "ok")
+        self.refresh()
 
-    def refresh_residents(self) -> None:
-        self._run_async(lambda: self._api().residents(), self._residents_loaded)
+    def refresh(self) -> None:
+        self.run_async(lambda: self.api().residents(), self.residents_loaded)
 
-    def _residents_loaded(self, residents: list[dict[str, Any]]) -> None:
+    def residents_loaded(self, residents: list[dict[str, Any]]) -> None:
         self.residents_data = residents
-        self._filter_residents()
-        self._set_status(f"Connected. {len(residents)} active resident(s) available.", "ok")
+        self.filter_residents()
+        self.set_status(f"Connected. {len(residents)} active resident(s) available.", "ok")
 
-    def _filter_residents(self) -> None:
-        query = self.search_edit.text().strip().lower()
-        self.resident_list.blockSignals(True)
-        self.resident_list.clear()
-        visible: list[dict[str, Any]] = []
+    def filter_residents(self) -> None:
+        query = self.search.get().strip().lower()
+        if query == "search name, room, or uid":
+            query = ""
+        self.visible_residents = []
+        self.listbox.delete(0, "end")
         for resident in self.residents_data:
             haystack = " ".join(str(resident.get(key) or "") for key in ("full_name", "room", "resident_uid")).lower()
             if query and query not in haystack:
                 continue
-            visible.append(resident)
-            label = f"{display_value(resident.get('full_name'), 'Unnamed resident')}  |  Room {display_value(resident.get('room'), '-') }"
-            self.resident_list.addItem(label)
-        self.resident_list.blockSignals(False)
-        self.resident_count_label.setText(f"{len(visible)} of {len(self.residents_data)} resident(s)")
-        self._visible_residents = visible
-        if visible:
-            self.resident_list.setCurrentRow(0)
+            self.visible_residents.append(resident)
+            self.listbox.insert("end", f"{value(resident.get('full_name'), 'Unnamed resident')}  |  Room {value(resident.get('room'), '-')}" )
+        self.count_label.configure(text=f"{len(self.visible_residents)} of {len(self.residents_data)} resident(s)")
+        if self.visible_residents:
+            self.listbox.selection_set(0)
+            self.select_resident()
         else:
-            self._clear_details()
-
-    def _select_resident(self, row: int) -> None:
-        if row < 0 or row >= len(getattr(self, "_visible_residents", [])):
             self.selected_resident = None
-            self._clear_details()
+            self.clear_details()
+
+    def select_resident(self, _event: Any = None) -> None:
+        selection = self.listbox.curselection()
+        if not selection or selection[0] >= len(self.visible_residents):
             return
-        resident = self._visible_residents[row]
-        self.selected_resident = resident
-        self._show_details(resident)
-        self.submit_note_button.setEnabled(True)
-        resident_id = resident.get("id")
-        if resident_id:
-            self._run_async(lambda: self._api().resident(int(resident_id)), self._detail_loaded)
+        self.selected_resident = self.visible_residents[selection[0]]
+        self.show_details(self.selected_resident)
+        self.submit_button.configure(state="normal" if not self.busy else "disabled")
 
-    def _detail_loaded(self, resident: dict[str, Any]) -> None:
-        if self.selected_resident and resident.get("id") == self.selected_resident.get("id"):
-            self.selected_resident = resident
-            self._show_details(resident)
-            self.submit_note_button.setEnabled(True)
-
-    def _show_details(self, resident: dict[str, Any]) -> None:
-        self.resident_heading.setText(display_value(resident.get("full_name"), "Unnamed resident"))
-        self.updated_label.setText(f"Updated: {display_value(resident.get('updated_at'), 'Unknown')}")
-        self.detail_labels["resident_uid"].setText(f"Resident UID\n{display_value(resident.get('resident_uid'))}")
-        self.detail_labels["room"].setText(f"Room\n{display_value(resident.get('room'))}")
-        self.detail_labels["diet"].setText(f"Diet\n{display_value(resident.get('diet'))}")
-        self.detail_labels["texture"].setText(f"Texture\n{display_value(resident.get('texture'))}")
-        self.detail_labels["fluids"].setText(f"Fluids\n{display_value(resident.get('fluids'))}")
-        self.detail_labels["drinks"].setText(f"Drinks\n{display_value(resident.get('drinks'))}")
-        self.detail_labels["note"].setText(f"Care note\n{display_value(resident.get('note'))}")
-        safety = "Review required" if resident.get("safety_review_flag") else "No review flagged"
-        self.detail_labels["safety_review"].setText(f"Safety review\n{safety}")
+    def show_details(self, resident: dict[str, Any]) -> None:
+        self.resident_heading.configure(text=value(resident.get("full_name"), "Unnamed resident"))
+        self.updated.configure(text=f"Updated: {value(resident.get('updated_at'), 'Unknown')}")
+        for key in ("resident_uid", "room", "diet", "texture", "fluids", "drinks", "note"):
+            self.detail_vars[key].set(value(resident.get(key)))
+        self.detail_vars["safety"].set("Review required" if resident.get("safety_review_flag") else "No review flagged")
         attachments = []
         if resident.get("source_document_name"):
             attachments.append("source document")
         if resident.get("image_name"):
             attachments.append("resident image")
-        self.detail_labels["attachments"].setText(f"Attachments\n{', '.join(attachments) if attachments else 'None attached'}")
+        self.detail_vars["attachments"].set(", ".join(attachments) if attachments else "None attached")
 
-    def _clear_details(self) -> None:
-        self.resident_heading.setText("Select a resident")
-        self.updated_label.setText("")
-        for key, label in self.detail_labels.items():
-            title = label.text().split("\n", 1)[0] if "\n" in label.text() else key.replace("_", " ").title()
-            label.setText(f"{title}\nNot provided")
-        self.submit_note_button.setEnabled(False)
+    def clear_details(self) -> None:
+        self.resident_heading.configure(text="Select a resident")
+        self.updated.configure(text="")
+        for var in self.detail_vars.values():
+            var.set("Not provided")
+        self.submit_button.configure(state="disabled")
 
     def submit_note(self) -> None:
         if not self.selected_resident or not self.selected_resident.get("id"):
-            self._set_status("Select a resident before sending a note.", "error")
+            self.set_status("Select a resident before sending a note.", "error")
             return
-        comment = self.note_edit.toPlainText().strip()
+        comment = self.note.get("1.0", "end").strip()
         if not comment:
-            QtWidgets.QMessageBox.information(self, "Note required", "Write a note before sending it for approval.")
+            messagebox.showinfo("Note required", "Write a note before sending it for approval.", parent=self.root)
             return
         resident_id = int(self.selected_resident["id"])
-        self._run_async(lambda: self._api().submit_note(resident_id, comment), self._note_submitted)
+        self.run_async(lambda: self.api().submit_note(resident_id, comment), self.note_submitted)
 
-    def _note_submitted(self, payload: dict[str, Any]) -> None:
-        request = payload.get("request") or {}
-        request_id = request.get("id") or "pending"
-        self.note_edit.clear()
-        self._set_status(f"Note submitted for nurse/admin approval. Request #{request_id} is PENDING.", "ok")
-        QtWidgets.QMessageBox.information(self, "Note submitted", f"The note was sent for approval.\n\nRequest #{request_id} is now pending review.")
+    def note_submitted(self, payload: dict[str, Any]) -> None:
+        request_id = (payload.get("request") or {}).get("id") or "pending"
+        self.note.delete("1.0", "end")
+        self.set_status(f"Note submitted for nurse/admin approval. Request #{request_id} is PENDING.", "ok")
+        messagebox.showinfo("Note submitted", f"The note was sent for approval.\n\nRequest #{request_id} is now pending review.", parent=self.root)
 
     def load_requests(self) -> None:
-        self._run_async(lambda: self._api().requests(), self._requests_loaded)
+        self.run_async(lambda: self.api().requests(), self.requests_loaded)
 
-    def _requests_loaded(self, rows: list[dict[str, Any]]) -> None:
+    def requests_loaded(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
-            QtWidgets.QMessageBox.information(self, "My requests", "No notes have been submitted by this notebook yet.")
+            messagebox.showinfo("My requests", "No notes have been submitted by this notebook yet.", parent=self.root)
             return
         lines = []
         for row in rows[:20]:
-            created = display_value(row.get("created_at"), "unknown time")
-            resident = display_value(row.get("full_name") or row.get("resident_uid"), "resident")
-            status = display_value(row.get("status"), "PENDING").upper()
-            comment = display_value(row.get("comment"), "")
-            lines.append(f"#{row.get('id', '?')}  {status}  {resident}\n{created}\n{comment}")
-        dialog = QtWidgets.QMessageBox(self)
-        dialog.setWindowTitle("My approval requests")
-        dialog.setText("\n\n".join(lines))
-        dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok)
-        dialog.exec()
+            lines.append(f"#{row.get('id', '?')}  {value(row.get('status'), 'PENDING').upper()}  {value(row.get('full_name') or row.get('resident_uid'), 'resident')}\n{value(row.get('created_at'), 'unknown time')}\n{value(row.get('comment'), '')}")
+        messagebox.showinfo("My approval requests", "\n\n".join(lines), parent=self.root)
 
 
 def main() -> int:
-    app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("Enhanced Living Care Notebook")
-    app.setApplicationVersion(CLIENT_VERSION)
-    window = CareNotebookWindow()
-    window.show()
-    return app.exec()
+    root = tk.Tk()
+    CareNotebookApp(root)
+    root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
